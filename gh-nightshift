@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# gh CLI extension entry point: `gh nightshift <command>`. Needs Python 3.11+ (stdlib only).
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+PY="${NIGHTSHIFT_PYTHON:-}"
+if [ -z "$PY" ]; then
+  for c in python3.13 python3.12 python3.11 python3; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then PY="$c"; break; fi
+  done
+fi
+if [ -z "$PY" ]; then echo "gh-nightshift needs Python 3.11 or newer (set NIGHTSHIFT_PYTHON)" >&2; exit 1; fi
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m nightshift "$@"

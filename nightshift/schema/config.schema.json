@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/paawandesai/gh-nightshift/blob/main/nightshift/schema/config.schema.json",
+  "title": "gh-nightshift config (.night-shift/config.yml)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "lanes"],
+  "properties": {
+    "version": {"type": "integer", "enum": [1]},
+    "main_branch": {"type": "string", "minLength": 1},
+    "ci_workflow": {"type": "string", "pattern": "^[A-Za-z0-9._-]+\\.ya?ml$", "description": "File name of the CI workflow whose runs on main gate every lane."},
+    "required_checks": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+    "fix_lane": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,30}$"},
+    "timezone": {"type": "string"},
+    "protected_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Added to the built-in list (.github/, .claude/, CLAUDE.md, AGENTS.md, .mcp.json, .night-shift/), never replacing it."},
+    "merge": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"mode": {"type": "string", "enum": ["strict", "queue"]}}
+    },
+    "labels": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "ready": {"type": "string"}, "blocked": {"type": "string"}, "needs_human": {"type": "string"},
+        "human": {"type": "string"}, "proposed": {"type": "string"}, "agent": {"type": "string"},
+        "in_progress": {"type": "string"}, "night_log": {"type": "string"}
+      }
+    },
+    "models": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "default": {"$ref": "#/$defs/model"}, "escalate": {"$ref": "#/$defs/model"},
+        "review": {"$ref": "#/$defs/model"}, "planner": {"$ref": "#/$defs/model"}
+      }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "max_attempts": {"type": "integer", "minimum": 1, "maximum": 10},
+        "infra_cap": {"type": "integer", "minimum": 1, "maximum": 30},
+        "stale_minutes": {"type": "integer", "minimum": 5},
+        "max_turns": {"type": "integer", "minimum": 5, "maximum": 500},
+        "max_needs_per_issue": {"type": "integer", "minimum": 0, "maximum": 5},
+        "max_notes_per_issue": {"type": "integer", "minimum": 0, "maximum": 5}
+      }
+    },
+    "planner": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "docs": {"type": "array", "items": {"type": "string"}},
+        "max_tickets_per_run": {"type": "integer", "minimum": 1, "maximum": 50},
+        "refill_below": {"type": "integer", "minimum": 0},
+        "id_prefixes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[A-Z]{1,4}$"}},
+        "human_paths": {"type": "array", "items": {"type": "string"}, "description": "Tickets touching these (e.g. contracts/) become human tickets."}
+      }
+    },
+    "lanes": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "claude_token_secret"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,30}$"},
+          "description": {"type": "string"},
+          "paths": {"type": "array", "items": {"type": "string"}},
+          "claude_token_secret": {"$ref": "#/$defs/secret"},
+          "agent_pat_secret": {"$ref": "#/$defs/secret"},
+          "model": {"$ref": "#/$defs/model"},
+          "escalate_model": {"$ref": "#/$defs/model"},
+          "test_command": {"type": "string"},
+          "postgres_image": {"type": "string", "description": "Start this Postgres image as a service in the lane's agent job (DATABASE_URL is set)."},
+          "setup": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "commands": {"type": ["string", "array"], "items": {"type": "string"}},
+              "action": {"type": "string", "pattern": "^\\./?[A-Za-z0-9._/-]+$", "description": "Local composite action directory, run only in this lane's agent job."}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "secret": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,99}$"},
+    "model": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$"}
+  }
+}

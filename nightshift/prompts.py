@@ -1,0 +1,77 @@
+"""Prompt templates and output schemas. A project overrides a prompt by committing
+`.night-shift/prompts/<name>.md` (worker, review, planner) on the default branch."""
+from __future__ import annotations
+
+import json
+from importlib import resources
+from pathlib import Path
+
+from .config import Config
+from .planner import PLAN_SCHEMA
+
+_STRS = {"type": "array", "items": {"type": "string"}}
+WORKER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["done", "stuck", "waiting"]},
+        "summary": {"type": "string"},
+        "assumptions": _STRS,
+        "tests_passed": {"type": "boolean"},
+        "needs": {"type": "array", "maxItems": 2, "items": {"type": "object", "properties": {
+            "lane": {"type": "string"}, "title": {"type": "string"}, "goal": {"type": "string"},
+            "acceptance": _STRS, "interface": {"type": "string"}},
+            "required": ["lane", "title", "goal", "acceptance"]}},
+        "notes": {"type": "array", "maxItems": 2, "items": {"type": "object", "properties": {
+            "issue": {"type": "integer"}, "text": {"type": "string"}}, "required": ["issue", "text"]}},
+        "follow_ups": {"type": "array", "items": {"type": "object", "properties": {
+            "lane": {"type": "string"}, "title": {"type": "string"}, "goal": {"type": "string"},
+            "acceptance": _STRS}, "required": ["title", "goal"]}},
+        "handoff": {"type": "object", "properties": {
+            "files": _STRS, "interfaces": _STRS, "env_vars": _STRS, "decisions": _STRS, "assumptions": _STRS,
+            "interface_differences": {"type": "string"}}},
+    },
+    "required": ["status", "summary", "assumptions", "tests_passed"],
+}
+
+REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "fail"]},
+        "answers": {"type": "array", "items": {"type": "object", "properties": {
+            "question": {"type": "string"}, "answer": {"type": "string", "enum": ["yes", "no"]},
+            "evidence": {"type": "string"}}, "required": ["question", "answer", "evidence"]}},
+        "fixes": {"type": "string"},
+        "main_changed_overlap": {"type": "boolean"},
+        "still_correct_against_main": {"type": "string"},
+    },
+    "required": ["verdict", "answers", "main_changed_overlap"],
+}
+
+SCHEMAS = {"worker": WORKER_SCHEMA, "review": REVIEW_SCHEMA, "planner": PLAN_SCHEMA}
+
+
+def template(name: str, root: str | Path = ".") -> str:
+    override = Path(root) / ".night-shift" / "prompts" / f"{name}.md"
+    if override.is_file():
+        return override.read_text(encoding="utf-8")
+    return resources.files("nightshift").joinpath("prompts", f"{name}.md").read_text(encoding="utf-8")
+
+
+def render(name: str, values: dict[str, str], root: str | Path = ".") -> str:
+    text = template(name, root)
+    for key, value in values.items():
+        text = text.replace(f"__{key}__", value)
+    return text
+
+
+def worker_values(cfg: Config, lane: str, task_file: str) -> dict[str, str]:
+    ln = cfg.lane(lane)
+    return {"LANE": lane, "TASK_FILE": task_file,
+            "LANE_PATHS": ", ".join(f"`{p}`" for p in ln.paths) or "(not listed; infer from the ticket)",
+            "TEST_COMMAND": ln.test_command or "see CLAUDE.md",
+            "PROTECTED": ", ".join(f"`{p}`" for p in cfg.protected_paths) or "(none)",
+            "LANES": ", ".join(f"`{x.name}`" + (f" ({', '.join(x.paths)})" if x.paths else "") for x in cfg.lanes)}
+
+
+def schema_json(name: str) -> str:
+    return json.dumps(SCHEMAS[name], separators=(",", ":"))

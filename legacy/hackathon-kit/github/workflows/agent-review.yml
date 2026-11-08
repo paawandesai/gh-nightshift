@@ -1,0 +1,112 @@
+# Independent review gate for agent PRs (branches starting with agent/).
+# A separate Claude run, with read-only tools, answers one yes/no question per failure type.
+# The `verdict` job fails on a "fail" verdict, which blocks auto-merge; the picker then closes the PR
+# and the issue goes back in the queue with the review findings in its comments.
+#
+# Trust boundary: the prompt and the reviewer's working directory (CLAUDE.md, .claude/) come from the
+# base branch. The PR's code is only mounted as read-only material to inspect.
+# Needs secret CLAUDE_TOKEN_REVIEW. Make `verdict` a required status check (.github/night-shift/setup_repo.sh does).
+
+name: agent-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verdict:
+    if: startsWith(github.head_ref, 'agent/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_REF: ${{ github.head_ref }}
+      BASE_REF: ${{ github.base_ref }}
+    steps:
+      - name: Check out base (trusted)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - name: Check out PR head (under review)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Gather ticket and diff
+        id: gather
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/review"; mkdir -p "$WORK"
+          git -C pr diff "origin/$BASE_REF...HEAD" > "$WORK/diff.patch"
+          ISSUE="$(echo "$HEAD_REF" | sed -n 's|^agent/[^/]*/issue-\([0-9]*\)$|\1|p')"
+          if [ -n "$ISSUE" ]; then
+            gh issue view "$ISSUE" -R "$REPO" --json number,title,body \
+              --jq '"# Issue #\(.number): \(.title)\n\n\(.body)"' > "$WORK/issue.md"
+          else
+            echo "No linked issue: this PR fixes failing CI on main." > "$WORK/issue.md"
+          fi
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+
+      - name: Review
+        id: review
+        working-directory: base
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_TOKEN_REVIEW }}
+          # The gate is the last check before main, so it gets the strong model by default.
+          REVIEW_MODEL: ${{ vars.REVIEW_MODEL || 'opus' }}
+        run: |
+          set -uo pipefail
+          WORK="$RUNNER_TEMP/review"; PR_DIR="$GITHUB_WORKSPACE/pr"
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::Secret CLAUDE_TOKEN_REVIEW is empty"; exit 1; fi
+          PROMPT="$(sed -e "s|__ISSUE_FILE__|$WORK/issue.md|g" -e "s|__DIFF_FILE__|$WORK/diff.patch|g" \
+            -e "s|__PR_DIR__|$PR_DIR|g" .github/night-shift/review-prompt.md)"
+          SCHEMA='{"type":"object","properties":{"verdict":{"type":"string","enum":["pass","fail"]},"answers":{"type":"array","items":{"type":"object","properties":{"question":{"type":"string"},"answer":{"type":"string","enum":["yes","no"]},"evidence":{"type":"string"}},"required":["question","answer","evidence"]}},"fixes":{"type":"string"}},"required":["verdict","answers"]}'
+          # Read-only: in -p runs, any tool not allowed here is denied.
+          claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" --max-turns 30 --model "$REVIEW_MODEL" \
+            --add-dir "$WORK" "$PR_DIR" --allowedTools "Read,Grep,Glob" > "$WORK/review.json" 2> "$WORK/review.stderr"
+          echo "claude exit code: $?"
+          VERDICT="$(jq -r '.structured_output.verdict // "error"' "$WORK/review.json" 2>/dev/null || echo error)"
+          jq -r '
+            "### Night-shift review: **\(.structured_output.verdict // "error")**\n\n" +
+            ([.structured_output.answers[]? | "- \(if .answer == "yes" then "✅" else "❌" end) **\(.question)**: \(.evidence)"] | join("\n")) +
+            (if .structured_output.fixes then "\n\n**Fixes needed:** \(.structured_output.fixes)" else "" end)
+          ' "$WORK/review.json" > "$WORK/comment.md" 2>/dev/null || echo "Review run failed to produce a verdict; see the job log." > "$WORK/comment.md"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+      - name: Post review and set verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERDICT: ${{ steps.review.outputs.verdict }}
+          ISSUE: ${{ steps.gather.outputs.issue }}
+        run: |
+          set -uo pipefail
+          WORK="$RUNNER_TEMP/review"
+          gh pr comment "$PR" -R "$REPO" --body-file "$WORK/comment.md" || true
+          if [ "$VERDICT" = "error" ]; then
+            # The reviewer itself broke (expired token, usage limit). Label it so the picker
+            # closes the PR without counting the attempt against the issue.
+            gh pr edit "$PR" -R "$REPO" --add-label review-error || true
+            echo "::error::Review run failed (not a verdict on the code)"; exit 1
+          fi
+          if [ "$VERDICT" != "pass" ] && [ -n "$ISSUE" ]; then
+            # Put the findings on the issue too, so the next attempt reads them.
+            gh issue comment "$ISSUE" -R "$REPO" --body-file "$WORK/comment.md" || true
+          fi
+          if [ "$VERDICT" != "pass" ]; then echo "::error::Review verdict: $VERDICT"; exit 1; fi

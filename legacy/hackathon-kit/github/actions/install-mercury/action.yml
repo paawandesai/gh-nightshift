@@ -1,0 +1,38 @@
+# Installs the Mercury toolchain and mercury_json. Shared by ci.yml and the engine agent job.
+# Afterwards `mmc` is on PATH and $MERCURY_JSON_SRC holds mercury_json's .m files.
+name: Install Mercury
+description: Install Mercury 22.01.8 (hlc.gc grade) from this repo's release mirror, plus mercury_json
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/mercury-debs-22.01.8
+        # Tip of mercury_json's mercury_22_01 branch; master targets newer compilers.
+        MERCURY_JSON_SHA: 709853063027bc7a8400f205c098bdd5f6c169f9
+      run: |
+        set -euo pipefail
+        # Upstream's apt repo is unusable: its signing key expired 2026-07-15
+        # (Mercury-Language/packaging#15). The mirror holds the same .debs. These hashes come from
+        # that repo's Packages index, whose InRelease signature (made 2024-07-18, key
+        # B86D5D56...BDF4EAD2) verifies. See docs/DECISIONS.md.
+        mkdir "$RUNNER_TEMP/mercury-debs"
+        cd "$RUNNER_TEMP/mercury-debs"
+        for p in gc gc-dev devel tools hlc hlc-dev; do
+          curl -fsSL --retry 3 "$RELEASE_URL/mercury-$p.deb" -o "mercury-$p.deb"
+        done
+        sha256sum -c - <<'SUMS'
+        c7ed9b955a354310d3cf1fa2631d9d29fe46043fbefcf51cf42bdf8cc698a6e2  mercury-gc.deb
+        15536783f19d6514a427ad151ff7c3c0eea6565ac7b18da6bd683d37ce079c38  mercury-gc-dev.deb
+        7f952525f091d1255ace35ba096d8b2be665fd0eff6d7880445b42c7c56017c1  mercury-devel.deb
+        aa4bbbf753bfe12d4619c2a86ea9b6ae9ecd6f980b3797cc9e0a725cfb4afa2e  mercury-tools.deb
+        800ecf3607b288eaeac716ba50c034d31dcfd837adbd79dabf7b650ce9167534  mercury-hlc.deb
+        00cbadb18a4b3f8b2a0f3d82d543675d320e9bd03178c4ecc8c7e96ab7587468  mercury-hlc-dev.deb
+        SUMS
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends ./*.deb
+        mmc --version
+        git clone -q https://github.com/juliensf/mercury-json.git "$RUNNER_TEMP/mercury-json"
+        git -C "$RUNNER_TEMP/mercury-json" checkout -q "$MERCURY_JSON_SHA"
+        echo "MERCURY_JSON_SRC=$RUNNER_TEMP/mercury-json/src" >> "$GITHUB_ENV"
