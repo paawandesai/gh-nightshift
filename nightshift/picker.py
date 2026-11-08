@@ -55,7 +55,7 @@ class Runtime:
     escalate_model: str = ""
 
     @classmethod
-    def from_env(cls, lane: str, env: dict | None = None) -> "Runtime":
+    def from_env(cls, lane: str, env: dict | None = None) -> Runtime:
         env = dict(os.environ) if env is None else env
         return cls(lane=lane,
                    enabled=(env.get("AGENTS_ENABLED") or "").strip().lower() == "true",

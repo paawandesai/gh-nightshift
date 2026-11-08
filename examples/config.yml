@@ -1,0 +1,47 @@
+# Example .night-shift/config.yml for a repo with an API and a web app.
+version: 1
+main_branch: main
+ci_workflow: ci.yml            # its runs on main gate every lane
+required_checks: [test, "review / verdict"]
+fix_lane: api                  # the only lane that works while main is red
+tool_ref: main                 # pin a tag or SHA once v0.1.0 is released
+merge:
+  mode: strict                 # strict: PRs must be up to date with main; queue: GitHub merge queue
+protected_paths: [contracts/]  # added to .github/, .claude/, CLAUDE.md, AGENTS.md, .mcp.json, .night-shift/
+models:
+  default: sonnet
+  escalate: opus
+  review: opus
+  planner: opus
+limits:
+  max_attempts: 3
+  infra_cap: 6
+  stale_minutes: 45
+  max_turns: 80
+  max_needs_per_issue: 2
+  max_notes_per_issue: 2
+planner:
+  docs: [docs/PRD.md]
+  max_tickets_per_run: 8
+  refill_below: 3              # auto-refill: run gap mode for a lane with fewer ready issues
+  id_prefixes: {api: A, web: W}
+  human_paths: [contracts/]
+lanes:
+  - name: api
+    description: REST API and database
+    paths: [api/]
+    claude_token_secret: CLAUDE_TOKEN_ALICE
+    model: sonnet
+    postgres_image: "postgres:16"
+    setup:
+      commands: |
+        python -m pip install -r api/requirements.txt
+    test_command: pytest api
+  - name: web
+    paths: [web/]
+    claude_token_secret: CLAUDE_TOKEN_BOB
+    agent_pat_secret: AGENT_PAT_BOB   # optional: PRs credited to Bob; falls back to AGENT_PAT
+    setup:
+      commands: [cd web && npm ci]
+      action: .night-shift/actions/web-setup
+    test_command: cd web && npm test

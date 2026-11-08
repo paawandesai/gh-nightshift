@@ -2,8 +2,8 @@
 
 Supported: block mappings and sequences by indentation, `- key: value` sequence items, comments,
 plain / 'single' / "double" quoted scalars, ints, floats, true/false, null/~, flow lists `[a, b]`,
-empty `{}` / `[]`, and `|` literal block scalars. Anything else (anchors, tags, multi-docs, flow
-mappings with content) is rejected with a line number rather than guessed at.
+flat flow mappings `{a: 1}`, empty `{}` / `[]`, and `|` literal block scalars. Anything else (anchors, tags, multi-docs, flow
+mappings) is rejected with a line number rather than guessed at.
 """
 from __future__ import annotations
 
@@ -85,7 +85,15 @@ def scalar(text: str, lineno: int = 0) -> Any:
             raise YAMLError(f"line {lineno}: unterminated flow list")
         return [scalar(x, lineno) for x in _split_flow(t[1:-1], lineno)]
     if t.startswith("{"):
-        raise YAMLError(f"line {lineno}: flow mappings are not supported; use block style")
+        if not t.endswith("}"):
+            raise YAMLError(f"line {lineno}: unterminated flow mapping")
+        out = {}
+        for item in _split_flow(t[1:-1], lineno):
+            m = _KEY.match(item)
+            if not m:
+                raise YAMLError(f"line {lineno}: expected 'key: value' inside {{...}}")
+            out[m.group(1).strip("'\"")] = scalar(m.group(2) or "", lineno)
+        return out
     if t in ("true", "True"):
         return True
     if t in ("false", "False"):

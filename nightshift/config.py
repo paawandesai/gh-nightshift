@@ -78,6 +78,11 @@ class Config:
     planner_refill_below: int = 0
     planner_id_prefixes: dict[str, str] = field(default_factory=dict)
     planner_human_paths: list[str] = field(default_factory=lambda: ["contracts/"])
+    planner_token_secret: str = ""
+    planner_schedule: str = "17 * * * *"
+    review_token_secret: str = "CLAUDE_TOKEN_REVIEW"
+    ci_workflow_name: str = ""
+    tool_ref: str = "main"
 
     # --- derived -----------------------------------------------------------------------
     @property
@@ -114,7 +119,7 @@ class Config:
         return self.planner_id_prefixes.get(lane) or lane[:1].upper()
 
     def secret_names(self) -> list[str]:
-        names = {"AGENT_PAT", "CLAUDE_TOKEN_REVIEW"}
+        names = {"AGENT_PAT", self.review_token_secret, self.planner_token_secret or self.lanes[0].token_secret}
         for lane in self.lanes:
             names.add(lane.token_secret)
             if lane.pat_secret:
@@ -172,6 +177,11 @@ def parse(data: dict) -> Config:
         planner_refill_below=planner.get("refill_below", 0),
         planner_id_prefixes=planner.get("id_prefixes", {}),
         planner_human_paths=planner.get("human_paths", ["contracts/"]),
+        planner_token_secret=planner.get("claude_token_secret", lanes[0].token_secret),
+        planner_schedule=planner.get("schedule", "17 * * * *"),
+        review_token_secret=data.get("review_token_secret", "CLAUDE_TOKEN_REVIEW"),
+        ci_workflow_name=data.get("ci_workflow_name", ""),
+        tool_ref=data.get("tool_ref", "main"),
     )
     if cfg.fix_lane and cfg.fix_lane not in names:
         raise ConfigError(f"fix_lane {cfg.fix_lane!r} is not a lane")

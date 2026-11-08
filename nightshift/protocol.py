@@ -18,6 +18,7 @@ Types
   handoff-data  in the body of a PR the PAT opened: the agent's `handoff` output, read at merge time
   handoff-done  on a merged PR once its hand-offs went out (idempotence)
   note-sent     on the sender issue, one per note, so the cap of notes per issue can be counted
+  plan          on the night-log issue after a planner run: {"mode","lane","complete","docs_sha"}
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ from typing import Any
 
 MARKER_RE = re.compile(r"<!--\s*ns:(\{.*?\})\s*-->", re.S)
 TYPES = {"attempt", "infra", "blocked", "waiting", "need", "handoff", "note", "pr", "handoff-done",
-         "handoff-data", "note-sent", "fix-attempt", "fix-infra"}
+         "handoff-data", "note-sent", "fix-attempt", "fix-infra", "plan"}
 PR_REASONS = ("verdict_passed", "verdict_failed", "checks_failed", "conflict", "stale", "superseded", "manual")
 
 # Markers written by the original hackathon kit; still counted so a repo can migrate mid-flight.

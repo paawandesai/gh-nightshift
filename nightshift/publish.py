@@ -18,7 +18,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 from zoneinfo import ZoneInfo
 
 from . import planner
@@ -214,6 +214,7 @@ def park_waiting(gh: GH, cfg: Config, job: Job, issue: dict, res: Result) -> str
             lines.append(f"need refused: {lane!r} is not another configured lane")
             continue
         ticket = planner.Ticket.from_need(need, lane, wave_of(issue) if wave_of(issue) != 999 else 0)
+        ticket.files = ticket.files or list(cfg.lane(lane).paths)  # a need names the lane, not the files
         existing = planner.find_duplicate(ticket.plain_title, gh.issues([f"lane:{lane}"]))
         if existing:
             provider, ready = existing["number"], cfg.ready_label in label_names(existing)

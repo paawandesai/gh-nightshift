@@ -102,7 +102,7 @@ class Ticket:
         return ANY_ID_RE.sub("", self.title).strip()
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "Ticket":
+    def from_dict(cls, raw: dict) -> Ticket:
         deps = []
         for d in raw.get("blocked_by") or []:
             if isinstance(d, int) or (isinstance(d, str) and re.fullmatch(r"#?\d+", d.strip())):
@@ -120,7 +120,7 @@ class Ticket:
                    blocked_by=deps, requirements=[str(x) for x in raw.get("requirements") or []])
 
     @classmethod
-    def from_need(cls, need: dict, lane: str, wave: int) -> "Ticket":
+    def from_need(cls, need: dict, lane: str, wave: int) -> Ticket:
         """A `needs` / `follow_ups` entry from a builder agent."""
         goal = str(need.get("goal") or need.get("detail") or "").strip()
         return cls(key="need", title=" ".join(str(need.get("title") or "").split())[:TITLE_MAX], lane=lane,
@@ -167,7 +167,7 @@ def check_ticket(t: Ticket, cfg: Config, depended_on: bool, existing: dict[int, 
             problems.append(f"Blocked by {dep!r} is not another ticket in this plan")
         if isinstance(dep, int) and dep not in existing:
             problems.append(f"Blocked by #{dep} is not an existing issue")
-    human = any(path_is_protected(f.lstrip("./"), cfg.protected_paths + cfg.planner_human_paths) for f in t.files)
+    human = any(path_is_protected(f.removeprefix("./"), cfg.protected_paths + cfg.planner_human_paths) for f in t.files)
     return problems, human
 
 
@@ -278,14 +278,15 @@ def validate_plan(tickets: list[Ticket], cfg: Config, all_issues: list[dict],
         if not t.key or keys.count(t.key) > 1:
             why.append("missing or duplicate key")
         m = ANY_ID_RE.match(t.title)
-        if not m and t.lane in cfg.lane_names:
-            t.title = f"{next_id(all_issues, cfg.id_prefix(t.lane), taken_ids)} {t.title}"
-            taken_ids.add(t.title[1:].split("]")[0])
-        elif m:
+        if m:
             if m.group(1) + m.group(2) in taken_ids:
                 why.append(f"ID {m.group(1)}{m.group(2)} is already used")
             taken_ids.add(m.group(1) + m.group(2))
-        problems, human = check_ticket(t, cfg, t.key in depended, existing, set(keys))
+            probe = t
+        else:  # the ID is assigned when the issue is created, so rejected drafts never use one up
+            probe = Ticket(**{**t.__dict__, "title": f"[{cfg.id_prefix(t.lane) if t.lane in cfg.lane_names else 'X'}0] "
+                                                      f"{t.title}"})
+        problems, human = check_ticket(probe, cfg, t.key in depended, existing, set(keys))
         why += problems
         if find_duplicate(t.title, open_issues) or norm_title(t.title) in seen_titles:
             why.append("duplicate of an open issue")
@@ -326,7 +327,12 @@ def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tick
         order = order[:cap]  # a topological prefix, so every kept dependency is created first
     result = PlanResult(rejected=notes, notes=plan_notes)
     numbers: dict[str, int] = {}
+    taken = {m.group(1) + m.group(2) for t, _ in order if (m := ANY_ID_RE.match(t.title))}
     for t, human in order:
+        if not ANY_ID_RE.match(t.title):
+            new_id = next_id(all_issues, cfg.id_prefix(t.lane), taken)
+            taken.add(new_id[1:-1])
+            t.title = f"{new_id} {t.title}"
         labels = [f"lane:{t.lane}", f"wave:{t.wave}", cfg.label("human") if human else cfg.ready_label]
         created = gh.create_issue(t.title, render(t, numbers), labels)
         numbers[t.key] = created.get("number", 0)

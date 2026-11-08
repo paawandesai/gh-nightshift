@@ -13,7 +13,8 @@ import shlex
 import subprocess
 import sys
 import urllib.parse
-from typing import Any, Callable, TextIO
+from typing import Any, TextIO
+from collections.abc import Callable
 
 Transport = Callable[[str, str, Any], Any]
 
