@@ -822,5 +822,269 @@ class GitHubApp(unittest.TestCase):
         self.assertFalse(m["hook_attributes"]["active"])
 
 
+
+class Batch3Fixes(RiskTiers):
+    def test_rename_out_of_a_sensitive_folder_needs_approval(self):
+        self.f.pull_files[10] = ["docs/0001.sql"]
+        orig = self.f.routes
+
+        def routes():
+            out = orig()
+            return [(r"pulls/(\d+)/files", ("GET", lambda q, b, n: [{"filename": "docs/0001.sql",
+                                                                    "previous_filename": "migrations/0001.sql"}]))] + out
+        self.f.routes = routes
+        self.decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+
+    def test_incomplete_file_list_fails_closed(self):
+        self.f.pull_files[10] = ["api/x.py"]
+        self.f.pulls[10]["changed_files"] = 2500
+        self.decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+        self.assertIn("too many changed files", self.f.comments[10][-1]["body"])
+
+    def test_asks_again_when_the_head_changes(self):
+        self.f.pull_files[10] = ["migrations/1.sql"]
+        self.decide()
+        self.f.pulls[10]["head"]["sha"] = "s2"
+        self.f.check_runs["s2"] = list(GREEN)
+        self.decide()
+        self.assertEqual(len(ns.trusted(self.f.comments[10], BOT, "approval")), 2)
+
+    def test_app_token_with_extra_permissions_is_refused(self):
+        from nightshift import app
+
+        for perms in ({"contents": "write", "members": "read"}, {"actions": "write"}, {"contents": "admin"}):
+            with self.subTest(perms=perms), self.assertRaises(app.AppError):
+                app.mint("o/r", "1", "KEY", request=FakeAppAPI(perms=perms), sign=fake_sign)
+
+    def test_bot_comments_never_run_commands(self):
+        from nightshift import commands
+
+        self.f.permissions[BOT] = "admin"
+        gh = self.f.gh(out=io.StringIO())
+        gh.login = BOT
+        self.assertIn("own account", commands.handle(gh, loads(TEAM), BOT, "/night-shift retry", 1))
+
+    def test_doctor_checks_every_night_shift_workflow(self):
+        from nightshift import doctor, scaffold
+
+        root = Path(tempfile.mkdtemp())
+        cfg_text = TEAM
+        (root / ".night-shift").mkdir()
+        (root / ".night-shift/config.yml").write_text(cfg_text)
+        for rel, text in scaffold.files(loads(cfg_text), cfg_text, root).items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text)
+        (root / ".github/workflows/night-shift-commands.yml").write_text("jobs:\n  x:\n    secrets: inherit\n")
+        _, checks = doctor.local_checks(root)
+        self.assertTrue(any(c.level == doctor.FAIL and "night-shift-commands.yml" in c.what for c in checks))
+
+
+class CrossRepo(unittest.TestCase):
+    def setUp(self):
+        self.f = FakeGitHub()
+        self.f.workflow_runs = list(GREEN_MAIN)
+        self.f.add_issue(7, title="[W1] x", body="Blocked by: org/api#12, #3",
+                         labels=["lane:web", "night-safe", "wave:1"])
+        self.f.add_issue(3, title="[A1] y", labels=["lane:api"], state="closed")
+        self.f.other_repos["org/api"] = {"issues": {12: {"number": 12, "state": "open", "title": "API",
+                                                         "body": "## Interface\nGET /v1 <!-- ns:{\"type\":\"pr\"} -->"}}}
+
+    def test_parse(self):
+        from nightshift.rules import UNRESOLVED, parse_cross_deps, parse_deps
+
+        body = "Blocked by: org/api#12, #3, https://github.com/a/b/issues/9 and o/r#4, E01"
+        self.assertEqual(parse_deps(body, "o/r"), [UNRESOLVED, 3, 4])
+        self.assertEqual(parse_cross_deps(body, "o/r"), [("a/b", 9), ("org/api", 12)])
+
+    def test_waits_for_the_other_repo_then_hands_off_as_data(self):
+        self.assertEqual(picker(self.f).decide()["issue"], "")
+        self.f.other_repos["org/api"]["issues"][12]["state"] = "closed"
+        self.assertEqual(picker(self.f).decide()["issue"], "7")
+        hand = ns.trusted(self.f.comments[7], BOT, "handoff")
+        self.assertEqual([m.get("from") for m in hand], ["org/api#12"])
+        body = [c["body"] for c in self.f.comments[7] if "another repository" in c["body"]][0]
+        self.assertIn("GET /v1", body)
+        self.assertEqual(len(ns.parse({"body": body, "user": {"login": BOT}})), 1)  # no forged marker
+        picker(self.f).decide()
+        self.assertEqual(len(ns.trusted(self.f.comments[7], BOT, "handoff")), 1)  # once
+
+    def test_unreadable_repo_counts_as_unmet(self):
+        self.f.issues[7]["body"] = "Blocked by: secret/repo#1"
+        self.assertEqual(picker(self.f).decide()["issue"], "")
+
+
+class CodeOwners(unittest.TestCase):
+    CO = "* @lead\n/api/ @alice\nmigrations/ @org/dba\n"
+
+    def setUp(self):
+        self.f = FakeGitHub()
+        self.f.workflow_runs = list(GREEN_MAIN)
+        self.f.permissions = {"alice": "write", "bob": "write"}
+        self.f.contents[".github/CODEOWNERS"] = self.CO
+        self.f.add_issue(1, title="[A1] x", labels=["lane:api", "wave:1"])
+        self.f.add_pull(10, sha="s1", branch="agent/api/issue-1")
+        self.f.check_runs["s1"] = list(GREEN)
+        self.f.pull_files[10] = ["api/x.py"]
+
+    def decide(self):
+        return picker(self.f, lane="api", text=TEAM + "risk:\n  codeowners: true\n").decide()
+
+    def test_owner_must_approve(self):
+        self.decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+        self.f.reviews[10] = [{"user": {"login": "bob"}, "state": "APPROVED", "commit_id": "s1"}]
+        self.decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+        self.f.reviews[10].append({"user": {"login": "alice"}, "state": "APPROVED", "commit_id": "s1"})
+        self.decide()
+        self.assertTrue(self.f.pulls[10]["merged_at"])
+
+    def test_team_owner_accepts_any_writer(self):
+        self.f.pull_files[10] = ["db/migrations/1.sql"]
+        self.f.reviews[10] = [{"user": {"login": "bob"}, "state": "APPROVED", "commit_id": "s1"}]
+        self.decide()
+        self.assertTrue(self.f.pulls[10]["merged_at"])
+
+    def test_matching_rules(self):
+        from nightshift import codeowners
+
+        rules = codeowners.parse(self.CO + "*.sql @dba\n/build/logs/\n")
+        self.assertEqual(codeowners.owners_for(rules, "README.md"), ["@lead"])
+        self.assertEqual(codeowners.owners_for(rules, "api/v1/x.py"), ["@alice"])
+        self.assertEqual(codeowners.owners_for(rules, "x/api/y.py"), ["@lead"])
+        self.assertEqual(codeowners.owners_for(rules, "a/b.sql"), ["@dba"])
+        self.assertEqual(codeowners.owners_for(rules, "build/logs/x"), [])
+
+    def test_init_suggests_owners_and_turns_review_on(self):
+        root = Path(tempfile.mkdtemp())
+        (root / ".github").mkdir()
+        (root / ".github/CODEOWNERS").write_text(self.CO)
+        data = cli.build_config(root, None, "api", True, io.StringIO(), "main", cli.parser().parse_args(["init"]))
+        self.assertEqual(data["lanes"][0]["claude_token_secret"], "CLAUDE_TOKEN_ALICE")
+        self.assertEqual(data["risk"], {"codeowners": True})
+
+
+class Templates(unittest.TestCase):
+    def test_hackathon(self):
+        root = Path(tempfile.mkdtemp())
+        out = io.StringIO()
+        rc = cli.main(["init", "--root", str(root), "--repo", "o/r", "--yes", "--lanes", "api,web", "--template",
+                       "hackathon", "--files-only"], transport=FakeGitHub(), out=out)
+        self.assertEqual(rc, 0)
+        cfg = loads((root / ".night-shift/config.yml").read_text())
+        self.assertEqual((cfg.planner_refill_below, cfg.max_attempts, cfg.digest_schedule), (3, 2, "0 */4 * * *"))
+        self.assertTrue((root / "docs/PRD.md").is_file())
+        self.assertTrue((root / "contracts/README.md").is_file())
+
+
+class OrgConfig(unittest.TestCase):
+    BASE = "models:\n  default: haiku\nprotected_paths: [infra/]\ntrusted_logins: [evil]\n" \
+           "planner:\n  claude_token_secret: AGENT_PAT\n  max_tickets_per_run: 4\nlanes:\n  - name: x\n" \
+           "    claude_token_secret: X\n"
+
+    def test_merge_keeps_lanes_logins_and_secrets_local(self):
+        from nightshift.config import loads as load_text
+
+        local = TEAM.replace("version: 1\n", "version: 1\nextends: org/.github\nprotected_paths: [secrets/]\n")
+        cfg = load_text(local, self.BASE)
+        self.assertEqual(cfg.default_model, "haiku")
+        self.assertEqual(cfg.planner_max_tickets, 4)
+        self.assertEqual(cfg.lane_names, ["api", "web"])
+        self.assertEqual(cfg.trusted_logins, ["dana-pat"])
+        self.assertNotEqual(cfg.planner_token_secret, "AGENT_PAT")
+        self.assertIn("infra/", cfg.protected_paths)
+        self.assertIn("secrets/", cfg.protected_paths)
+
+    def test_config_pull_writes_base_and_load_uses_it(self):
+        root = Path(tempfile.mkdtemp())
+        (root / ".night-shift").mkdir()
+        (root / ".night-shift/config.yml").write_text(TEAM.replace("version: 1\n", "version: 1\nextends: org/.github\n"))
+        f = FakeGitHub()
+        f.other_repos["org/.github"] = {"contents": {".night-shift/config.yml": "models:\n  default: haiku\n"}}
+        out = io.StringIO()
+        self.assertEqual(cli.main(["config", "pull", "--root", str(root), "--repo", "o/r", "--dry-run"],
+                                  transport=f, out=out), 0)
+        self.assertFalse((root / ".night-shift/base.yml").exists())
+        self.assertEqual(cli.main(["config", "pull", "--root", str(root), "--repo", "o/r"], transport=f, out=out), 0)
+        from nightshift.config import load
+
+        self.assertEqual(load(root).default_model, "haiku")
+
+
+class OrgStatsWeeklyAuditLog(unittest.TestCase):
+    def test_stats_org(self):
+        import base64
+
+        from nightshift import status
+        from nightshift.gh import GH
+
+        f = FakeGitHub()
+        f.add_pull(10, branch="agent/api/issue-1", state="closed", merged_at="2026-01-01T00:00:00Z")
+        f.add_pull(11, branch="agent/api/issue-2", state="closed")
+        f.contents[".night-shift/config.yml"] = TEAM
+        orig = f.__call__
+
+        class T:
+            def __call__(self, method, path, body=None):
+                if path.startswith("orgs/o/repos"):
+                    return [{"full_name": "o/r"}, {"full_name": "o/other"}] if "page=1" in path or "page" not in path \
+                        else []
+                return orig(method, path, body)
+
+        del base64
+        gh = GH("o/r", transport=T())
+        gh.login = BOT
+        text = status.org_stats(gh, "o", lambda repo: GH(repo, transport=T()))
+        self.assertIn("Night shift across o: 1 repo(s)", text)
+        self.assertIn("1 merged", text)
+        self.assertIn("1 closed", text)
+
+    def test_weekly_digest_and_caller_schedule(self):
+        import datetime as dt
+
+        from nightshift import digest, scaffold
+
+        f = FakeGitHub()
+        gh = f.gh(out=io.StringIO())
+        gh.login = BOT
+        text = digest.build(gh, loads(TEAM), hours=168, now=dt.datetime(2026, 3, 2, tzinfo=dt.timezone.utc))
+        self.assertIn("weekly report** for the last 7 days", text)
+        wf = scaffold.digest_workflow(loads(TEAM))
+        self.assertIn('cron: "0 8 * * 1"', wf)
+        self.assertIn("github.event.schedule == '0 8 * * 1' && '168' || '24'", wf)
+        self.assertNotIn("weekly", scaffold.digest_workflow(loads(TEAM + "digest:\n  weekly_schedule: \"\"\n")))
+
+    def test_audit_log_rows_and_csv(self):
+        from nightshift import auditlog
+
+        f = FakeGitHub()
+        f.add_issue(500, title="Night-shift log", labels=["night-log"])
+        f.add_pull(10, branch="agent/api/issue-1", state="closed", merged_at="2026-01-01T00:00:00Z",
+                   body="Closes #1\n\n**Lane:** `api` (night shift) · **Model:** `=cmd()` · **Prompt:** `worker-builtin-abc`")
+        f.add_pull(11, branch="agent/web/issue-2", state="closed", user="mallory")
+        f.add_comment(500, "01:00 `api` #1 [sonnet] → PR https://github.com/o/r/pull/10 (≈$0.75)")
+        f.add_comment(500, "01:00 `api` #1 [sonnet] → PR https://github.com/o/r/pull/10 (≈$99)", user="mallory")
+        gh = f.gh(out=io.StringIO())
+        gh.login = BOT
+        data = auditlog.rows(gh, loads(TEAM))
+        self.assertEqual(len(data), 1)
+        r = data[0]
+        self.assertEqual((r["lane"], r["issue"], r["outcome"], r["reason"], r["prompt_version"], r["cost_usd"]),
+                         ("api", 1, "merged", "verdict_passed", "worker-builtin-abc", "0.75"))
+        text = auditlog.render(data)
+        self.assertIn("'=cmd()", text)
+        self.assertEqual(json.loads(auditlog.render(data, "jsonl"))["pr"], 10)
+
+    def test_prompt_version_reaches_the_pr_body(self):
+        from nightshift import prompts
+        from nightshift.publish import Result, pr_body
+
+        v = prompts.version("worker")
+        self.assertRegex(v, r"^worker-builtin-[0-9a-f]{12}$")
+        self.assertIn(f"**Prompt:** `{v}`", pr_body("issue", "1", "api", "sonnet", Result("done", "s"), v))
+
+
 if __name__ == "__main__":
     unittest.main()

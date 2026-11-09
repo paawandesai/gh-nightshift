@@ -302,6 +302,10 @@
           "type": "string",
           "pattern": "^[A-Z_][A-Z0-9_]*$",
           "description": "secret holding a Slack or Discord webhook URL"
+        },
+        "weekly_schedule": {
+          "type": "string",
+          "description": "cron (UTC) for the 7-day weekly report; default 0 8 * * 1, empty string turns it off"
         }
       }
     },
@@ -333,6 +337,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "codeowners": {
+          "type": "boolean",
+          "description": "PRs that touch files with CODEOWNERS owners need one of those owners' approval"
         }
       }
     },
@@ -358,6 +366,10 @@
           "pattern": "^[A-Z_][A-Z0-9_]*$"
         }
       }
+    },
+    "extends": {
+      "type": "string",
+      "description": "owner/repo (e.g. your-org/.github) whose .night-shift/config.yml is the org-wide base; `gh nightshift config pull` copies it to .night-shift/base.yml"
     }
   },
   "$defs": {

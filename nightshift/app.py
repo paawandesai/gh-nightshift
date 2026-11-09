@@ -98,9 +98,12 @@ def mint(repo: str, app_id: str, key_pem: str, request: Callable[..., Any] | Non
     data = request("POST", f"/app/installations/{inst['id']}/access_tokens", token,
                    {"repositories": [name], "permissions": dict(PERMISSIONS)}) or {}
     perms = data.get("permissions") or {}
-    bad = sorted(set(perms) & FORBIDDEN)
+    # Allowlist: nothing beyond what was requested, at no higher level.
+    rank = {"read": 1, "write": 2, "admin": 3}
+    bad = sorted(k for k, v in perms.items()
+                 if k in FORBIDDEN or k not in PERMISSIONS or rank.get(v, 9) > rank[PERMISSIONS[k]])
     if bad:
-        raise AppError(f"the minted token has forbidden permissions: {', '.join(bad)}")
+        raise AppError(f"the minted token has permissions beyond what night shift asked for: {', '.join(bad)}")
     if not data.get("token"):
         raise AppError("GitHub returned no installation token")
     return {"token": data["token"], "login": f"{app.get('slug', '')}[bot]" if app.get("slug") else "",

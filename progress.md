@@ -29,7 +29,13 @@ per step, then the step is marked blocked.
 - Batch 2 (1006b94): built, tests in tests/test_team.py (Roadmap, Digest); verify 1 FAIL (workflow PAT could not find the roadmap that setup created; titles and agent file names could fake a cost figure; setup not guarded); fix round 1 (FixRound1 tests, CostLineForgery).
   - (3) Morning digest: `digest` command, night-log post with a digest marker, Slack/Discord webhook, reusable digest.yml and generated caller.
   - Roadmap issue: `roadmap` command, created by init/setup, refreshed by planner publish, every merge hand-off and the digest; `plan --show`. Pinning is GraphQL-only: manual.
-- Batch 3 (v0.1 picks): built, tests in tests/test_team.py (Commands, RiskTiers, GitHubApp); verify pending.
+- Batch 3 (v0.1 picks, 109537c): built, tests in tests/test_team.py (Commands, RiskTiers, GitHubApp); verify 1 FAIL (renames and >2000-file PRs bypassed approve_paths; App permission denylist; stale approvals not re-asked; bot comments could run commands; doctor checked only the lane caller); fix round 1 (Batch3Fixes tests). Batches 1-2 fix round 1: verify 2 PASS.
   - `/night-shift take` and `/night-shift retry` comment commands (commands.yml, generated caller, CLI take/retry).
   - Risk tiers by label and path, default auto or approve; approval-waiting PRs do not hold the lane.
   - GitHub App auth: manifest, openssl-signed JWT, down-scoped installation token in PAT jobs only, init/doctor/app check with --dry-run. Creating the App itself is manual (Paawan).
+- Batch 4: built, tests in tests/test_team.py (CrossRepo, CodeOwners, Templates, OrgConfig, OrgStatsWeeklyAuditLog); verify pending.
+  - Hackathon template (`init --template hackathon`).
+  - CODEOWNERS-aware lanes and required owner review (`risk.codeowners`); team owners accept any writer (team membership is not readable with a repo-scoped token).
+  - Org config inheritance (`extends`, `config pull`, committed base.yml).
+  - Cross-repo Blocked-by and pull-style hand-offs (the other repo must be readable by the PAT).
+  - `stats --org`, weekly report, `audit-log` export with model, prompt version and cost.

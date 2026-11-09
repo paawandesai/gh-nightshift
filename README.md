@@ -160,7 +160,8 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels` (see Risk tiers) |
-| `digest` | | `enabled` (true), `schedule` (`0 7 * * *`, UTC), `webhook_secret` (optional secret holding a Slack or Discord webhook URL) |
+| `extends` | | `owner/repo` with an org-wide `.night-shift/config.yml` (see Org-wide config) |
+| `digest` | | `weekly_schedule` (`0 8 * * 1`, `""` = off), `enabled` (true), `schedule` (`0 7 * * *`, UTC), `webhook_secret` (optional secret holding a Slack or Discord webhook URL) |
 
 Repo variables override some settings at run time without a commit: `AGENTS_ENABLED`, `FIX_LANE`,
 `ESCALATE_MODEL`, `REVIEW_MODEL` (fallback), `PLANNER_MODEL`, `CLAUDE_CODE_VERSION` and
@@ -258,20 +259,22 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 
 | Command | What it does |
 |---|---|
-| `init` | Write config and workflows, set up labels, settings, variables, night log, roadmap, secrets (branch protection: run `setup` after pushing). `--yes`, `--lanes`, `--tool-ref`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets`, `--dry-run`. Fully non-interactive with `--yes --lanes api,web --preset python --paths api=api/ --budget 5 --secrets-from-env` |
+| `init` | `--template hackathon` starts from a weekend-build setup (planner refill below 3, 2 attempts, 30-minute stale limit, digest every 4 hours, a `docs/PRD.md` and `contracts/` stub). Write config and workflows, set up labels, settings, variables, night log, roadmap, secrets (branch protection: run `setup` after pushing). `--yes`, `--lanes`, `--tool-ref`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets`, `--dry-run`. Fully non-interactive with `--yes --lanes api,web --preset python --paths api=api/ --budget 5 --secrets-from-env` |
 | `setup` | Re-apply labels, settings, variables, branch protection, the night log and the roadmap |
 | `join --lane X` | A teammate stores their Claude token and their own PAT for a lane (`--no-pat` to skip); prints the `trusted_logins` line to add |
 | `doctor` | Read-only checks with a fix for each problem (`--pat-env VAR` checks a PAT; repeat it for each) |
 | `status` | What each lane would do now, the queue, open agent PRs, blocked and waiting issues, the night log |
-| `stats` | Merge rate with a 95% interval, reason codes, escalation share, cost per merged PR (`--audit CSV` adds the review gate's catch rate). Counts PRs and markers from `bot_login` in the config (default: you), so set it when the PAT is another account. |
+| `stats` | Merge rate with a 95% interval, reason codes, escalation share, cost per merged PR (`--audit CSV` adds the review gate's catch rate; `--org ORG` summarises every repo in an org that has a night-shift config). Counts PRs and markers from `bot_login` in the config (default: you), so set it when the PAT is another account. |
 | `plan` | Draft and create tickets: `--from PATH`, `--gap`, `--lane X`, `--plan-file` (publish an existing draft) |
 | `start` / `pause` | Set `AGENTS_ENABLED` to `true` / `false` (the kill switch); `pause` also cancels lane runs in flight (`--no-cancel` to let them finish) |
 | `freeze` / `resume` | Pause (and cancel) and move every ready issue to `human` + `frozen`; `resume` undoes it and starts |
 | `take N` / `retry N` | Take a ticket yourself, or put it back in the queue with fresh attempts (same as the comment commands) |
 | `app manifest` / `app check` | Print the GitHub App to create; mint a token locally and show its login and permissions |
 | `roadmap` | Create or refresh the roadmap issue: tickets by wave with status, a Blocked-by mermaid graph, counts per lane. The planner and every merge refresh it too. `plan --show` prints it without writing. |
-| `digest` | Summarise the last `--hours 24`: merged, closed with reasons, stuck, cost per lane. `--post` puts it on the night log; `--webhook-env VAR` also sends it to the Slack or Discord webhook URL in `$VAR`. The generated `night-shift-digest.yml` runs it every morning. |
+| `digest` | `--weekly` reports the last 7 days (the generated workflow also runs it on `digest.weekly_schedule`). Summarise the last `--hours 24`: merged, closed with reasons, stuck, cost per lane. `--post` puts it on the night log; `--webhook-env VAR` also sends it to the Slack or Discord webhook URL in `$VAR`. The generated `night-shift-digest.yml` runs it every morning. |
 | `lint` | Check ready issues against the ticket guide |
+| `audit-log` | Export every agent PR: lane, issue, outcome, reason code, model, prompt version, cost (`--since`, `--format csv\|jsonl`, `--out`) |
+| `config pull` | Copy the org-wide base config from the `extends:` repo into `.night-shift/base.yml` |
 | `audit` | Sample merged agent PRs (`--sample 25 --seed 1`), collect evidence, optionally rerun tests (`--test-cmd`), and report rates (`--report CSV`; `--label-llm CSV` pre-fills LLM labels, which are not ground truth) |
 
 ## Merge modes
@@ -297,7 +300,15 @@ risk:
   auto_labels: [risk:low]
 ```
 
-A PR that needs approval gets the `needs-approval` label and one comment. It merges on the next lane run after
+`risk.codeowners: true` adds CODEOWNERS (read from the default branch, never the PR): every changed file
+that has owners needs an approval from one of them; a team or email owner accepts any writer, because a
+repo-scoped token cannot read team membership. `init` turns this on when it finds a CODEOWNERS file, and
+`doctor` warns when CODEOWNERS exists but it is off. Renames count under both names, and a PR too large to
+list completely always needs approval. Risk tiers apply in `strict` mode only; in `queue` mode a person
+queues every PR anyway. The approver cannot be the PR's author, which is the PAT's account: if that is your
+own account, a second writer has to approve.
+
+A PR that needs approval gets the `needs-approval` label and one comment (again if its head commit changes). It merges on the next lane run after
 someone with write access who did not open it approves its latest commit. Waiting for approval does not hold
 up the lane: it moves on to the next ticket and never re-picks that one.
 
@@ -312,6 +323,23 @@ People with write access can comment on a ticket (or on its agent PR):
 
 Both accept `#n` to name another ticket. `gh nightshift take N` and `gh nightshift retry N` do the same from
 the terminal. They run in the generated `night-shift-commands.yml` with the PAT (or the App).
+
+## Cross-repo dependencies
+
+`Blocked by: org/other-repo#12` (or the issue's URL) makes a ticket wait for an issue in another repository.
+The PAT (or App) must be able to read that issue; if it cannot, the dependency counts as unmet. When it
+closes, the waiting side posts the hand-off itself (this repo's token cannot write to the other one): the
+other issue's title and `## Interface` section, quoted as data from another repository.
+
+## Org-wide config
+
+Put shared settings in `your-org/.github/.night-shift/config.yml`, add `extends: your-org/.github` to each
+repo's config, and run `gh nightshift config pull`. It writes `.night-shift/base.yml`; commit it. The repo's
+own config wins key by key, `protected_paths` are added together, and only shared settings are taken from the
+base: `models`, `limits`, `labels`, `protected_paths`, `required_checks`, `timezone`, `risk`, `digest`,
+`planner`, `merge`, `tool_ref`. Lanes, `bot_login`, `trusted_logins`, `auth` and every secret name stay in the
+repo. Workflows read only the committed file, so they need no access to the org repo. `doctor` warns when
+`extends` is set and `base.yml` is missing.
 
 ## GitHub App (instead of a PAT)
 

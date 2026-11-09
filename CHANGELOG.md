@@ -65,6 +65,13 @@ First release, extracted from the hackathon night-shift kit (`legacy/hackathon-k
   for one human approval before the picker merges them.
 - GitHub App auth (`auth.mode: app`, `app manifest`, `app check`, `init --app-id --app-key-file`): a
   down-scoped installation token minted in the PAT jobs only.
+- `init --template hackathon`.
+- CODEOWNERS-aware lanes: `init` suggests lane owners from CODEOWNERS and sets `risk.codeowners`, which
+  makes PRs touching owned files wait for an owner's approval.
+- Org-wide config inheritance: `extends:` plus `gh nightshift config pull` (`.night-shift/base.yml`).
+- Cross-repo `Blocked by: org/repo#n` with pull-style hand-offs.
+- `stats --org`, a weekly report (`digest --weekly`, `digest.weekly_schedule`) and `audit-log` export
+  (model, prompt version, cost per agent PR); PR bodies now carry the prompt version.
 - Roadmap issue: waves, status per ticket and lane, Blocked-by mermaid graph; created by `init`/`setup`,
   refreshed by the planner, every merge and the digest; `gh nightshift roadmap` and `plan --show`.
 

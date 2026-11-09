@@ -5,6 +5,7 @@ ci_workflow: ci.yml            # its runs on main gate every lane
 required_checks: [test, "review / verdict"]
 fix_lane: api                  # the only lane that works while main is red
 tool_ref: main                 # pin a tag or SHA once v0.1.0 is released
+# extends: your-org/.github     # optional org-wide base; `gh nightshift config pull` writes .night-shift/base.yml
 bot_login: night-bot            # login of the account that owns AGENT_PAT (stats and audit trust its markers)
 trusted_logins: [bob]          # other PAT logins to trust (here Bob's own PAT for the web lane)
 merge:
@@ -37,9 +38,11 @@ risk:                          # optional: green PRs merge unless a rule below a
   approve_labels: [risk:high]
   approve_paths: [migrations/]
   auto_labels: [risk:low]
+  codeowners: true             # files with CODEOWNERS owners need one of those owners' approval
 digest:
   enabled: true
   schedule: "0 7 * * *"         # morning summary on the night-log issue (UTC)
+  weekly_schedule: "0 8 * * 1"  # the 7-day weekly report ("" turns it off)
   webhook_secret: NIGHT_SHIFT_WEBHOOK   # optional: Slack or Discord webhook URL
 lanes:
   - name: api

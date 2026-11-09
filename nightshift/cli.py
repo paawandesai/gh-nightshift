@@ -136,6 +136,11 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
     if stacks:
         say("Detected: " + "; ".join(f"{s['path']} ({s['stack']})" for s in stacks))
     q = (lambda p, d: d) if assume_yes else (lambda p, d: _ask(ask, p, d))
+    from . import codeowners
+
+    co_text = next(((root / loc).read_text(encoding="utf-8") for loc in codeowners.LOCATIONS if (root / loc).is_file()),
+                   "")
+    co_rules = codeowners.parse(co_text)
     names = [n.strip() for n in q("Lanes (comma-separated)", suggested).split(",") if n.strip()]
     lanes = []
     for name in names:
@@ -146,7 +151,10 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
             guess = scaffold.preset_commands(preset, folder if folder not in ("", ".") else "")
         else:
             guess = next((s for s in stacks if s["path"].rstrip("/") == name), stacks[0] if stacks else None)
-        owner = owners.get(name) or q(f"Lane {name}: owner's name (for their Claude token secret)", name)
+        # CODEOWNERS-aware: the lane's folder owner (a user, not a team) is the suggested lane owner.
+        co_users = codeowners.user_owners(codeowners.owners_for(co_rules, lane_paths.split(";")[0].rstrip("/") + "/x"))
+        suggested_owner = sorted(co_users)[0] if co_users else name
+        owner = owners.get(name) or q(f"Lane {name}: owner's name (for their Claude token secret)", suggested_owner)
         owner = owner.upper()
         lane = {"name": name,
                 "paths": [p.strip() for p in q(f"Lane {name}: folders it owns", lane_paths).replace(";", ",").split(",")
@@ -174,6 +182,8 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
             "planner": {"docs": ["docs/PRD.md"], "max_tickets_per_run": 8, "refill_below": 0}}
     if auth:
         data["auth"] = auth
+    if co_rules:
+        data["risk"] = {"codeowners": True}  # agent PRs touching owned files wait for an owner's approval
     return data
 
 
@@ -211,10 +221,14 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
             ctx.say(f"note: --tool-ref ignored; the config pins {cfg.tool_ref}. Edit tool_ref in {CONFIG_PATH}, "
                     "then run `gh nightshift init --regenerate`.")
     else:
-        text = scaffold.config_yaml(build_config(ctx.root, ask, a.lanes, a.yes, ctx.out,
-                                                 a.tool_ref or "main", a))
+        data = build_config(ctx.root, ask, a.lanes, a.yes, ctx.out, a.tool_ref or "main", a)
+        if getattr(a, "template", None):
+            data = scaffold.apply_template(data, a.template)
+        text = scaffold.config_yaml(data)
         cfg = loads(text)  # validates what we are about to write
     ctx.say(*write_files(ctx, scaffold.files(cfg, text, ctx.root), overwrite=a.force))
+    if getattr(a, "template", None):
+        ctx.say(*write_files(ctx, scaffold.template_files(a.template), overwrite=False))
     if a.files_only:
         return 0
     # Branch protection waits for `setup`: protecting main now would refuse the push of these very files.
@@ -305,8 +319,15 @@ def cmd_status(ctx: Ctx) -> int:
 
 
 def cmd_stats(ctx: Ctx) -> int:
-    from .status import stats
+    from .status import org_stats, stats
 
+    if ctx.args.org:
+        def make_gh(repo: str) -> GH:
+            return GH(repo, transport=ctx._transport, dry_run=False, out=ctx.out)
+
+        ctx.say(org_stats(GH(ctx.args.repo or "x/x", transport=ctx._transport, out=ctx.out), ctx.args.org, make_gh)
+                .rstrip())
+        return 0
     ctx.say(stats(ctx.gh, ctx.cfg, ctx.args.audit))
     return 0
 
@@ -539,6 +560,45 @@ def cmd_app(ctx: Ctx, request=None) -> int:
     return 0
 
 
+def cmd_config(ctx: Ctx) -> int:
+    """`config pull`: copy the org-wide base config from the `extends:` repo into .night-shift/base.yml."""
+    import base64
+
+    from .config import BASE_PATH
+
+    cfg = ctx.cfg
+    if not cfg.extends:
+        raise ConfigError(f"set `extends: owner/repo` in {CONFIG_PATH} first")
+    data = ctx.gh.get_or_none(f"repos/{cfg.extends}/contents/{CONFIG_PATH}") or {}
+    if not data.get("content"):
+        raise ConfigError(f"{cfg.extends} has no {CONFIG_PATH} (or this token cannot read it)")
+    text = base64.b64decode(data["content"]).decode("utf-8")
+    header = (f"# Copied from {cfg.extends}:{CONFIG_PATH} by `gh nightshift config pull`; do not edit here.\n"
+              f"# Only shared settings are used (models, limits, labels, protected_paths, required_checks, timezone,\n"
+              f"# risk, digest, planner, merge, tool_ref); lanes, logins, auth and secret names stay in config.yml.\n")
+    loads((ctx.root / CONFIG_PATH).read_text(encoding="utf-8"), text)  # the merged result must be valid
+    target = ctx.root / BASE_PATH
+    if ctx.gh.dry_run:
+        ctx.say(f"[dry-run] would write {BASE_PATH} from {cfg.extends}")
+        return 0
+    target.write_text(header + text, encoding="utf-8")
+    ctx.say(f"wrote {BASE_PATH} from {cfg.extends}; commit it so the workflows use it")
+    return 0
+
+
+def cmd_audit_log(ctx: Ctx) -> int:
+    from . import auditlog
+
+    a = ctx.args
+    text = auditlog.render(auditlog.rows(ctx.gh, ctx.cfg, a.since), a.format)
+    if a.out:
+        Path(a.out).write_text(text, encoding="utf-8")
+        ctx.say(f"wrote {a.out} ({max(0, text.count(chr(10)) - (a.format == 'csv'))} PRs)")
+    else:
+        ctx.out.write(text)
+    return 0
+
+
 def cmd_roadmap(ctx: Ctx) -> int:
     ctx.say(roadmap.update(ctx.gh, ctx.cfg, create=True))
     return 0
@@ -546,7 +606,7 @@ def cmd_roadmap(ctx: Ctx) -> int:
 
 def cmd_digest(ctx: Ctx) -> int:
     a = ctx.args
-    text = digest.build(ctx.gh, ctx.cfg, hours=a.hours)
+    text = digest.build(ctx.gh, ctx.cfg, hours=168 if a.weekly else a.hours)
     if not a.post:
         ctx.say(text.rstrip())
         return 0
@@ -601,6 +661,7 @@ def cmd_task(ctx: Ctx) -> int:
     (out / "prompt.md").write_text(prompts.render("worker", values_prompt, ctx.root), encoding="utf-8")
     (out / "schema.json").write_text(prompts.schema_json("worker"), encoding="utf-8")
     (out / "setup.sh").write_text(ctx.cfg.lane(a.lane).setup_commands, encoding="utf-8")
+    values["prompt_version"] = prompts.version("worker", ctx.root)
     write_outputs(a.github_output, values)
     ctx.say(json.dumps(values))
     return 0
@@ -612,6 +673,7 @@ def cmd_publish(ctx: Ctx) -> int:
     a = ctx.args
     job = Job(lane=a.lane, mode=a.mode, issue=a.issue, branch=a.branch, title=a.title, model=a.model,
               attempt_comment=a.attempt_comment, fail_sha=a.fail_sha, result_path=a.result, bundle_path=a.bundle,
+              prompt_version=a.prompt_version if re.fullmatch(r"[A-Za-z0-9._-]{1,60}", a.prompt_version) else "",
               push_url=f"https://github.com/{ctx.repo}.git")  # credentials via GH_TOKEN, never in argv
     ctx.say(publish(ctx.gh, ctx.cfg, job))
     return 0
@@ -713,6 +775,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--ci-workflow", help="CI workflow file (default ci.yml); with --preset, written if missing")
     s.add_argument("--merge-mode", choices=["strict", "queue"], help="default strict")
     s.add_argument("--budget", type=float, help="optional nightly budget per lane in USD (API-equivalent); off by default")
+    s.add_argument("--template", choices=sorted(scaffold.TEMPLATES),
+                   help="start from a ready-made setup, e.g. hackathon (fast refill, short retries, digest every 4 h)")
     s.add_argument("--app-id", help="use a GitHub App instead of AGENT_PAT (see `gh nightshift app manifest`)")
     s.add_argument("--app-key-file", help="the App's private key (.pem); stored as the NIGHT_SHIFT_APP_KEY secret")
     s.add_argument("--secrets-from-env", action="store_true",
@@ -728,6 +792,7 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("status", parents=[common], help="lane decisions, PRs, blocked issues, queue, log")
     s = sub.add_parser("stats", parents=[common], help="merge rate, reasons, escalation, cost, catch rate")
     s.add_argument("--audit", help="audit CSV (from `audit`) to estimate the review gate's catch rate")
+    s.add_argument("--org", help="summarise every repo in this org (or user) that has a night-shift config")
     for name, text in (("start", "switch the night shift on"),
                        ("pause", "switch it off and cancel lane runs in flight (kill switch)"),
                        ("freeze", "pause, and hand remaining ready work to people"),
@@ -737,12 +802,19 @@ def parser() -> argparse.ArgumentParser:
             s.add_argument("--no-cancel", action="store_true", help="let runs already in flight finish")
     sub.add_parser("lint", parents=[common], help="check ready issues against the ticket guide")
     sub.add_parser("roadmap", parents=[common], help="create or refresh the roadmap issue")
+    s = sub.add_parser("audit-log", parents=[common], help="export every agent PR: lane, outcome, model, prompt, cost")
+    s.add_argument("--since", default="", help="only PRs created on or after this date (YYYY-MM-DD)")
+    s.add_argument("--format", choices=["csv", "jsonl"], default="csv")
+    s.add_argument("--out", default="", help="write to this file instead of stdout")
+    s = sub.add_parser("config", parents=[common], help="org-wide config: `config pull` copies the extends: base")
+    s.add_argument("config_action", choices=["pull"])
     s = sub.add_parser("take", parents=[common], help="take a ticket yourself: assigned, labelled human, agents skip it")
     s.add_argument("number", type=int)
     s = sub.add_parser("retry", parents=[common], help="put a ticket back in the queue with fresh attempts")
     s.add_argument("number", type=int)
     s = sub.add_parser("digest", parents=[common], help="summarise the last night: merged, stuck, cost")
     s.add_argument("--hours", type=float, default=24)
+    s.add_argument("--weekly", action="store_true", help="the weekly report: the last 7 days")
     s.add_argument("--post", action="store_true", help="post it on the night-log issue (and the webhook)")
     s.add_argument("--webhook-env", default="", metavar="VAR",
                    help="env var holding a Slack or Discord webhook URL (the URL is never printed)")
@@ -803,7 +875,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("publish", parents=[common])
     for flag in ("--lane", "--mode", "--branch", "--title", "--model"):
         s.add_argument(flag, required=True)
-    for flag in ("--issue", "--attempt-comment", "--fail-sha", "--result", "--bundle"):
+    for flag in ("--issue", "--attempt-comment", "--fail-sha", "--result", "--bundle", "--prompt-version"):
         s.add_argument(flag, default="")
     s = sub.add_parser("prompt", parents=[common])
     s.add_argument("name", choices=["worker", "review", "planner"])
@@ -826,7 +898,8 @@ COMMANDS = {
     "init": cmd_init, "setup": cmd_setup, "join": cmd_join, "doctor": cmd_doctor, "status": cmd_status,
     "stats": cmd_stats, "start": cmd_switch, "pause": cmd_switch, "freeze": cmd_switch, "resume": cmd_switch,
     "lint": cmd_lint, "plan": cmd_plan, "roadmap": cmd_roadmap, "digest": cmd_digest,
-    "app": cmd_app, "app-token": cmd_app_token, "take": cmd_take_retry, "retry": cmd_take_retry, "command": cmd_command,
+    "config": cmd_config, "audit-log": cmd_audit_log, "app": cmd_app, "app-token": cmd_app_token,
+    "take": cmd_take_retry, "retry": cmd_take_retry, "command": cmd_command,
     "audit": cmd_audit, "lane-config": cmd_lane_config,
     "check-pat": cmd_check_pat, "pick": cmd_pick, "task": cmd_task, "publish": cmd_publish, "prompt": cmd_prompt,
     "schema": cmd_schema, "review-inputs": cmd_review_inputs, "review-report": cmd_review_report,

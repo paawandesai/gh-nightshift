@@ -5,6 +5,7 @@ Every call is recorded in `calls` as (method, path, body).
 """
 from __future__ import annotations
 
+import base64
 import copy
 import itertools
 import re
@@ -53,6 +54,8 @@ class FakeGitHub:
         self.job_logs: dict[int, str] = {}
         self.calls: list[tuple[str, str, object]] = []
         self.reviews: dict[int, list[dict]] = {}
+        self.other_repos: dict[str, dict] = {}  # "org/other": {"issues": {n: issue}, "contents": {path: text}}
+        self.contents: dict[str, str] = {}      # files in this repo, served by GET contents/<path>
         self.pull_files: dict[int, list[str]] = {}
         self._ids = itertools.count(1000)
 
@@ -126,7 +129,15 @@ class FakeGitHub:
             if tail.startswith("/commits/") and tail[len("/commits/"):] in self.tool_refs:
                 return {"sha": "0" * 40}
             raise GHError(f"not found: {path}", 404)
-        if not p.startswith(prefix):
+        if not p.startswith(prefix + "/") and p != prefix:
+            m = re.fullmatch(r"repos/([^/]+/[^/]+)/(issues/(\d+)|contents/(.+))", p)
+            if m and method == "GET" and m.group(1) in self.other_repos:
+                other = self.other_repos[m.group(1)]
+                if m.group(3) and int(m.group(3)) in other.get("issues", {}):
+                    return copy.deepcopy(other["issues"][int(m.group(3))])
+                if m.group(4) and m.group(4) in other.get("contents", {}):
+                    return {"content": base64.b64encode(other["contents"][m.group(4)].encode()).decode(),
+                            "encoding": "base64"}
             raise GHError(f"unexpected path {path}", 404)
         rest = p[len(prefix):].lstrip("/")
         for pattern, handler in self.routes():
@@ -181,6 +192,7 @@ class FakeGitHub:
             (r"rulesets", ("GET", lambda q, b: self.rulesets)),
             (r"rulesets", ("POST", lambda q, b: self.rulesets.append(b))),
             (r"collaborators/([^/]+)/permission", ("GET", lambda q, b, u: {"permission": self.permissions.get(u, "read")})),
+            (r"contents/(.+)", ("GET", self._contents)),
             (r"commits", ("GET", lambda q, b: self.commits_by_path.get(q.get("path", ""), [])[: int(q.get("per_page", 30))])),
         ]
 
@@ -221,6 +233,11 @@ class FakeGitHub:
         drop = set((b or {}).get("assignees", []))
         self.issues[int(n)]["assignees"] = [a for a in self.issues[int(n)]["assignees"] if a["login"] not in drop]
         return copy.deepcopy(self.issues[int(n)])
+
+    def _contents(self, q, b, path):
+        if path not in self.contents:
+            raise GHError(f"not found: {path}", 404)
+        return {"content": base64.b64encode(self.contents[path].encode()).decode(), "encoding": "base64"}
 
     def _patch_issue(self, q, b, n):
         self.issues[int(n)].update(b)

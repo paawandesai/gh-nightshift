@@ -65,6 +65,7 @@ jobs:
       issue: ${{ steps.pick.outputs.issue }}
       fail_sha: ${{ steps.pick.outputs.fail_sha }}
       model: ${{ steps.pick.outputs.model }}
+      prompt_version: ${{ steps.prep.outputs.prompt_version }}
       branch: ${{ steps.prep.outputs.branch }}
       title: ${{ steps.prep.outputs.title }}
       attempt_comment: ${{ steps.prep.outputs.attempt_comment }}
@@ -282,7 +283,9 @@ jobs:
           ATTEMPT_COMMENT: ${{ needs.pick.outputs.attempt_comment }}
           FAIL_SHA: ${{ needs.pick.outputs.fail_sha }}
           MODEL: ${{ needs.pick.outputs.model }}
+          PROMPT_VERSION: ${{ needs.pick.outputs.prompt_version }}
         run: |
           python3 -m nightshift publish --lane "$LANE" --mode "$MODE" --issue "$ISSUE" --branch "$BRANCH" \
             --title "$TITLE" --model "$MODEL" --attempt-comment "$ATTEMPT_COMMENT" --fail-sha "$FAIL_SHA" \
+            --prompt-version "$PROMPT_VERSION" \
             --result "$RUNNER_TEMP/out/result.json" --bundle "$RUNNER_TEMP/out/agent.bundle"

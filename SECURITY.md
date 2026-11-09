@@ -103,6 +103,14 @@ push and the PR come from the PAT's account.
   the script through an environment variable. `retry` unassigns only people named in trusted `take` markers.
 - **Risk tiers.** An approval counts only from a person with write access who did not open the PR, on the
   PR's current head commit, and only if that person's latest review is an approval. Bots never count.
+- **Cross-repo hand-offs.** Text from another repository (title, `## Interface`) is defanged, fenced and
+  labelled as data; its trust markers are never read, because that repo's PAT login is not this repo's.
+- **Org-wide base config.** `.night-shift/base.yml` cannot set lanes, `bot_login`, `trusted_logins`, `auth`,
+  `extends` or any secret name (`planner.claude_token_secret` and `digest.webhook_secret` are dropped from
+  it), so whoever controls the org repo cannot widen trust or route a secret. It lives under `.night-shift/`,
+  which agents cannot change.
+- **Audit log export.** CSV cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so a crafted model
+  name cannot run as a spreadsheet formula. Only PRs and night-log lines from trusted logins are exported.
 - **What agents may pick.** Only issues with the ready label (`night-safe`) and exactly one lane label are
   picked. Only people with triage or write access can add labels.
 

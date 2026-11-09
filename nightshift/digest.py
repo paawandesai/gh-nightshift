@@ -45,7 +45,9 @@ def build(gh: GH, cfg: Config, hours: float = 24, now: dt.datetime | None = None
                 cost[m.group("lane")] += float(m.group("cost"))
 
     title = lambda x: ns.defang(" ".join(str(x.get("title", "")).split())).replace("≈", "~")[:90]  # noqa: E731
-    lines = [f"**Night shift digest** for the last {hours:g} h (until {now:%Y-%m-%d %H:%M} UTC)", ""]
+    head = "**Night shift weekly report**" if hours >= 168 else "**Night shift digest**"
+    span = f"{hours / 24:g} days" if hours >= 48 else f"{hours:g} h"
+    lines = [f"{head} for the last {span} (until {now:%Y-%m-%d %H:%M} UTC)", ""]
     nums = ", ".join("#" + str(p["number"]) for p in merged)
     lines.append(f"- Merged: **{len(merged)}**" + (f" ({nums})" if merged else ""))
     lines.append(f"- Closed without merging: **{len(closed)}**"

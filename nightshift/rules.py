@@ -31,10 +31,11 @@ def model_for(item: dict, failed_attempts: int, lane_model: str, escalate_model:
     return escalate_model if failed_attempts > 0 else lane_model
 
 
-def parse_deps(body: str | None) -> list[int]:
-    """Issue numbers this issue waits on. Handles "Blocked by #3 and #4", "Depends on #5" and the
-    Idea Factory's "- Blocked by: #12, #13" / "- Blocked by: none" / "- Blocked by: E01-S03"."""
-    deps: set[int] = set()
+CROSS_RE = re.compile(r"(?:https://github\.com/)?([A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100})"
+                      r"(?:#|/issues/)(\d+)")
+
+
+def _dep_tokens(body: str | None):
     for line in (body or "").splitlines():
         m = re.search(r"(?:blocked\s+by|depends\s+on)\s*:?\s*(.*)", line, re.I)
         if not m:
@@ -43,12 +44,38 @@ def parse_deps(body: str | None) -> list[int]:
         if not rest or rest.lower() in {"none", "n/a", "-", "nothing", "#"}:
             continue
         for token in re.split(r"\s*(?:,|\band\b|\s)\s*", rest):
-            token = token.strip()
-            if not token:
-                continue
-            num = re.fullmatch(r"#(\d+)", token)
-            deps.add(int(num.group(1)) if num else UNRESOLVED)
+            token = token.strip().rstrip(".")
+            if token:
+                yield token
+
+
+def parse_deps(body: str | None, repo: str = "") -> list[int]:
+    """Issue numbers in this repo this issue waits on. Handles "Blocked by #3 and #4", "Depends on #5" and the
+    Idea Factory's "- Blocked by: #12, #13" / "- Blocked by: none" / "- Blocked by: E01-S03". Cross-repo
+    references (`owner/repo#7`) are left to parse_cross_deps, except `repo` itself written in full; anything else
+    unresolvable counts as unmet."""
+    deps: set[int] = set()
+    for token in _dep_tokens(body):
+        num = re.fullmatch(r"#(\d+)", token)
+        cross = CROSS_RE.fullmatch(token)
+        if num:
+            deps.add(int(num.group(1)))
+        elif cross and repo and cross.group(1).lower() == repo.lower():
+            deps.add(int(cross.group(2)))
+        elif not cross:
+            deps.add(UNRESOLVED)
     return sorted(deps)
+
+
+def parse_cross_deps(body: str | None, this_repo: str = "") -> list[tuple[str, int]]:
+    """`Blocked by: owner/repo#7` (or an issue URL) in another repository; `this_repo` itself is left to parse_deps."""
+    out: set[tuple[str, int]] = set()
+    for token in _dep_tokens(body):
+        m = CROSS_RE.fullmatch(token)
+        if m:
+            out.add((m.group(1), int(m.group(2))))
+    return sorted(x for x in out if x[0].lower() != this_repo.lower())
+
 
 
 def wave_of(item: dict) -> int:

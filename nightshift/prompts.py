@@ -57,6 +57,14 @@ def template(name: str, root: str | Path = ".") -> str:
     return resources.files("nightshift").joinpath("prompts", f"{name}.md").read_text(encoding="utf-8")
 
 
+def version(name: str, root: str | Path = ".") -> str:
+    """Which prompt an agent ran with: `builtin` or `repo` (a committed override) plus a short content hash."""
+    import hashlib
+
+    source = "repo" if (Path(root) / ".night-shift" / "prompts" / f"{name}.md").is_file() else "builtin"
+    return f"{name}-{source}-{hashlib.sha256(template(name, root).encode()).hexdigest()[:12]}"
+
+
 def render(name: str, values: dict[str, str], root: str | Path = ".") -> str:
     text = template(name, root)
     for key, value in values.items():

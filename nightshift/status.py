@@ -115,3 +115,43 @@ def stats(gh: GH, cfg: Config, audit_csv: str | None = None) -> str:
         out.append(f"Review gate catch rate (from {audit_csv}, {use}{'' if use == 'human_label' else ', not ground truth'}):")
         out.append("  " + catch_rate(reasons.get("verdict_failed", 0), len(merged), (bad, len(labelled))))
     return "\n".join(out)
+
+
+def org_stats(gh: GH, org: str, make_gh, max_repos: int = 200) -> str:
+    """`stats --org`: every repo in the org (or user) that has a night-shift config, one line each, plus totals."""
+    import base64
+
+    from .config import CONFIG_PATH, ConfigError, loads
+
+    try:
+        repos = gh.paginate(f"orgs/{org}/repos", {"type": "all"})
+    except Exception:  # a user account, not an org
+        repos = gh.paginate(f"users/{org}/repos", {"type": "owner"})
+    rows, total_m, total_c, total_open = [], 0, 0, 0
+    for repo in sorted(repos, key=lambda r: r.get("full_name", ""))[:max_repos]:
+        name = repo.get("full_name", "")
+        if repo.get("archived") or not name:
+            continue
+        data = gh.get_or_none(f"repos/{name}/contents/{CONFIG_PATH}")
+        if not data or not data.get("content"):
+            continue
+        try:
+            cfg = loads(base64.b64decode(data["content"]).decode("utf-8"))
+        except ConfigError as err:
+            rows.append(f"  {name:40} config error: {err}")
+            continue
+        rgh = make_gh(name)
+        trusted = {cfg.bot_login or rgh.login, *cfg.trusted_logins}
+        pulls = [p for p in rgh.paginate(rgh.r("pulls"), {"state": "all"})
+                 if BRANCH_RE.match((p.get("head") or {}).get("ref", "")) and (p.get("user") or {}).get("login") in trusted]
+        merged = sum(1 for p in pulls if p.get("merged_at"))
+        closed = sum(1 for p in pulls if p.get("state") == "closed" and not p.get("merged_at"))
+        open_ = sum(1 for p in pulls if p.get("state") == "open")
+        total_m, total_c, total_open = total_m + merged, total_c + closed, total_open + open_
+        rows.append(f"  {name:40} {len(cfg.lanes):2} lanes  {merged:4} merged  {closed:4} closed  {open_:3} open  "
+                    f"merge rate {fmt_rate(merged, merged + closed)}")
+    if not rows:
+        return f"No repositories in {org} have {CONFIG_PATH} (or this token cannot read them)."
+    return "\n".join([f"Night shift across {org}: {len(rows)} repo(s)", *rows,
+                      f"Total: {total_m} merged, {total_c} closed unmerged, {total_open} open; "
+                      f"merge rate {fmt_rate(total_m, total_m + total_c)}"]) + "\n"

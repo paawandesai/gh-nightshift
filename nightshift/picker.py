@@ -38,6 +38,7 @@ from .rules import (
     label_names,
     lanes_of,
     model_for,
+    parse_cross_deps,
     parse_deps,
     path_is_protected,
     section,
@@ -80,6 +81,9 @@ class Picker:
         self._states: dict[int, str] = {}
         self._closed_at: dict[int, str] = {}
         self.awaiting_approval: set[int] = set()
+        self._cross: dict[tuple[str, int], dict] = {}
+        self._files: dict[int, list[str]] = {}
+        self._owner_groups: dict[int, list[set[str] | None]] = {}
 
     # --- small helpers -----------------------------------------------------------------
     def issue_state(self, number: int) -> str:
@@ -100,6 +104,30 @@ class Picker:
         got = {x.get("from") for x in ns.trusted(comments, self.gh.trusted, "handoff")}
         return [d for d in deps if d not in got and self._closed_at.get(d)
                 and age_minutes(self._closed_at[d], self.now) < HANDOFF_GRACE_MINUTES]
+
+    def cross_state(self, ref: tuple[str, int]) -> dict:
+        """An issue in another repository. The PAT must be able to read it (public, or a token with access);
+        if it cannot, the dependency counts as unmet and `status` shows it as waiting."""
+        if ref not in self._cross:
+            try:
+                data = self.gh.get_or_none(f"repos/{ref[0]}/issues/{ref[1]}") or {}
+            except GHError:
+                data = {}
+            self._cross[ref] = {"state": data.get("state", "unknown"), "title": data.get("title", ""),
+                                "body": data.get("body") or ""}
+        return self._cross[ref]
+
+    def cross_hand_off(self, number: int, refs: list[tuple[str, int]], comments: list[dict]) -> None:
+        """Pull-style hand-off: this repo's PAT cannot write to the other repo, so the waiting side posts it."""
+        got = {x.get("from") for x in ns.trusted(comments, self.gh.trusted, "handoff")}
+        for repo, n in refs:
+            ref = f"{repo}#{n}"
+            if ref in got:
+                continue
+            dep = self.cross_state((repo, n))
+            body = self.gh.comment(number, ns.cross_handoff_comment(ref, dep["title"], section(dep["body"], "Interface"),
+                                                                    number))
+            comments.append(body or {})
 
     def refund_last_attempt(self, number: int, why: str) -> None:
         """Turn the latest attempt marker into an infra marker: the failure wasn't the agent's."""
@@ -160,7 +188,7 @@ class Picker:
             # The real marker is the last one: publish writes it after the (defanged) agent text.
             handoff = data[-1].data.get("data") if data else None
             for dep in self.gh.issues():
-                if issue_no not in parse_deps(dep.get("body")):
+                if issue_no not in parse_deps(dep.get("body"), self.gh.repo):
                     continue
                 already = [x for x in ns.trusted(self.gh.comments(dep["number"]), self.gh.trusted, "handoff")
                            if x.get("from") == issue_no]
@@ -279,20 +307,48 @@ class Picker:
         return busy
 
     # --- risk tiers (strict mode) -------------------------------------------------------
+    def pr_files(self, num: int) -> list[str] | None:
+        """Changed paths (both names of a rename), or None when the list cannot be complete: GitHub lists at most
+        3000 files and paginate stops at 2000, so path rules then fail closed."""
+        if num not in self._files:
+            files = self.gh.paginate(self.gh.r(f"pulls/{num}/files"))
+            expected = (self.gh.get_or_none(self.gh.r(f"pulls/{num}")) or {}).get("changed_files")
+            if len(files) >= 2000 or (isinstance(expected, int) and len(files) < expected):
+                self._files[num] = None
+                return None
+            # A rename counts under both names, so moving a file out of a sensitive folder still needs approval.
+            self._files[num] = [x for f in files for x in (f.get("filename", ""), f.get("previous_filename", "")) if x]
+        return self._files[num]
+
     def approval_needed(self, pr: dict, issue_no: int | None) -> str:
         """Why this green PR needs one human approval before merging, or "" if it may merge on its own."""
         cfg = self.cfg
-        if not (cfg.risk_approve_labels or cfg.risk_approve_paths or cfg.risk_default == "approve"):
+        if not (cfg.risk_approve_labels or cfg.risk_approve_paths or cfg.risk_default == "approve"
+                or cfg.risk_codeowners):
             return ""
         labels = label_names(pr) | (label_names(self.gh.issue(issue_no) or {}) if issue_no else set())
         hit = sorted(labels & set(cfg.risk_approve_labels))
         if hit:
             return f"label {hit[0]}"
+        if (cfg.risk_approve_paths or cfg.risk_codeowners) and self.pr_files(pr["number"]) is None:
+            return "too many changed files to check the path rules"
         if cfg.risk_approve_paths:
-            files = [f.get("filename", "") for f in self.gh.paginate(self.gh.r(f"pulls/{pr['number']}/files"))]
-            for f in files:
+            for f in self.pr_files(pr["number"]) or []:
                 if path_is_protected(f, cfg.risk_approve_paths):
                     return f"changes {f}"
+        if cfg.risk_codeowners:
+            from . import codeowners
+
+            rules = codeowners.fetch(self.gh, self.cfg.main_branch)
+            groups = {}
+            for f in self.pr_files(pr["number"]) or []:
+                owners = codeowners.owners_for(rules, f)
+                if owners:
+                    groups[f] = codeowners.user_owners(owners)
+            if groups:
+                self._owner_groups[pr["number"]] = list(groups.values())
+                first = sorted(groups)[0]
+                return f"code owners review: {first}" + (f" and {len(groups) - 1} more file(s)" if len(groups) > 1 else "")
         if cfg.risk_default == "approve" and not labels & set(cfg.risk_auto_labels):
             return "risk.default is approve"
         return ""
@@ -305,18 +361,22 @@ class Picker:
             login = (r.get("user") or {}).get("login", "")
             if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
                 latest[login] = r
-        for login, r in latest.items():
-            if (r.get("state") == "APPROVED" and r.get("commit_id") == sha and login != author
-                    and not login.endswith("[bot]") and can_command(self.gh, login)):
-                return True
-        return False
+        approvers = {login.lower() for login, r in latest.items()
+                     if r.get("state") == "APPROVED" and r.get("commit_id") == sha and login != author
+                     and not login.endswith("[bot]") and can_command(self.gh, login)}
+        groups = self._owner_groups.get(pr["number"])
+        if not groups:
+            return bool(approvers)
+        # Every owned file needs one of its owners (any writer when a team or email owns it).
+        return all(approvers if g is None else approvers & g for g in groups)
 
     def ask_approval(self, pr: dict, why: str) -> None:
-        num = pr["number"]
-        if ns.trusted(self.gh.comments(num), self.gh.trusted, "approval"):
+        """Ask once per head commit: updating the branch with main makes an earlier approval stale."""
+        num, sha = pr["number"], pr["head"]["sha"]
+        if any(m.get("sha") == sha for m in ns.trusted(self.gh.comments(num), self.gh.trusted, "approval")):
             return
         self.gh.add_labels(num, ["needs-approval"])
-        self.gh.comment(num, f"{ns.marker('approval', pr=num)}\nNight shift: checks are green, but this PR needs "
+        self.gh.comment(num, f"{ns.marker('approval', pr=num, sha=sha)}\nNight shift: checks are green, but this PR needs "
                              f"one approval from a person with write access before it merges ({ns.defang(why)}). "
                              "Approve the latest commit; the next lane run merges it.")
 
@@ -359,11 +419,17 @@ class Picker:
             num = issue["number"]
             if num in self.awaiting_approval:
                 continue
-            if [d for d in parse_deps(issue.get("body")) if self.issue_state(d) != "closed"]:
+            if [d for d in parse_deps(issue.get("body"), self.gh.repo) if self.issue_state(d) != "closed"]:
+                waiting += 1
+                continue
+            cross = parse_cross_deps(issue.get("body"), self.gh.repo)
+            if cross and [x for x in cross if self.cross_state(x)["state"] != "closed"]:
                 waiting += 1
                 continue
             comments = self.gh.comments(num) if issue.get("comments", 1) else []
-            if self.awaiting_handoff(parse_deps(issue.get("body")), comments):
+            if cross:
+                self.cross_hand_off(num, cross, comments)
+            if self.awaiting_handoff(parse_deps(issue.get("body"), self.gh.repo), comments):
                 waiting += 1
                 continue
             tried = ns.count(comments, self.gh.trusted, "attempt")

@@ -81,9 +81,11 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
         text = wf.read_text(encoding="utf-8")
         fails_before = sum(c.level == FAIL for c in out)
         code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        if "secrets: inherit" in code or re.search(r"secrets\[", code):
-            out.append(Check(FAIL, f"{LANE_WORKFLOW} uses dynamic secrets (secrets[...] or inherit): every repo secret "
-                                   "would reach the lane runners", "run `gh nightshift init --regenerate`"))
+        for other in sorted((root / ".github/workflows").glob("night-shift*.yml")):
+            body = "\n".join(ln for ln in other.read_text(encoding="utf-8").splitlines() if not ln.lstrip().startswith("#"))
+            if "secrets: inherit" in body or re.search(r"secrets\[", body):
+                out.append(Check(FAIL, f".github/workflows/{other.name} uses dynamic secrets (secrets[...] or inherit): "
+                                       "every repo secret would reach its runners", "run `gh nightshift init --regenerate`"))
         for lane in cfg.lanes:
             job = f"lane-{lane.name}:"
             if job not in text:
@@ -92,6 +94,14 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
             elif f"secrets.{lane.token_secret} " not in text:
                 out.append(Check(FAIL, f"lane {lane.name}'s job does not pass secrets.{lane.token_secret}",
                                  "run `gh nightshift init --regenerate`"))
+        if cfg.extends and not (root / ".night-shift/base.yml").is_file():
+            out.append(Check(WARN, f"config extends {cfg.extends} but .night-shift/base.yml is missing",
+                             "run `gh nightshift config pull` and commit the file"))
+        co = next((loc for loc in (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+                   if (root / loc).is_file()), "")
+        if co and not cfg.risk_codeowners:
+            out.append(Check(WARN, f"{co} exists but agent PRs merge without a code owner's review",
+                             "set `risk: {codeowners: true}` in .night-shift/config.yml"))
         if cfg.auth_mode == "app":
             if f"app_private_key: ${{{{ secrets.{cfg.app_key_secret} }}}}" not in text or "agent_pat:" in code:
                 out.append(Check(FAIL, f"auth.mode is app but {LANE_WORKFLOW} does not pass only the App key",

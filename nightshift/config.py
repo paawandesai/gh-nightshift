@@ -94,9 +94,12 @@ class Config:
     risk_approve_labels: list[str] = field(default_factory=list)
     risk_approve_paths: list[str] = field(default_factory=list)
     risk_auto_labels: list[str] = field(default_factory=list)
+    risk_codeowners: bool = False  # PRs touching files with CODEOWNERS owners need one of those owners' approval
+    extends: str = ""  # owner/repo whose .night-shift/config.yml is the org-wide base (`gh nightshift config pull`)
     digest_enabled: bool = True
     digest_schedule: str = "0 7 * * *"
     digest_webhook_secret: str = ""  # optional secret holding a Slack or Discord webhook URL
+    digest_weekly_schedule: str = "0 8 * * 1"  # weekly report (7 days); "" turns it off
 
     # --- derived -----------------------------------------------------------------------
     @property
@@ -211,12 +214,17 @@ def parse(data: dict) -> Config:
         risk_approve_labels=list((data.get("risk") or {}).get("approve_labels", [])),
         risk_approve_paths=list((data.get("risk") or {}).get("approve_paths", [])),
         risk_auto_labels=list((data.get("risk") or {}).get("auto_labels", [])),
+        risk_codeowners=bool((data.get("risk") or {}).get("codeowners", False)),
+        extends=data.get("extends", ""),
         digest_enabled=(data.get("digest") or {}).get("enabled", True),
         digest_schedule=str((data.get("digest") or {}).get("schedule", "0 7 * * *")),
         digest_webhook_secret=(data.get("digest") or {}).get("webhook_secret", ""),
+        digest_weekly_schedule=str((data.get("digest") or {}).get("weekly_schedule", "0 8 * * 1")),
     )
     if not re.fullmatch(r"[0-9*/,\- ]{9,60}", cfg.digest_schedule) or len(cfg.digest_schedule.split()) != 5:
         raise ConfigError(f"digest.schedule {cfg.digest_schedule!r} is not a 5-field cron expression")
+    if cfg.extends and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", cfg.extends):
+        raise ConfigError(f"extends must be owner/repo, not {cfg.extends!r}")
     if cfg.auth_mode not in ("pat", "app"):
         raise ConfigError(f"auth.mode must be pat or app, not {cfg.auth_mode!r}")
     if cfg.auth_mode == "app":
@@ -231,6 +239,9 @@ def parse(data: dict) -> Config:
             raise ConfigError(f"secret {cfg.app_key_secret} is used both as a Claude token and as the App key")
     if cfg.risk_default not in ("auto", "approve"):
         raise ConfigError(f"risk.default must be auto or approve, not {cfg.risk_default!r}")
+    weekly = cfg.digest_weekly_schedule
+    if weekly and (not re.fullmatch(r"[0-9*/,\- ]{9,60}", weekly) or len(weekly.split()) != 5 or weekly == cfg.digest_schedule):
+        raise ConfigError(f"digest.weekly_schedule {weekly!r} must be a 5-field cron expression unlike digest.schedule")
     if cfg.digest_webhook_secret and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cfg.digest_webhook_secret):
         raise ConfigError("digest.webhook_secret must be a secret name (A-Z, 0-9, _)")
     if cfg.digest_webhook_secret in pats_or_claude(cfg):
@@ -255,9 +266,36 @@ def pats_or_claude(cfg: Config) -> set[str]:
             | {lane.token_secret for lane in cfg.lanes} | {lane.agent_pat_secret for lane in cfg.lanes})
 
 
-def loads(text: str) -> Config:
+BASE_PATH = ".night-shift/base.yml"  # written by `gh nightshift config pull` from the `extends:` repo
+# What an org-wide base may set. Lanes, identities, auth and secret names always stay in the repo's own config.
+INHERITABLE = {"models", "limits", "labels", "protected_paths", "required_checks", "timezone", "risk", "digest",
+               "planner", "merge", "tool_ref"}
+NOT_FROM_BASE = {"planner": {"claude_token_secret"}, "digest": {"webhook_secret"}}
+
+
+def merge_base(base: dict, local: dict) -> dict:
+    """Local wins key by key (one level deep for mappings); protected_paths are the union of both."""
+    out = dict(local)
+    for key, value in (base or {}).items():
+        if key not in INHERITABLE:
+            continue
+        if isinstance(value, dict):
+            value = {k: v for k, v in value.items() if k not in NOT_FROM_BASE.get(key, set())}
+        if key == "protected_paths":
+            out[key] = list(value or []) + [p for p in (local.get(key) or []) if p not in (value or [])]
+        elif isinstance(value, dict) and isinstance(local.get(key), dict):
+            out[key] = {**value, **local[key]}
+        elif key not in local:
+            out[key] = value
+    return out
+
+
+def loads(text: str, base_text: str | None = None) -> Config:
     try:
-        return parse(yamlish.loads(text))
+        data = yamlish.loads(text)
+        if base_text is not None and isinstance(data, dict):
+            data = merge_base(yamlish.loads(base_text) or {}, data)
+        return parse(data)
     except yamlish.YAMLError as err:
         raise ConfigError(f"{CONFIG_PATH}: {err}") from err
 
@@ -266,4 +304,5 @@ def load(root: str | Path = ".") -> Config:
     path = Path(root) / CONFIG_PATH
     if not path.exists():
         raise ConfigError(f"{path} not found; run `gh nightshift init` first")
-    return loads(path.read_text(encoding="utf-8"))
+    base = Path(root) / BASE_PATH
+    return loads(path.read_text(encoding="utf-8"), base.read_text(encoding="utf-8") if base.is_file() else None)

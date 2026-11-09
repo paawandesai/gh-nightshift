@@ -80,6 +80,8 @@ def handle(gh: GH, cfg: Config, author: str, body: str, number: int) -> str:
     if cmd is None:
         return "skip: not a /night-shift take or retry command"
     action, named = cmd
+    if author == gh.login or author.endswith("[bot]"):
+        return "skip: commands from the night shift's own account are ignored"
     if not can_command(gh, author):
         return f"skip: /night-shift {action} needs a comment from a user with write access (got {author!r})"
     target = _target(gh, number, named)

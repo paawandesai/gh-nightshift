@@ -104,11 +104,12 @@ def classify(result_path: str | None) -> Result:
                   num_turns=turns)
 
 
-def pr_body(mode: str, issue: str, lane: str, model: str, res: Result) -> str:
+def pr_body(mode: str, issue: str, lane: str, model: str, res: Result, prompt_version: str = "") -> str:
     parts = []
     if mode == "issue":
         parts += [f"Closes #{issue}", ""]
-    parts += [f"**Lane:** `{lane}` (night shift) · **Model:** `{model}`", "", res.summary]
+    prompt = f" · **Prompt:** `{prompt_version}`" if prompt_version else ""
+    parts += [f"**Lane:** `{lane}` (night shift) · **Model:** `{model}`{prompt}", "", res.summary]
     if res.assumptions:
         parts += ["", "**Assumptions the agent made (review in the morning):**", *[f"- {a}" for a in res.assumptions]]
     if res.handoff:
@@ -138,6 +139,7 @@ class Job:
     result_path: str = ""
     bundle_path: str = ""
     push_url: str = ""          # https://github.com/o/r.git; the PAT comes from $GH_TOKEN (see _git_env)
+    prompt_version: str = ""    # prompts.version("worker"), for the audit log
 
 
 def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
@@ -213,7 +215,8 @@ def push_and_open_pr(gh: GH, cfg: Config, job: Job, res: Result, git: GitRunner)
     try:
         pr = gh.post(gh.r("pulls"), {"title": f"[{job.lane}] {job.title}", "head": job.branch,
                                      "base": cfg.main_branch,
-                                     "body": pr_body(job.mode, job.issue, job.lane, job.model, res)})
+                                     "body": pr_body(job.mode, job.issue, job.lane, job.model, res,
+                                                                  job.prompt_version)})
     except GHError as err:
         return f"push ok but PR creation failed: {err}"
     labels = [cfg.label("agent"), f"lane:{job.lane}"] + (["fix-main"] if job.mode == "fix-main" else [])
