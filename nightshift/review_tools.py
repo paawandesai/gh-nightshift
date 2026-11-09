@@ -1,6 +1,8 @@
 """Inputs and output for the review gate (`review-inputs`, `review-report`)."""
 from __future__ import annotations
 
+from . import protocol as ns
+
 import json
 import subprocess
 from pathlib import Path
@@ -76,6 +78,7 @@ def render_report(result_path: str, overlap: int = 0) -> tuple[str, str]:
     try:
         data = json.loads(Path(result_path).read_text(encoding="utf-8"))
         out = data.get("structured_output") or {}
+        out = ns.defang(out) if isinstance(out, dict) else {}  # the reviewer read agent-written code
     except (OSError, json.JSONDecodeError, AttributeError):
         out = {}
     verdict = out.get("verdict") if out.get("verdict") in {"pass", "fail"} else "error"

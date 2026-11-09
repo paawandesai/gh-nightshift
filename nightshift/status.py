@@ -23,6 +23,7 @@ def status(gh: GH, cfg: Config, enabled: bool = True, log_lines: int = 10) -> st
     # writes are only recorded, so status never changes anything.
     shadow = GH(gh.repo, transport=gh.transport, dry_run=True, out=io.StringIO())
     shadow.login = gh.login
+    shadow.trusted_extra = set(gh.trusted_extra)
     out.append("Lanes (what each picker would do now):")
     for lane in cfg.lanes:
         try:
@@ -65,10 +66,11 @@ def status(gh: GH, cfg: Config, enabled: bool = True, log_lines: int = 10) -> st
 
 def stats(gh: GH, cfg: Config, audit_csv: str | None = None) -> str:
     bot = cfg.bot_login or gh.login
+    trusted = {bot, *cfg.trusted_logins}
     pulls = [p for p in gh.paginate(gh.r("pulls"), {"state": "all"})
              if (BRANCH_RE.match((p.get("head") or {}).get("ref", "")) or
                  (p.get("head") or {}).get("ref", "").startswith("agent/"))
-             and (p.get("user") or {}).get("login") == bot]
+             and (p.get("user") or {}).get("login") in trusted]
     merged = [p for p in pulls if p.get("merged_at")]
     closed = [p for p in pulls if p.get("state") == "closed" and not p.get("merged_at")]
     open_ = [p for p in pulls if p.get("state") == "open"]
@@ -79,7 +81,7 @@ def stats(gh: GH, cfg: Config, audit_csv: str | None = None) -> str:
            f"Merge rate: {fmt_rate(len(merged), decided)}"]
     reasons: Counter = Counter()
     for p in closed:
-        reasons[ns.pr_reason(gh.comments(p["number"]), bot) or "manual"] += 1
+        reasons[ns.pr_reason(gh.comments(p["number"]), frozenset(trusted)) or "manual"] += 1
     if closed:
         out.append("Unmerged by reason (from ns markers; no marker = manual):")
         for reason, n in reasons.most_common():
@@ -93,7 +95,7 @@ def stats(gh: GH, cfg: Config, audit_csv: str | None = None) -> str:
         # Only writers' comments count, so an outsider cannot inflate the cost figure.
         writers = {"OWNER", "MEMBER", "COLLABORATOR"}
         costs = [float(m.group(1)) for c in gh.comments(log)
-                 if (c.get("author_association") in writers or (c.get("user") or {}).get("login") == bot)
+                 if (c.get("author_association") in writers or (c.get("user") or {}).get("login") in trusted)
                  and (m := COST_RE.search(c.get("body") or ""))]
     if merged and costs:
         out.append(f"Est. cost per merged PR: ${sum(costs) / len(merged):.2f} API-equivalent "

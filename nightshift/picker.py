@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 from dataclasses import dataclass
 
 from . import protocol as ns
@@ -93,13 +94,13 @@ class Picker:
     def awaiting_handoff(self, deps: list[int], comments: list[dict]) -> list[int]:
         """Dependencies that closed moments ago and have not handed off to this issue yet. The merge that closes a
         dependency also wakes the other lanes, so without this the dependent could start before the hand-off lands."""
-        got = {x.get("from") for x in ns.trusted(comments, self.gh.login, "handoff")}
+        got = {x.get("from") for x in ns.trusted(comments, self.gh.trusted, "handoff")}
         return [d for d in deps if d not in got and self._closed_at.get(d)
                 and age_minutes(self._closed_at[d], self.now) < HANDOFF_GRACE_MINUTES]
 
     def refund_last_attempt(self, number: int, why: str) -> None:
         """Turn the latest attempt marker into an infra marker: the failure wasn't the agent's."""
-        cid = ns.latest_id(self.gh.comments(number), self.gh.login, "attempt")
+        cid = ns.latest_id(self.gh.comments(number), self.gh.trusted, "attempt")
         if cid:
             self.gh.edit_comment(cid, f"{ns.marker('infra', issue=number)}\nAttempt not counted: {why}")
 
@@ -114,7 +115,7 @@ class Picker:
         head = pr.get("head") or {}
         return (head.get("ref", "").startswith(f"agent/{self.lane.name}/")
                 and (head.get("repo") or {}).get("full_name") == self.gh.repo
-                and (pr.get("user") or {}).get("login") == self.gh.login)
+                and (pr.get("user") or {}).get("login") in self.gh.trusted)
 
     # --- 2. hand-offs (step 3a) --------------------------------------------------------
     def reconcile_merged(self) -> list[str]:
@@ -129,7 +130,7 @@ class Picker:
                 # Closed unmerged by a person (the night shift always records why it closes): record `manual`.
                 if pr.get("closed_at") and age_minutes(pr["closed_at"], self.now) <= HANDOFF_WINDOW_HOURS * 60:
                     comments = self.gh.comments(pr["number"])
-                    if not ns.pr_reason(comments, self.gh.login):
+                    if not ns.pr_reason(comments, self.gh.trusted):
                         m = BRANCH_RE.match(pr["head"]["ref"])
                         self.gh.comment(pr["number"], ns.marker("pr", reason="manual", pr=pr["number"],
                                                                 issue=int(m.group(2)) if m else None)
@@ -139,9 +140,9 @@ class Picker:
             if age_minutes(pr["merged_at"], self.now) > HANDOFF_WINDOW_HOURS * 60:
                 continue
             comments = self.gh.comments(pr["number"])
-            if ns.trusted(comments, self.gh.login, "handoff-done"):
+            if ns.trusted(comments, self.gh.trusted, "handoff-done"):
                 continue
-            done.append(self.hand_off(pr, record_pass=not ns.pr_reason(comments, self.gh.login)))
+            done.append(self.hand_off(pr, record_pass=not ns.pr_reason(comments, self.gh.trusted)))
         return done
 
     def hand_off(self, pr: dict, record_pass: bool = True) -> str:
@@ -152,13 +153,13 @@ class Picker:
             issue_no = int(m.group(2))
             merged = self.gh.issue(issue_no) or {}
             data = ns.trusted([{"id": 0, "user": pr.get("user"), "body": pr.get("body") or ""}],
-                              self.gh.login, "handoff-data")
+                              self.gh.trusted, "handoff-data")
             # The real marker is the last one: publish writes it after the (defanged) agent text.
             handoff = data[-1].data.get("data") if data else None
             for dep in self.gh.issues():
                 if issue_no not in parse_deps(dep.get("body")):
                     continue
-                already = [x for x in ns.trusted(self.gh.comments(dep["number"]), self.gh.login, "handoff")
+                already = [x for x in ns.trusted(self.gh.comments(dep["number"]), self.gh.trusted, "handoff")
                            if x.get("from") == issue_no]
                 if already:
                     continue
@@ -286,8 +287,8 @@ class Picker:
         if log is None:
             return 0, 0
         comments = self.gh.comments(log)
-        return (ns.count(comments, self.gh.login, "fix-attempt", sha=sha),
-                ns.count(comments, self.gh.login, "fix-infra", sha=sha))
+        return (ns.count(comments, self.gh.trusted, "fix-attempt", sha=sha),
+                ns.count(comments, self.gh.trusted, "fix-infra", sha=sha))
 
     # --- 5. next issue -----------------------------------------------------------------
     def candidates(self) -> list[dict]:
@@ -309,8 +310,8 @@ class Picker:
             if self.awaiting_handoff(parse_deps(issue.get("body")), comments):
                 waiting += 1
                 continue
-            tried = ns.count(comments, self.gh.login, "attempt")
-            infra = ns.count(comments, self.gh.login, "infra")
+            tried = ns.count(comments, self.gh.trusted, "attempt")
+            infra = ns.count(comments, self.gh.trusted, "infra")
             if tried >= self.cfg.max_attempts or infra >= self.cfg.infra_cap:
                 why = (f"{tried} failed attempts" if tried >= self.cfg.max_attempts
                        else f"{infra} runs that never started (check the lane token and usage)")
@@ -323,6 +324,29 @@ class Picker:
         if waiting:
             return None, f"{waiting} issue(s) in lane {self.lane.name} are waiting on dependencies", ""
         return None, f"no ready issues in lane {self.lane.name}", ""
+
+    # --- budget (optional) -------------------------------------------------------------
+    def budget_reached(self) -> str:
+        """Skip reason when the lane's nightly budget is spent; '' when there is no cap or room is left."""
+        cap = self.lane.budget_usd_per_night
+        if not cap:
+            return ""
+        log = self.gh.night_log(self.cfg.label("night_log"))
+        if not log:
+            return ""
+        now = self.now or dt.datetime.now(dt.timezone.utc)
+        since = night_start(now, self.cfg.timezone)
+        comments = self.gh.comments(log)
+        spent = lane_spend(comments, self.gh.trusted, self.lane.name, since)
+        if spent < cap:
+            return ""
+        noted = [m for m in ns.trusted(comments, self.gh.trusted, "budget")
+                 if m.get("lane") == self.lane.name and m.get("night") == since.date().isoformat()]
+        if not noted:
+            self.gh.comment(log, ns.marker("budget", lane=self.lane.name, night=since.date().isoformat())
+                            + f"\nNight shift: lane `{self.lane.name}` reached its budget (${spent:.2f} of ${cap:.2f}); "
+                              "paused until noon.")
+        return f"lane {self.lane.name} spent ${spent:.2f} of its ${cap:.2f} nightly budget; paused until noon"
 
     # --- decision ----------------------------------------------------------------------
     def decide(self) -> dict[str, str]:
@@ -347,10 +371,45 @@ class Picker:
                             "started); needs a human")
             return {"mode": "fix-main", "issue": "", "reason": f"latest CI on {self.cfg.main_branch} failed",
                     "fail_sha": sha, "model": self.escalate_model}
+        over = self.budget_reached()
+        if over:
+            return skip(over)
         number, reason, model = self.next_issue()
         if number is None:
             return skip(reason)
         return {"mode": "issue", "issue": str(number), "reason": reason, "fail_sha": "", "model": model}
+
+
+COST_LINE_RE = re.compile(r"`(?P<lane>[a-z0-9][a-z0-9_-]*)`.*≈\$(?P<cost>[0-9]+(?:\.[0-9]+)?)\)?\s*$")
+
+
+def night_start(now: dt.datetime, tz_name: str) -> dt.datetime:
+    """A night runs noon to noon in the configured time zone; returns the start of the current one (UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(tz_name)
+    except Exception:  # unknown zone or no tz database: fall back to UTC
+        tz = dt.timezone.utc
+    local = now.astimezone(tz)
+    start = local.replace(hour=12, minute=0, second=0, microsecond=0)
+    if local < start:
+        start -= dt.timedelta(days=1)
+    return start.astimezone(dt.timezone.utc)
+
+
+def lane_spend(comments: list[dict], trusted: frozenset[str], lane: str, since: dt.datetime) -> float:
+    """API-equivalent USD this lane logged on the night log since `since` (trusted comments only)."""
+    total = 0.0
+    for c in comments:
+        if (c.get("user") or {}).get("login") not in trusted or not c.get("created_at"):
+            continue
+        if dt.datetime.fromisoformat(c["created_at"].replace("Z", "+00:00")) < since:
+            continue
+        m = COST_LINE_RE.search((c.get("body") or "").splitlines()[0] if c.get("body") else "")
+        if m and m.group("lane") == lane:
+            total += float(m.group("cost"))
+    return total
 
 
 def skip(reason: str) -> dict[str, str]:

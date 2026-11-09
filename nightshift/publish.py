@@ -229,7 +229,7 @@ def dependency_edges(gh: GH) -> dict[int, set[int]]:
 def park_waiting(gh: GH, cfg: Config, job: Job, issue: dict, res: Result) -> str:
     me = issue["number"]
     comments = gh.comments(me)
-    already = len(ns.trusted(comments, gh.login, "need"))
+    already = len(ns.trusted(comments, gh.trusted, "need"))
     room = max(cfg.max_needs_per_issue - already, 0)
     lines: list[str] = []
     providers: list[int] = []
@@ -285,7 +285,7 @@ def park_waiting(gh: GH, cfg: Config, job: Job, issue: dict, res: Result) -> str
 def send_notes(gh: GH, cfg: Config, job: Job, issue: dict, notes: list[dict]) -> list[str]:
     """Informational messages to other issues (step 3c), capped per sending issue."""
     me = issue["number"]
-    sent = len(ns.trusted(gh.comments(me), gh.login, "note-sent"))
+    sent = len(ns.trusted(gh.comments(me), gh.trusted, "note-sent"))
     out = []
     for note in notes[: max(cfg.max_notes_per_issue - sent, 0)]:
         try:

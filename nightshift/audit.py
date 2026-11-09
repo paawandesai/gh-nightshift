@@ -44,14 +44,14 @@ DOC_RE = re.compile(r"\.md$|(^|/)docs/|(^|/)progress/")
 
 # --- 1. sample ------------------------------------------------------------------------
 
-def agent_prs(gh: GH, lanes: list[str] | None = None, bot: str = "") -> list[dict]:
+def agent_prs(gh: GH, lanes: list[str] | None = None, bot: str = "", also: tuple[str, ...] = ()) -> list[dict]:
     """Merged PRs opened by the bot on an agent/<lane>/issue-<n> branch, sorted by number."""
     out = []
     for pr in gh.paginate(gh.r("pulls"), {"state": "closed"}):
         if not pr.get("merged_at"):
             continue
         m = BRANCH_RE.match(((pr.get("head") or {}).get("ref")) or "")
-        if not m or ((pr.get("user") or {}).get("login")) != (bot or gh.login):
+        if not m or ((pr.get("user") or {}).get("login")) not in {bot or gh.login, *also}:
             continue
         if lanes and m.group(1) not in lanes:
             continue
@@ -59,9 +59,10 @@ def agent_prs(gh: GH, lanes: list[str] | None = None, bot: str = "") -> list[dic
     return sorted(out, key=lambda p: p["number"])
 
 
-def sample(gh: GH, n: int, seed: int, lanes: list[str] | None = None, bot: str = "") -> list[dict]:
+def sample(gh: GH, n: int, seed: int, lanes: list[str] | None = None, bot: str = "",
+           also: tuple[str, ...] = ()) -> list[dict]:
     """Reproducible: the same seed over the same PR set always draws the same PRs (sorted by number)."""
-    prs = agent_prs(gh, lanes, bot)
+    prs = agent_prs(gh, lanes, bot, also)
     if len(prs) <= n:
         return prs
     return sorted(random.Random(seed).sample(prs, n), key=lambda p: p["number"])

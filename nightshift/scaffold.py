@@ -212,7 +212,45 @@ def files(cfg: Config, config_text: str, root: Path) -> dict[str, str]:
     }
     if cfg.planner_enabled:
         out[".github/workflows/night-shift-planner.yml"] = planner_workflow(cfg)
+    if not (root / ".github/workflows" / cfg.ci_workflow).exists():
+        # No CI yet: the lanes are gated on it and `test` is a required check, so write a starter one.
+        out[f".github/workflows/{cfg.ci_workflow}"] = ci_template(cfg)
     return out
+
+
+# --- presets (optional; init --preset) -------------------------------------------------
+
+PRESETS = {
+    "python": {"setup": "python -m pip install -q -r requirements.txt", "test": "python -m pytest -q"},
+    "node": {"setup": "npm ci", "test": "npm test"},
+    "go": {"setup": "go mod download", "test": "go test ./..."},
+}
+
+
+def preset_commands(name: str, folder: str = "") -> dict:
+    """Setup and test commands for a stack preset, run inside the lane's folder."""
+    p = PRESETS[name]
+    prefix = f"cd {folder} && " if folder else ""
+    return {"stack": name, "setup": prefix + p["setup"], "test": prefix + p["test"]}
+
+
+def ci_template(cfg: Config) -> str:
+    """A starter CI with the required `test` job: every lane's setup and test commands."""
+    steps = []
+    for lane in cfg.lanes:
+        for kind, cmd in (("setup", lane.setup_commands.strip()), ("test", lane.test_command.strip())):
+            if cmd:
+                body = "\n".join("          " + ln for ln in cmd.splitlines())
+                steps.append(f"      - name: {lane.name} {kind}\n        run: |\n{body}")
+    if not steps:
+        steps.append('      - run: echo "add your test command here" && exit 1')
+    triggers = "  push:\n    branches: [" + cfg.main_branch + "]\n  pull_request:\n"
+    if cfg.merge_mode == "queue":
+        triggers += "  merge_group:\n"
+    return ("# Starter CI written by `gh nightshift init` because none existed. The night shift requires the `test`\n"
+            "# job to pass on every PR and on main. Edit freely; keep the job id `test`.\n"
+            f"name: CI\non:\n{triggers}permissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses: actions/checkout@v4\n" + "\n".join(steps) + "\n")
 
 
 # --- stack detection -------------------------------------------------------------------

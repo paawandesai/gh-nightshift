@@ -47,8 +47,9 @@ def token_scopes(token: str | None = None, run: Callable = subprocess.run) -> tu
     return login, scopes
 
 
-def pat_checks(token: str, run: Callable = subprocess.run) -> list[Check]:
-    login, scopes = token_scopes(token, run)
+def pat_checks(token: str, run: Callable = subprocess.run,
+               known: tuple[str | None, str] | None = None) -> list[Check]:
+    login, scopes = known or token_scopes(token, run)
     if login is None:
         return [Check(FAIL, "the PAT does not authenticate", "create a new fine-grained PAT and set AGENT_PAT")]
     out = [Check(OK, f"PAT authenticates as {login}")]
@@ -115,6 +116,11 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
                              "create the composite action or remove setup.action"))
         if not lane.test_command:
             out.append(Check(WARN, f"lane {lane.name} has no test_command", "set lanes[].test_command"))
+    own = [lane.name for lane in cfg.lanes if lane.pat_secret]
+    if own and not cfg.trusted_logins:
+        out.append(Check(WARN, f"lane(s) {', '.join(own)} use their own PAT but trusted_logins is empty: each lane "
+                               "ignores hand-offs, needs and notes posted by the others",
+                         f"list every PAT's login under trusted_logins in {CONFIG_PATH}"))
     return cfg, out
 
 
@@ -207,12 +213,21 @@ def own_token_checks(run: Callable = subprocess.run) -> list[Check]:
     return [Check(OK, f"gh authenticated as {login}")]
 
 
-def run_doctor(gh: GH, root: Path, pat_token: str | None = None, run: Callable = subprocess.run) -> list[Check]:
+def run_doctor(gh: GH, root: Path, pat_token: str | list[str] | None = None,
+               run: Callable = subprocess.run) -> list[Check]:
     cfg, checks = local_checks(root)
     checks += own_token_checks(run)
-    if pat_token:
-        checks += pat_checks(pat_token, run)
-    else:
+    tokens = [pat_token] if isinstance(pat_token, str) else list(pat_token or [])
+    for token in tokens:
+        if not token:
+            checks.append(Check(FAIL, "a --pat-env variable is empty or unset", "export the PAT in that variable"))
+            continue
+        login, scopes = token_scopes(token, run)
+        checks += pat_checks(token, run, (login, scopes))
+        if cfg is not None and login and cfg.trusted_logins and login not in {cfg.bot_login, *cfg.trusted_logins}:
+            checks.append(Check(WARN, f"PAT login {login} is not in trusted_logins: other lanes ignore its markers",
+                                f"add {login} to trusted_logins in {CONFIG_PATH}"))
+    if not tokens:
         checks.append(Check(WARN, "PAT permissions not checked", "re-run with --pat-env VAR (VAR holds the PAT); "
                                                                 "the lane workflow also checks it on every run"))
     if cfg is not None:

@@ -29,7 +29,8 @@ from typing import Any
 
 MARKER_RE = re.compile(r"<!--\s*ns:(\{.*?\})\s*-->", re.S)
 TYPES = {"attempt", "infra", "blocked", "waiting", "need", "handoff", "note", "pr", "handoff-done",
-         "handoff-data", "note-sent", "fix-attempt", "fix-infra", "plan"}
+         "handoff-data", "note-sent", "fix-attempt", "fix-infra", "plan", "budget", "digest", "roadmap",
+         "take", "retry"}
 PR_REASONS = ("verdict_passed", "verdict_failed", "checks_failed", "conflict", "stale", "superseded", "manual")
 
 # Markers written by the original hackathon kit; still counted so a repo can migrate mid-flight.
@@ -84,10 +85,12 @@ def author(comment: dict) -> str:
     return (comment.get("user") or {}).get("login", "")
 
 
-def is_trusted(comment: dict, bot_login: str) -> bool:
+def is_trusted(comment: dict, bot_login: str | frozenset[str] | set[str]) -> bool:
     """Trusted means posted by the PAT's own login. Other people's comments are never trusted, but anyone with
     write access can edit a bot comment, so trust here is "the bot or a repo writer", never an outsider."""
-    return bool(bot_login) and author(comment) == bot_login
+    if isinstance(bot_login, str):
+        return bool(bot_login) and author(comment) == bot_login
+    return author(comment) in bot_login and author(comment) != ""
 
 
 def parse(comment: dict) -> list[Marker]:

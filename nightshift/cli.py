@@ -70,6 +70,10 @@ class Ctx:
         if self._gh is None:
             self._gh = GH(self.repo, transport=self._transport, dry_run=getattr(self.args, "dry_run", False),
                           out=self.out)
+            try:
+                self._gh.trusted_extra = set(self.cfg.trusted_logins)
+            except ConfigError:
+                pass  # init, before a config exists
         return self._gh
 
     @property
@@ -97,9 +101,28 @@ def _ask(ask: Ask, prompt: str, default: str) -> str:
     return answer or default
 
 
+def _pairs(text: str | None) -> dict[str, str]:
+    """`api=python,web=node` -> {"api": "python", "web": "node"}; a bare value applies to every lane ("*")."""
+    out: dict[str, str] = {}
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        key, sep, value = part.partition("=")
+        out[key.strip() if sep else "*"] = (value if sep else key).strip()
+    return out
+
+
 def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, out=None,
-                 tool_ref: str = "main") -> dict:
-    """Interactive (or --yes) config: lanes from the detected stack, one Claude token secret per owner."""
+                 tool_ref: str = "main", opts: argparse.Namespace | None = None) -> dict:
+    """Interactive (or fully non-interactive with --yes and flags) config: lanes from the detected stack or a
+    preset, one Claude token secret per owner."""
+    o = opts or argparse.Namespace()
+    presets, paths, owners = _pairs(getattr(o, "preset", None)), _pairs(getattr(o, "paths", None)), \
+        _pairs(getattr(o, "owners", None))
+    for name in presets.values():
+        if name not in scaffold.PRESETS:
+            raise ConfigError(f"unknown preset {name!r}; choose from {', '.join(scaffold.PRESETS)}")
     stacks = scaffold.detect_stack(root)
     folders = [s for s in stacks if s["path"] != "./"]
     suggested = lanes_arg or ",".join(re.sub(r"[^a-z0-9_-]", "-", s["path"].rstrip("/").lower()) for s in folders) \
@@ -111,10 +134,18 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
     names = [n.strip() for n in q("Lanes (comma-separated)", suggested).split(",") if n.strip()]
     lanes = []
     for name in names:
-        guess = next((s for s in stacks if s["path"].rstrip("/") == name), stacks[0] if stacks else None)
-        owner = q(f"Lane {name}: owner's name (for their Claude token secret)", name).upper()
+        lane_paths = paths.get(name) or paths.get("*") or f"{name}/"
+        preset = presets.get(name) or presets.get("*")
+        if preset:
+            folder = lane_paths.split(";")[0].rstrip("/")
+            guess = scaffold.preset_commands(preset, folder if folder not in ("", ".") else "")
+        else:
+            guess = next((s for s in stacks if s["path"].rstrip("/") == name), stacks[0] if stacks else None)
+        owner = owners.get(name) or q(f"Lane {name}: owner's name (for their Claude token secret)", name)
+        owner = owner.upper()
         lane = {"name": name,
-                "paths": [p.strip() for p in q(f"Lane {name}: folders it owns", f"{name}/").split(",") if p.strip()],
+                "paths": [p.strip() for p in q(f"Lane {name}: folders it owns", lane_paths).replace(";", ",").split(",")
+                          if p.strip()],
                 "claude_token_secret": f"CLAUDE_TOKEN_{re.sub(r'[^A-Z0-9]', '_', owner)}",
                 "model": "sonnet"}
         setup = q(f"Lane {name}: setup command", guess["setup"] if guess else "")
@@ -123,9 +154,13 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
             lane["setup"] = {"commands": setup + "\n"}
         if test:
             lane["test_command"] = test
+        budget = getattr(o, "budget", None)
+        if budget:
+            lane["budget_usd_per_night"] = float(budget)
         lanes.append(lane)
-    ci = q("CI workflow file (its runs on main gate the lanes)", "ci.yml")
-    mode = q("Merge mode: strict (PRs must be up to date) or queue (GitHub merge queue)", "strict")
+    ci = getattr(o, "ci_workflow", None) or q("CI workflow file (its runs on main gate the lanes)", "ci.yml")
+    mode = getattr(o, "merge_mode", None) or q("Merge mode: strict (PRs must be up to date) or queue (GitHub merge queue)",
+                                               "strict")
     return {"version": 1, "main_branch": "main", "ci_workflow": ci,
             "required_checks": ["test", "review / verdict"], "fix_lane": lanes[0]["name"] if lanes else "",
             "merge": {"mode": mode}, "tool_ref": tool_ref, "lanes": lanes,
@@ -168,7 +203,7 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
                     "then run `gh nightshift init --regenerate`.")
     else:
         text = scaffold.config_yaml(build_config(ctx.root, ask, a.lanes, a.yes, ctx.out,
-                                                 a.tool_ref or "main"))
+                                                 a.tool_ref or "main", a))
         cfg = loads(text)  # validates what we are about to write
     ctx.say(*write_files(ctx, scaffold.files(cfg, text, ctx.root), overwrite=a.force))
     if a.files_only:
@@ -179,6 +214,8 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
         kwargs = {}
         if secret_ask:
             kwargs["ask"] = secret_ask
+        elif a.secrets_from_env:  # non-interactive: AGENT_PAT=... CLAUDE_TOKEN_API=... gh nightshift init --yes
+            kwargs["ask"] = lambda prompt: os.environ.get(prompt.split(" ", 1)[0], "")
         if secret_setter:
             kwargs["setter"] = secret_setter
         ctx.say(*repo_setup.prompt_missing_secrets(ctx.gh, cfg, **kwargs))
@@ -193,7 +230,7 @@ def cmd_setup(ctx: Ctx) -> int:
     return 0
 
 
-def cmd_join(ctx: Ctx, secret_ask=None, secret_setter=None) -> int:
+def cmd_join(ctx: Ctx, secret_ask=None, secret_setter=None, run=subprocess.run) -> int:
     cfg = ctx.cfg
     lane = cfg.lane(ctx.args.lane)
     kwargs = {}
@@ -203,8 +240,33 @@ def cmd_join(ctx: Ctx, secret_ask=None, secret_setter=None) -> int:
         kwargs["setter"] = secret_setter
     ctx.say(f"Lane {lane.name}: run `claude setup-token` and paste the token.")
     ctx.say(repo_setup.prompt_secret(ctx.gh, lane.token_secret, f"Claude token for lane {lane.name}", **kwargs))
-    if ctx.args.pat and lane.pat_secret:
-        ctx.say(repo_setup.prompt_secret(ctx.gh, lane.pat_secret, repo_setup.secret_hint(cfg, lane.pat_secret), **kwargs))
+    if not lane.pat_secret or ctx.args.no_pat:
+        if ctx.args.pat and not lane.pat_secret:
+            ctx.say(f"lane {lane.name} has no agent_pat_secret in {CONFIG_PATH}; it uses the shared AGENT_PAT. Add "
+                    f"`agent_pat_secret: AGENT_PAT_{lane.name.upper().replace('-', '_')}` to the lane to use your own.")
+        return 0
+    # Per-contributor PAT: the lane's PRs and markers are posted as this person. Check it before storing it.
+    seen: dict[str, str] = {}
+
+    def check(token: str) -> str | None:
+        from .doctor import token_scopes
+
+        login, scopes = token_scopes(token, run)
+        if login is None:
+            return "the token does not authenticate"
+        if "workflow" in [s.strip() for s in scopes.split(",")]:
+            return "the token has the `workflow` scope; agents could change CI. Use a fine-grained PAT without Workflows"
+        seen["login"] = login
+        return None
+
+    ctx.say(f"Lane {lane.name}: create a fine-grained PAT for {ctx.repo} only (Contents, Issues, Pull requests "
+            "read/write; Actions read; no Workflows) and paste it.")
+    ctx.say(repo_setup.prompt_secret(ctx.gh, lane.pat_secret, repo_setup.secret_hint(cfg, lane.pat_secret),
+                                     validate=None if ctx.gh.dry_run else check, **kwargs))
+    login = seen.get("login")
+    if login and login not in {cfg.bot_login, *cfg.trusted_logins}:
+        ctx.say(f"Add {login} to trusted_logins in {CONFIG_PATH} (and commit it) so the other lanes trust this "
+                f"lane's markers:", f"  trusted_logins: [{', '.join([*cfg.trusted_logins, login])}]")
     return 0
 
 
@@ -213,8 +275,8 @@ def cmd_join(ctx: Ctx, secret_ask=None, secret_setter=None) -> int:
 def cmd_doctor(ctx: Ctx, run=subprocess.run) -> int:
     from .doctor import FAIL, run_doctor
 
-    token = os.environ.get(ctx.args.pat_env) if ctx.args.pat_env else None
-    checks = run_doctor(ctx.gh, ctx.root, token, run)
+    tokens = [os.environ.get(name, "") for name in ctx.args.pat_env]
+    checks = run_doctor(ctx.gh, ctx.root, tokens or None, run)
     for c in checks:
         ctx.say(c.line())
     bad = sum(1 for c in checks if c.level == FAIL)
@@ -243,9 +305,9 @@ def cmd_switch(ctx: Ctx) -> int:
     if name == "start":
         lines = repo_setup.start(ctx.gh)
     elif name == "pause":
-        lines = repo_setup.pause(ctx.gh)
+        lines = repo_setup.pause(ctx.gh, cancel=not ctx.args.no_cancel)
     elif name == "freeze":
-        lines = repo_setup.freeze(ctx.gh, ctx.cfg)
+        lines = repo_setup.freeze(ctx.gh, ctx.cfg, cancel=not ctx.args.no_cancel)
     else:
         lines = repo_setup.resume(ctx.gh, ctx.cfg)
     ctx.say(*lines)
@@ -319,7 +381,7 @@ def refill_lane(ctx: Ctx) -> tuple[str, str]:
     sha = docs_sha(gh, cfg.planner_docs)
     done = set()
     if log:
-        for m in ns.trusted(gh.comments(log), gh.login, "plan"):
+        for m in ns.trusted(gh.comments(log), gh.trusted, "plan"):
             if m.get("complete") and m.get("docs_sha") == sha:
                 done.add(m.get("lane") or "*")
     lanes = [ln for ln in lanes if ln not in done and "*" not in done]
@@ -500,7 +562,8 @@ def cmd_audit(ctx: Ctx) -> int:
         ctx.say(audit.label_with_llm(a.label_llm, a.out_dir or os.path.dirname(os.path.abspath(a.label_llm))))
         return 0
     out_dir = Path(a.out_dir or f"audit-seed{a.seed}")
-    prs = audit.sample(ctx.gh, a.sample, a.seed, [a.lane] if a.lane else None, ctx.cfg.bot_login)
+    prs = audit.sample(ctx.gh, a.sample, a.seed, [a.lane] if a.lane else None, ctx.cfg.bot_login,
+                       tuple(ctx.cfg.trusted_logins))
     rows = audit.collect_evidence(ctx.gh, prs, str(out_dir))
     for row in rows:
         if a.test_cmd:
@@ -544,19 +607,32 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--files-only", action="store_true", help="write files; skip labels, settings and secrets")
     s.add_argument("--skip-secrets", action="store_true", help="do not prompt for secrets")
     s.add_argument("--tool-ref", help="gh-nightshift ref the workflows use (tag or SHA; default main)")
+    s.add_argument("--preset", help="stack preset for setup/test commands: python, node or go; per lane: api=python,web=node")
+    s.add_argument("--paths", help="folders per lane, e.g. api=api/,web=web/;shared/ (default <lane>/)")
+    s.add_argument("--owners", help="lane owners, which name the Claude token secrets, e.g. api=alice,web=bob")
+    s.add_argument("--ci-workflow", help="CI workflow file (default ci.yml); with --preset, written if missing")
+    s.add_argument("--merge-mode", choices=["strict", "queue"], help="default strict")
+    s.add_argument("--budget", type=float, help="optional nightly budget per lane in USD (API-equivalent); off by default")
+    s.add_argument("--secrets-from-env", action="store_true",
+                   help="read each missing secret from an environment variable of the same name (for CI); no prompts")
     sub.add_parser("setup", parents=[common], help="labels, settings, variables, branch protection, night log")
     s = sub.add_parser("join", parents=[common], help="a teammate adds their Claude token for a lane")
     s.add_argument("--lane", required=True)
-    s.add_argument("--pat", action="store_true", help="also set the lane's own PAT (agent_pat_secret)")
+    s.add_argument("--pat", action="store_true", help=argparse.SUPPRESS)  # kept for compatibility; now the default
+    s.add_argument("--no-pat", action="store_true", help="do not ask for the lane's own PAT (agent_pat_secret)")
     s = sub.add_parser("doctor", parents=[common], help="check the setup; prints a fix for each problem")
-    s.add_argument("--pat-env", help="name of an env var holding the PAT, to check its permissions")
+    s.add_argument("--pat-env", action="append", default=[],
+                   help="env var holding a PAT to check (repeat for each per-contributor PAT)")
     sub.add_parser("status", parents=[common], help="lane decisions, PRs, blocked issues, queue, log")
     s = sub.add_parser("stats", parents=[common], help="merge rate, reasons, escalation, cost, catch rate")
     s.add_argument("--audit", help="audit CSV (from `audit`) to estimate the review gate's catch rate")
-    for name, text in (("start", "switch the night shift on"), ("pause", "switch it off (kill switch)"),
-                       ("freeze", "switch off and hand remaining ready work to people"),
+    for name, text in (("start", "switch the night shift on"),
+                       ("pause", "switch it off and cancel lane runs in flight (kill switch)"),
+                       ("freeze", "pause, and hand remaining ready work to people"),
                        ("resume", "undo freeze and switch on")):
-        sub.add_parser(name, parents=[common], help=text)
+        s = sub.add_parser(name, parents=[common], help=text)
+        if name in ("pause", "freeze"):
+            s.add_argument("--no-cancel", action="store_true", help="let runs already in flight finish")
     sub.add_parser("lint", parents=[common], help="check ready issues against the ticket guide")
 
     s = sub.add_parser("plan", parents=[common], help="draft tickets: --from PATH | --gap | --lane X")

@@ -139,16 +139,22 @@ def gh_secret_set(repo: str, name: str, value: str) -> None:
         raise GHError(f"gh secret set {name}: {result.stderr.strip()}")
 
 
-def prompt_secret(gh: GH, name: str, hint: str, setter: SecretSetter = gh_secret_set,
-                  ask: Callable[[str], str] = getpass.getpass) -> str:
-    """Ask for a secret without echoing it and store it. Dry-run prints the command only."""
+def prompt_secret(gh: GH, name: str, hint: str, setter: SecretSetter | None = None,
+                  ask: Callable[[str], str] = getpass.getpass,
+                  validate: Callable[[str], str | None] | None = None) -> str:
+    """Ask for a secret without echoing it and store it. Dry-run prints the command only. `validate` returns
+    an error message to refuse the value (it is never printed)."""
     if gh.dry_run:
         print(f"[dry-run] gh secret set {name} -R {gh.repo}   # value read from a hidden prompt ({hint})", file=gh.out)
         return f"would set {name}"
     value = ask(f"{name} ({hint}), input hidden, empty to skip: ").strip()
     if not value:
         return f"skipped {name}"
-    setter(gh.repo, name, value)
+    if validate:
+        problem = validate(value)
+        if problem:
+            return f"not set {name}: {problem}"
+    (setter or gh_secret_set)(gh.repo, name, value)
     return f"secret {name} set"
 
 
@@ -171,7 +177,7 @@ def secret_hint(cfg: Config, name: str) -> str:
     return "Claude token for the planner"
 
 
-def prompt_missing_secrets(gh: GH, cfg: Config, setter: SecretSetter = gh_secret_set,
+def prompt_missing_secrets(gh: GH, cfg: Config, setter: SecretSetter | None = None,
                            ask: Callable[[str], str] = getpass.getpass) -> list[str]:
     have = existing_secrets(gh)
     return [prompt_secret(gh, n, secret_hint(cfg, n), setter, ask) for n in cfg.secret_names() if n not in have]
@@ -183,13 +189,36 @@ def start(gh: GH) -> list[str]:
     return [set_variable(gh, "AGENTS_ENABLED", "true")]
 
 
-def pause(gh: GH) -> list[str]:
-    return [set_variable(gh, "AGENTS_ENABLED", "false")]
+def pause(gh: GH, cancel: bool = True) -> list[str]:
+    """Switch off, and by default cancel lane runs already queued or in progress (their publish job would
+    otherwise still open a PR)."""
+    out = [set_variable(gh, "AGENTS_ENABLED", "false")]
+    if cancel:
+        out += cancel_runs(gh)
+    return out
 
 
-def freeze(gh: GH, cfg: Config) -> list[str]:
+LANE_CALLER = "night-shift.yml"
+
+
+def cancel_runs(gh: GH, workflow: str = LANE_CALLER) -> list[str]:
+    out = []
+    for status in ("in_progress", "queued", "waiting"):
+        try:
+            runs = gh.get(gh.r(f"actions/workflows/{workflow}/runs"), {"status": status, "per_page": 100}) or {}
+        except GHError as err:
+            if err.status == 404:
+                return ["no lane workflow runs to cancel (night-shift.yml not found)"]
+            raise
+        for run in runs.get("workflow_runs", []):
+            gh.post(gh.r(f"actions/runs/{run['id']}/cancel"))
+            out.append(f"cancelled run {run['id']} ({status})")
+    return out or ["no lane runs in flight"]
+
+
+def freeze(gh: GH, cfg: Config, cancel: bool = True) -> list[str]:
     """Code freeze: switch off and hand every remaining ready issue to people."""
-    out = pause(gh)
+    out = pause(gh, cancel)
     for issue in gh.issues([cfg.ready_label]):
         if cfg.label("human") in label_names(issue):
             continue

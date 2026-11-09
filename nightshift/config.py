@@ -37,6 +37,7 @@ class Lane:
     setup_commands: str = ""
     setup_action: str = ""
     postgres_image: str = ""
+    budget_usd_per_night: float = 0.0  # 0 = no cap
 
     @property
     def label(self) -> str:
@@ -84,6 +85,7 @@ class Config:
     ci_workflow_name: str = ""
     tool_ref: str = "main"
     bot_login: str = ""           # the PAT's login; read-only commands (stats, audit) trust markers from it
+    trusted_logins: list[str] = field(default_factory=list)  # other PAT logins (per-contributor PATs) to trust
 
     # --- derived -----------------------------------------------------------------------
     @property
@@ -145,7 +147,8 @@ def parse(data: dict) -> Config:
                           escalate_model=raw.get("escalate_model", ""), paths=raw.get("paths", []),
                           description=raw.get("description", ""), test_command=raw.get("test_command", ""),
                           setup_commands=cmds, setup_action=(setup.get("action") or "").removeprefix("./"),
-                          postgres_image=raw.get("postgres_image", "")))
+                          postgres_image=raw.get("postgres_image", ""),
+                          budget_usd_per_night=float(raw.get("budget_usd_per_night", 0) or 0)))
     names = [lane.name for lane in lanes]
     if len(set(names)) != len(names):
         raise ConfigError("lane names must be unique")
@@ -184,6 +187,7 @@ def parse(data: dict) -> Config:
         ci_workflow_name=data.get("ci_workflow_name", ""),
         tool_ref=data.get("tool_ref", "main"),
         bot_login=data.get("bot_login", ""),
+        trusted_logins=data.get("trusted_logins", []),
     )
     if cfg.fix_lane and cfg.fix_lane not in names:
         raise ConfigError(f"fix_lane {cfg.fix_lane!r} is not a lane")

@@ -346,6 +346,17 @@ class InitTests(CliTestCase):
 
 # --- setup / join ---------------------------------------------------------------------
 
+def fake_user_run(login, scopes=""):
+    """Stands in for `gh api -i user` with the PAT in GH_TOKEN; never touches the network."""
+    from types import SimpleNamespace
+
+    def run(args, **kwargs):
+        assert args[:4] == ["gh", "api", "-i", "user"], args
+        head = "HTTP/2.0 200 OK\n" + (f"X-Oauth-Scopes: {scopes}\n" if scopes else "")
+        return SimpleNamespace(returncode=0, stdout=head + "\n" + json.dumps({"login": login}), stderr="")
+    return run
+
+
 class SetupJoinTests(CliTestCase):
     def setUp(self):
         super().setUp()
@@ -394,9 +405,10 @@ class SetupJoinTests(CliTestCase):
         ctx, out = self.ctx("join", "--lane", "web", "--pat")
         answers = {"CLAUDE_TOKEN_WEB": "sk-ant-oat-VERY-SECRET", "WEB_PAT": "github_pat_ALSO_SECRET"}
         rc = cli.cmd_join(ctx, secret_ask=lambda p: answers[p.split(" ", 1)[0]],
-                          secret_setter=lambda repo, n, v: stored.append((repo, n, v)))
+                          secret_setter=lambda repo, n, v: stored.append((repo, n, v)), run=fake_user_run("dana"))
         text = out.getvalue()
         self.assertEqual(rc, 0)
+        self.assertIn("Add dana to trusted_logins", text)
         self.assertEqual(stored, [("o/r", "CLAUDE_TOKEN_WEB", "sk-ant-oat-VERY-SECRET"),
                                   ("o/r", "WEB_PAT", "github_pat_ALSO_SECRET")])
         self.assertIn("claude setup-token", text)
@@ -405,6 +417,23 @@ class SetupJoinTests(CliTestCase):
         self.assertNotIn("VERY-SECRET", text)
         self.assertNotIn("ALSO_SECRET", text)
         self.assertEqual(self.fake.writes(), [])
+
+    def test_join_refuses_a_pat_with_the_workflow_scope(self):
+        stored = []
+        ctx, out = self.ctx("join", "--lane", "web")
+        answers = {"CLAUDE_TOKEN_WEB": "sk-ant-x", "WEB_PAT": "ghp_classic"}
+        cli.cmd_join(ctx, secret_ask=lambda p: answers[p.split(" ", 1)[0]],
+                     secret_setter=lambda repo, n, v: stored.append(n), run=fake_user_run("dana", "repo, workflow"))
+        self.assertEqual(stored, ["CLAUDE_TOKEN_WEB"])
+        self.assertIn("not set WEB_PAT", out.getvalue())
+        self.assertNotIn("ghp_classic", out.getvalue())
+
+    def test_join_no_pat_skips_the_pat(self):
+        stored = []
+        ctx, _ = self.ctx("join", "--lane", "web", "--no-pat")
+        cli.cmd_join(ctx, secret_ask=lambda p: "x", secret_setter=lambda repo, n, v: stored.append(n),
+                     run=lambda *a, **k: self.fail("must not check a PAT"))
+        self.assertEqual(stored, ["CLAUDE_TOKEN_WEB"])
 
     def test_join_empty_answer_skips(self):
         ctx, out = self.ctx("join", "--lane", "api")

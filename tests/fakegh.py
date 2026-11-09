@@ -38,6 +38,8 @@ class FakeGitHub:
         self.variables: dict[str, str] = {}
         self.secrets: set[str] = set()
         self.protection: dict | None = None
+        self.runs_by_workflow: dict[str, list[dict]] = {}
+        self.cancelled: list[int] = []
         # The public gh-nightshift tool repo and its refs, as `doctor` sees them.
         self.tool_repo = {"full_name": "paawandesai/gh-nightshift", "private": False}
         self.tool_refs = {"main", "v0.1.0", "v1.0.0"}
@@ -65,9 +67,12 @@ class FakeGitHub:
         self.comments.setdefault(number, [])
         return self.issues[number]
 
-    def add_comment(self, number, body, user=None, association="NONE"):
+    def add_comment(self, number, body, user=None, association="NONE", created_at=None):
+        import datetime as _dt
+
+        stamp = created_at or _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         c = {"id": next(self._ids), "body": body, "user": {"login": user or self.login},
-             "author_association": association}
+             "author_association": association, "created_at": stamp}
         self.comments.setdefault(number, []).append(c)
         if number in self.issues:
             self.issues[number]["comments"] = len(self.comments[number])
@@ -153,6 +158,7 @@ class FakeGitHub:
             (r"compare/([^.]+)\.\.\.(.+)", ("GET", lambda q, b, base, head: {"behind_by": self.behind.get(head, 0)})),
             (r"git/refs/heads/(.+)", ("DELETE", self._delete_ref)),
             (r"actions/workflows/([^/]+)/runs", ("GET", self._runs)),
+            (r"actions/runs/(\d+)/cancel", ("POST", lambda q, b, r: self.cancelled.append(int(r)))),
             (r"actions/runs/(\d+)/jobs", ("GET", lambda q, b, r: {"jobs": self.jobs.get(int(r), [])})),
             (r"actions/jobs/(\d+)/logs", ("GET", lambda q, b, j: self.job_logs.get(int(j), ""))),
             (r"labels", ("GET", lambda q, b: self._page(q, list(self.labels.values())))),
@@ -286,9 +292,9 @@ class FakeGitHub:
     def _runs(self, q, b, wf):
         if self.runs_error:
             raise GHError(f"HTTP {self.runs_error}", self.runs_error)
-        runs = self.workflow_runs
+        runs = self.runs_by_workflow.get(wf, self.workflow_runs)
         if q.get("status"):
-            runs = [r for r in runs if r.get("conclusion") == q["status"]]
+            runs = [r for r in runs if q["status"] in (r.get("conclusion"), r.get("status"))]
         return {"workflow_runs": runs[: int(q.get("per_page", 30))]}
 
     def _get_var(self, q, b, name):
@@ -306,3 +312,18 @@ class FakeGitHub:
         out = copy.deepcopy(body)
         out["enforce_admins"] = {"enabled": bool(body.get("enforce_admins"))}
         return out
+
+
+# Tests never reach real GitHub: any `gh ...` subprocess that a test forgot to fake fails loudly.
+import subprocess as _subprocess  # noqa: E402
+
+_real_run = _subprocess.run
+
+
+def _guarded_run(args, *a, **kw):
+    if isinstance(args, (list, tuple)) and args and args[0] == "gh":
+        raise AssertionError(f"test tried to run real gh: {args[:4]}")
+    return _real_run(args, *a, **kw)
+
+
+_subprocess.run = _guarded_run

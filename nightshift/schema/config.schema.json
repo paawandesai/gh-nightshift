@@ -228,6 +228,11 @@
           "test_command": {
             "type": "string"
           },
+          "budget_usd_per_night": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Optional nightly spend cap (API-equivalent USD, from the night log). The lane pauses for the rest of the night once reached. 0 or absent: no cap."
+          },
           "postgres_image": {
             "type": "string",
             "description": "Start this Postgres image as a service in the lane's agent job (DATABASE_URL is set)."
@@ -267,6 +272,12 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9-]+(\\[bot\\])?$",
       "description": "Login of the account that owns the PAT. stats and audit trust only its markers; default: whoever runs them."
+    },
+    "trusted_logins": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9-]+(\\[bot\\])?$"},
+      "uniqueItems": true,
+      "description": "Logins of per-contributor PATs (lanes[].agent_pat_secret). Their ns markers and PRs are trusted like the shared PAT's. Default: only the login of the PAT the job runs with."
     },
     "tool_ref": {
       "type": "string",

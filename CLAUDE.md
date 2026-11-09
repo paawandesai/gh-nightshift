@@ -41,3 +41,6 @@ parallel lanes. It was extracted from the hackathon kit in `legacy/hackathon-kit
 - Strip a leading `./` with `removeprefix("./")`, never `lstrip("./")`, which eats the dot in `.github/`.
 - Never name a unittest method `run`; it overrides `TestCase.run`.
 - Run `ruff check nightshift tests` before every commit, not after: long lines (limit 130) slipped into two commits.
+- Never let a test reach real GitHub: inject `run=`/`transport=` fakes. The proxy in agent sandboxes authenticates
+  `gh` silently, so a forgotten fake makes real API calls (seen in a join test and a doctor test).
+  `tests/fakegh.py` now fails any real `gh` subprocess.

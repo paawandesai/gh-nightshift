@@ -77,6 +77,7 @@ class GH:
         self.out = out or sys.stdout
         self.planned: list[tuple[str, str, Any]] = []
         self._login: str | None = None
+        self.trusted_extra: set[str] = set()  # config trusted_logins: other PATs whose markers count
 
     # --- raw ---------------------------------------------------------------------------
     def call(self, method: str, path: str, body: Any = None) -> Any:
@@ -136,6 +137,11 @@ class GH:
     @login.setter
     def login(self, value: str) -> None:
         self._login = value
+
+    @property
+    def trusted(self) -> frozenset[str]:
+        """Logins whose ns markers and PRs count: this PAT's own login plus config `trusted_logins`."""
+        return frozenset({self.login, *self.trusted_extra} - {""})
 
     def issues(self, labels: list[str] | None = None, state: str = "open") -> list[dict]:
         """Issues only (the REST issues endpoint also returns pull requests)."""
