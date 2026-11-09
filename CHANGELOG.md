@@ -9,6 +9,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- Fixes from the security review of 2026-11-09:
+  - The issue template files tickets as `proposed`, not `night-safe`. GitHub applies a template's labels for
+    anyone who opens an issue, so an outsider's ticket arrived already approved. Re-run `gh nightshift init
+    --force` (or edit `.github/ISSUE_TEMPLATE/night-shift-ticket.md`) in repos set up before this release.
+  - A ticket an agent requests in another lane (`needs`) is filed as `proposed`; `limits.auto_ready_needs: true`
+    restores the old behaviour.
+  - Hand-off items are single lines, so agent text cannot start a section of its own in a trusted comment.
+  - The run's cost and turn count are read as numbers. A crafted cost could put a trusted marker on the night
+    log, and a non-numeric turn count crashed the publish job.
+  - Agent text can no longer close other issues: closing keywords are broken up in the PR body and title, and
+    the picker writes the squash commit message itself (which also keeps `[skip ci]` off main).
+  - Without an open night-log issue, a lane with a budget and the fix-main lane stop instead of running uncounted.
+  - Only `github-actions[bot]` itself counts as the Actions bot; a login that starts with `github-actions` did too.
+  - `setup` keeps the branch protection a repo already has (required reviews, restrictions, other checks) and
+    prints what it kept and changed. It used to replace it.
+  - SECURITY.md: four claims corrected and ten known gaps added.
 - The agent's Claude token is handed to Claude on a pipe instead of an environment variable, so tests and tools
   the agent runs do not inherit it (`NIGHT_SHIFT_TOKEN_IN_ENV=true` restores the old behaviour).
 - A token guard in the agent job searches the commits, the result and the log for the lane's Claude token before

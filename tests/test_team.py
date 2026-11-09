@@ -241,6 +241,13 @@ class Budget(unittest.TestCase):
         picker(self.f, text=self.TEXT).decide()
         self.assertEqual(len(ns.trusted(self.f.comments[500], BOT, "budget")), 1)  # noted once per night
 
+    def test_a_budget_without_a_night_log_holds_the_lane(self):
+        # The spend is counted on the night log; closing it must not switch the cap off.
+        self.f.issues[500]["state"] = "closed"
+        d = picker(self.f, text=self.TEXT).decide()
+        self.assertEqual((d["mode"], d["issue"]), ("skip", ""))
+        self.assertIn("no open night-log issue", d["reason"])
+
     def test_untrusted_and_old_lines_do_not_count(self):
         self.f.add_comment(500, "01:00 `web` #3 [sonnet] → PR (≈$9.00)", user="mallory")
         self.f.add_comment(500, "01:00 `web` #3 [sonnet] → PR (≈$9.00)", created_at="2020-01-01T00:00:00Z")

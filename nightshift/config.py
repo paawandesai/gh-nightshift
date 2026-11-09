@@ -75,6 +75,7 @@ class Config:
     max_turns: int = 80
     max_needs_per_issue: int = 2
     max_notes_per_issue: int = 2
+    auto_ready_needs: bool = False  # an agent's `needs` ticket is `proposed` until a person promotes it
     planner_enabled: bool = True
     planner_docs: list[str] = field(default_factory=lambda: ["docs/PRD.md"])
     planner_max_tickets: int = 8
@@ -202,6 +203,7 @@ def parse(data: dict) -> Config:
         max_turns=limits.get("max_turns", 80),
         max_needs_per_issue=limits.get("max_needs_per_issue", 2),
         max_notes_per_issue=limits.get("max_notes_per_issue", 2),
+        auto_ready_needs=bool(limits.get("auto_ready_needs", False)),
         planner_enabled=planner.get("enabled", True),
         planner_docs=planner.get("docs", ["docs/PRD.md"]),
         planner_max_tickets=planner.get("max_tickets_per_run", 8),
@@ -286,7 +288,8 @@ BASE_PATH = ".night-shift/base.yml"  # written by `gh nightshift config pull` fr
 # Labels, merge mode and tool_ref are left out: each could switch a safety check off (a renamed `human` label
 # makes taken tickets pickable, queue mode skips risk tiers, tool_ref picks the code that runs with the PAT).
 INHERITABLE = {"models", "limits", "protected_paths", "required_checks", "timezone", "risk", "digest", "planner"}
-NOT_FROM_BASE = {"planner": {"claude_token_secret"}, "digest": {"webhook_secret"}}
+# limits.auto_ready_needs lets agents queue work for each other: only the repo itself may switch it on.
+NOT_FROM_BASE = {"planner": {"claude_token_secret"}, "digest": {"webhook_secret"}, "limits": {"auto_ready_needs"}}
 
 
 def merge_base(base: dict, local: dict) -> dict:

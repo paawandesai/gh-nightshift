@@ -75,6 +75,23 @@ def _dicts(value) -> list[dict]:
     return [x for x in value or [] if isinstance(x, dict)]
 
 
+def _cost(value) -> str:
+    """The run's cost as a plain number, or "". result.json comes from the agent's runner, so this field is as
+    untrusted as the rest: copied as text it could carry a line break and an ns marker into the night log."""
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"{cost:.4f}".rstrip("0").rstrip(".") if 0 < cost < 100000 else ""
+
+
+def _turns(value) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def classify(result_path: str | None) -> Result:
     """A run that never really started (no result file, or <2 turns and no structured output: expired
     token, usage limit, outage) is infra-error and gets refunded, not counted."""
@@ -93,8 +110,7 @@ def classify(result_path: str | None) -> Result:
                                     "from it was uploaded or pushed. Rotate the token (`claude setup-token`, then "
                                     "`gh nightshift join --lane <lane>`, and revoke the old one), check what the "
                                     "ticket asked for, then remove the needs-human label.")
-    cost = str(data.get("total_cost_usd") or "")
-    turns = int(data.get("num_turns") or 0)
+    cost, turns = _cost(data.get("total_cost_usd")), _turns(data.get("num_turns"))
     out = data.get("structured_output")
     if isinstance(out, dict) and out.get("status") in {"done", "stuck", "waiting"}:
         out = ns.defang(out)  # everything below is re-posted under the bot's trusted login
@@ -116,20 +132,22 @@ def pr_body(mode: str, issue: str, lane: str, model: str, res: Result, prompt_ve
     if mode == "issue":
         parts += [f"Closes #{issue}", ""]
     prompt = f" · **Prompt:** `{prompt_version}`" if prompt_version else ""
-    parts += [f"**Lane:** `{lane}` (night shift) · **Model:** `{model}`{prompt}", "", res.summary]
+    # Only the line above may close an issue: "closes #n" in the agent's own text is broken up (ns.no_close).
+    parts += [f"**Lane:** `{lane}` (night shift) · **Model:** `{model}`{prompt}", "", ns.no_close(res.summary)]
     if res.assumptions:
-        parts += ["", "**Assumptions the agent made (review in the morning):**", *[f"- {a}" for a in res.assumptions]]
+        parts += ["", "**Assumptions the agent made (review in the morning):**",
+                  *[f"- {ns.one_line(ns.no_close(a))}" for a in res.assumptions]]
     if res.handoff:
-        h = res.handoff
+        h = ns.no_close(res.handoff)
         parts += ["", "## Hand-off", ns.marker("handoff-data", data=h)]
         for key, title in (("interfaces", "Interface as built"), ("files", "Files"), ("env_vars", "Env vars"),
                            ("decisions", "Decisions")):
             items = h.get(key) or []
             items = [items] if isinstance(items, str) else items
             if items:
-                parts += [f"**{title}:**", *[f"- {x}" for x in items]]
+                parts += [f"**{title}:**", *[f"- {ns.one_line(x)}" for x in items]]
         if h.get("interface_differences"):
-            parts.append(f"**Differences from the ticket:** {h['interface_differences']}")
+            parts.append(f"**Differences from the ticket:** {ns.one_line(h['interface_differences'], 1000)}")
     return "\n".join(parts) + "\n"
 
 
@@ -225,7 +243,7 @@ def push_and_open_pr(gh: GH, cfg: Config, job: Job, res: Result, git: GitRunner)
                                   "Night shift: superseded by a newer attempt on the same branch.")
         gh.patch(gh.r(f"pulls/{old['number']}"), {"state": "closed"})
     try:
-        pr = gh.post(gh.r("pulls"), {"title": f"[{job.lane}] {job.title}", "head": job.branch,
+        pr = gh.post(gh.r("pulls"), {"title": ns.no_close(f"[{job.lane}] {job.title}"), "head": job.branch,
                                      "base": cfg.main_branch,
                                      "body": pr_body(job.mode, job.issue, job.lane, job.model, res,
                                                                   job.prompt_version)})
@@ -265,12 +283,17 @@ def park_waiting(gh: GH, cfg: Config, job: Job, issue: dict, res: Result) -> str
         else:
             ticket.title = planner.next_id(gh.issues(state="all"), cfg.id_prefix(lane)) + " " + ticket.plain_title
             problems, human = planner.check_ticket(ticket, cfg, depended_on=True, existing={})
-            ready = not problems and not human
+            # An agent wrote this ticket. It goes straight to the other lane only when the repo opted in
+            # (limits.auto_ready_needs); otherwise a person promotes it, so one agent cannot queue work for another.
+            ready = cfg.auto_ready_needs and not problems and not human
             labels = [f"lane:{lane}", f"wave:{ticket.wave}",
                       cfg.ready_label if ready else (cfg.label("human") if human else cfg.label("proposed"))]
             body_text = planner.render(ticket, {}) + f"\nRequested by #{me} (lane `{job.lane}`), which waits on it.\n"
             if problems:
                 body_text += "\n**Why this is not night-safe yet:**\n" + "\n".join(f"- {p}" for p in problems) + "\n"
+            elif not ready and not human:
+                body_text += ("\nWritten by an agent, so it waits for a person: swap `" + cfg.label("proposed") + "` for `"
+                              + cfg.ready_label + "` to queue it (or set `limits.auto_ready_needs: true`).\n")
             provider = gh.create_issue(ticket.title, body_text, labels).get("number", 0)
         if provider and ns.would_cycle(edges, me, provider):
             gh.add_labels(me, [cfg.label("needs_human")])

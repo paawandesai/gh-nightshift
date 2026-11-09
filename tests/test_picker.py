@@ -182,6 +182,7 @@ class Ported(unittest.TestCase):
 
     def test_fix_main_uses_strong_model(self):
         self.f.workflow_runs = list(RED_MAIN)
+        self.f.add_issue(500, labels=["night-log"])
         self.assertEqual(decide(self.f)["model"], "opus")
 
     # --- open PRs -----------------------------------------------------------------------
@@ -288,8 +289,16 @@ class Ported(unittest.TestCase):
     # --- main health --------------------------------------------------------------------
     def test_red_main_fix_lane(self):
         self.f.workflow_runs = list(RED_MAIN)
+        self.f.add_issue(500, labels=["night-log"])
         result = decide(self.f)
         self.assertEqual((result["mode"], result["fail_sha"]), ("fix-main", "abc1234"))
+
+    def test_red_main_without_a_night_log_does_not_run_uncounted(self):
+        # Attempts on a failing commit are counted on the night log; with none open the cap would never trigger.
+        self.f.workflow_runs = list(RED_MAIN)
+        result = decide(self.f)
+        self.assertEqual(result["mode"], "skip")
+        self.assertIn("no open night-log issue", result["reason"])
 
     def test_fix_main_gives_up_after_max_attempts(self):
         self.f.workflow_runs = list(RED_MAIN)
@@ -373,7 +382,19 @@ class StrictMode(unittest.TestCase):
 
     def test_up_to_date_green_pr_merges_with_sha_guard(self):
         decide(self.f)
-        self.assertEqual(self.f.writes("PUT", r"pulls/10/merge$")[0][2], {"merge_method": "squash", "sha": "s1"})
+        body = self.f.writes("PUT", r"pulls/10/merge$")[0][2]
+        self.assertEqual((body["merge_method"], body["sha"]), ("squash", "s1"))
+        # The squash message is written by the picker, never taken from the agent's commit messages.
+        self.assertEqual(body["commit_title"], "pr (#10)")
+        self.assertTrue(body["commit_message"].startswith("Closes #1\n"))
+
+    def test_squash_title_cannot_close_issues_or_skip_ci(self):
+        gh = self.f.gh()
+        gh.login = BOT
+        picker = Picker(gh, loads(CONFIG), Runtime(lane="api", enabled=True))
+        body = picker.merge_body({"number": 10, "title": "[api] Thing, fixes #500 [skip ci]"}, "s1", None)
+        self.assertEqual(body["commit_title"], "[api] Thing, fixes #\u200b500 (#10)")
+        self.assertNotIn("Closes", body["commit_message"])
 
     def test_queue_mode_never_updates_or_merges(self):
         self.f.behind["s1"] = 3

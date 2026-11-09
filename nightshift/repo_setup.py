@@ -76,6 +76,84 @@ def protection_body(cfg: Config) -> dict:
     }
 
 
+def _names(items: list | None, key: str) -> list[str]:
+    return [str(x[key]) for x in items or [] if isinstance(x, dict) and x.get(key)]
+
+
+def _actors(group: dict | None) -> dict:
+    """GET lists users, teams and apps as objects; PUT wants logins and slugs."""
+    group = group or {}
+    return {"users": _names(group.get("users"), "login"), "teams": _names(group.get("teams"), "slug"),
+            "apps": _names(group.get("apps"), "slug")}
+
+
+# Switches GitHub reports as {"enabled": bool}. Kept as they are; `setup` only ever adds to a protection.
+_KEPT_SWITCHES = ("required_linear_history", "required_conversation_resolution", "block_creations", "lock_branch",
+                  "allow_fork_syncing")
+
+
+def merged_protection(cfg: Config, current: dict | None) -> tuple[dict, list[str]]:
+    """(the body to PUT, what it keeps or changes). The PUT replaces the whole protection, so everything a repo
+    already had is carried over: required reviews, push restrictions, its other required checks and switches.
+    `setup` adds the night-shift checks, strict mode and enforce_admins; it never removes a rule."""
+    body = protection_body(cfg)
+    if not current:
+        return body, []
+    notes: list[str] = []
+    rsc = current.get("required_status_checks") or {}
+    old_checks = [c for c in rsc.get("checks") or [] if isinstance(c, dict) and c.get("context")]
+    old_names = list(dict.fromkeys([*(rsc.get("contexts") or []), *[c["context"] for c in old_checks]]))
+    added = [c for c in cfg.required_checks if c not in old_names]
+    extra = [c for c in old_names if c not in cfg.required_checks]
+    status = {"strict": bool(rsc.get("strict")) or cfg.merge_mode == "strict"}
+    if old_checks:
+        # Keep each check's app binding (null from GET means any app, which PUT spells -1).
+        by_name = {c["context"]: c for c in old_checks}
+        status["checks"] = [{"context": n, "app_id": by_name[n]["app_id"] if by_name.get(n, {}).get("app_id") else -1}
+                            for n in [*old_names, *added]]
+    else:
+        status["contexts"] = [*old_names, *added]
+    body["required_status_checks"] = status
+    if extra:
+        notes.append(f"kept the required checks already there: {', '.join(extra)}")
+    if added:
+        notes.append(f"added required checks: {', '.join(added)}")
+    if status["strict"] and not rsc.get("strict"):
+        notes.append("turned on `strict` (PRs must be up to date with the branch)")
+
+    reviews = current.get("required_pull_request_reviews")
+    if reviews:
+        kept = {k: reviews[k] for k in ("dismiss_stale_reviews", "require_code_owner_reviews",
+                                         "required_approving_review_count", "require_last_push_approval")
+                if k in reviews}
+        if reviews.get("dismissal_restrictions"):
+            kept["dismissal_restrictions"] = _actors(reviews["dismissal_restrictions"])
+        if reviews.get("bypass_pull_request_allowances"):
+            kept["bypass_pull_request_allowances"] = _actors(reviews["bypass_pull_request_allowances"])
+        body["required_pull_request_reviews"] = kept
+        count = kept.get("required_approving_review_count", 1)
+        notes.append(f"kept required pull request reviews ({count} approval(s)"
+                     + (", code owners" if kept.get("require_code_owner_reviews") else "") + "): agent PRs will wait "
+                     "for a person's approval before the night shift can merge them")
+    if current.get("restrictions"):
+        body["restrictions"] = _actors(current["restrictions"])
+        notes.append("kept the push restrictions (make sure the night shift's account or App may push, or its "
+                     "merges are refused)")
+    for key in _KEPT_SWITCHES:
+        if (current.get(key) or {}).get("enabled"):
+            body[key] = True
+            notes.append(f"kept {key}")
+    if not (current.get("enforce_admins") or {}).get("enabled"):
+        notes.append("turned on enforce_admins (admins no longer bypass the rules)")
+    for key in ("allow_force_pushes", "allow_deletions"):
+        if (current.get(key) or {}).get("enabled"):
+            notes.append(f"turned off {key}")
+    if (current.get("required_signatures") or {}).get("enabled"):
+        notes.append("signed commits stay required (a separate setting, untouched): the night shift's squash merges "
+                     "are signed by GitHub")
+    return body, notes
+
+
 MERGE_QUEUE_RULESET = {
     "name": "night-shift merge queue",
     "target": "branch",
@@ -90,10 +168,21 @@ MERGE_QUEUE_RULESET = {
 
 def ensure_protection(gh: GH, cfg: Config) -> list[str]:
     out = []
+    path = gh.r(f"branches/{cfg.main_branch}/protection")
     try:
-        gh.put(gh.r(f"branches/{cfg.main_branch}/protection"), protection_body(cfg))
-        out.append(f"protected {cfg.main_branch}: required {', '.join(cfg.required_checks)}, "
-                   f"strict={str(cfg.merge_mode == 'strict').lower()}, admins included")
+        current = gh.get_or_none(path)  # 404: not protected yet
+    except GHError as err:
+        # Writing now would replace rules that could not be read (required reviews, restrictions, other checks).
+        return [f"WARNING: could not read the current protection of {cfg.main_branch} ({err}); nothing was changed. "
+                "Run `gh nightshift setup` as a repo admin. Private repos on free plans cannot use branch protection."]
+    body, notes = merged_protection(cfg, current if isinstance(current, dict) else None)
+    try:
+        gh.put(path, body)
+        rsc = body["required_status_checks"]
+        names = rsc.get("contexts") or [c["context"] for c in rsc.get("checks", [])]
+        out.append(f"protected {cfg.main_branch}: required {', '.join(names)}, "
+                   f"strict={str(rsc['strict']).lower()}, admins included")
+        out += [f"  {cfg.main_branch} protection: {n}" for n in notes]
     except GHError as err:
         out.append(f"WARNING: branch protection failed ({err}). Private repos on free plans cannot use it.")
     if cfg.merge_mode == "queue":

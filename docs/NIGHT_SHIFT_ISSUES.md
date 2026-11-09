@@ -175,7 +175,7 @@ What you will see:
 - **PR close reasons.** When the picker closes or merges an agent PR, it records a reason: `verdict_passed`, `verdict_failed`, `checks_failed`, `conflict`, `stale` or `superseded`. Review findings are copied to the issue so the next attempt reads them. A conflict, or a review run that itself broke (`review-error`), does not count as an attempt.
 - **Hand-off comments.** "Night shift hand-off: #12 merged in PR #40. This issue no longer waits on it." It lists what was built and any difference from the ticket's Interface (see section 5).
 - **Waiting.** If an agent finds that something another lane owns does not exist yet, it stops and reports `waiting`. The night shift then:
-  - files a ticket in that lane (up to 2 per issue, `limits.max_needs_per_issue`), or reuses an existing one with the same title,
+  - files a ticket in that lane (up to 2 per issue, `limits.max_needs_per_issue`), or reuses an existing one with the same title. A new ticket is `proposed`: a person swaps that label for `night-safe` (unless `limits.auto_ready_needs` is on),
   - appends `#<new>` to this issue's `Blocked by:` line and adds the `waiting` label,
   - posts a comment saying which ticket it waits on.
   The attempt is not counted. The picker resumes the issue once the new ticket closes. If the request would create a dependency cycle, the issue gets `needs-human` instead.
@@ -264,7 +264,7 @@ gh api repos/OWNER/REPO/issues \
 
 Write the body in `body.md` first. This uses the REST API, so it works everywhere `gh` is logged in, including cloud sessions.
 
-**From the web**: choose the **Night-shift ticket** issue template. It pre-fills the sections and the `night-safe` label. Add one `lane:` label and one `wave:` label yourself.
+**From the web**: choose the **Night-shift ticket** issue template. It pre-fills the sections and files the ticket as `proposed`. Add one `lane:` label and one `wave:` label, then swap `proposed` for `night-safe` when it is ready for an agent (the template never applies `night-safe` itself, because GitHub applies a template's labels for anyone who opens an issue).
 
 ---
 

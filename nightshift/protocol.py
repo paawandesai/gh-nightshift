@@ -81,6 +81,37 @@ def defang(value: Any) -> Any:
     return value
 
 
+def one_line(value: Any, limit: int = 500) -> str:
+    """Agent-written list items are single lines: a line break inside one could start a heading or a section of its
+    own inside a comment the next agent reads as posted by the night shift."""
+    return " ".join(str(value).split())[:limit]
+
+
+# GitHub closes every issue named after one of these words in a PR body or a commit message once it lands on the
+# default branch. Agent text must not be able to close other tickets (or the night log) that way.
+_CLOSE_RE = re.compile(r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)(\s*:?\s*)"
+                       r"((?:[A-Za-z0-9][\w.-]*/[\w.-]+)?#(?=\d)|https?://(?=github\.com/))", re.I)
+_SKIP_CI_RE = re.compile(r"\[(?:skip ci|ci skip|no ci|skip actions|actions skip)\]|^\s*skip-checks\s*:.*$", re.I | re.M)
+
+
+def no_close(value: Any) -> Any:
+    """Break "closes #12" (and the other closing keywords) in text an agent or outsider wrote, recursively, with a
+    zero-width space inside the reference (after `#` or `://`): it reads the same, but it is no longer a
+    reference, so GitHub neither links nor closes #12."""
+    if isinstance(value, str):
+        return _CLOSE_RE.sub(lambda m: f"{m.group(0)}\u200b", value)
+    if isinstance(value, list):
+        return [no_close(x) for x in value]
+    if isinstance(value, dict):
+        return {k: no_close(v) for k, v in value.items()}
+    return value
+
+
+def no_skip_ci(text: str) -> str:
+    """Drop `[skip ci]` and friends: in a commit message on the default branch they switch CI off for that commit."""
+    return _SKIP_CI_RE.sub("", text)
+
+
 def author(comment: dict) -> str:
     return (comment.get("user") or {}).get("login", "")
 
@@ -232,7 +263,7 @@ def handoff_comment(merged_issue: int, merged_title: str, lane: str, pr: int, to
     def block(title: str, items: Any) -> None:
         if isinstance(items, str):
             items = [items] if items.strip() else []
-        items = [str(x) for x in items or [] if str(x).strip()]
+        items = [one_line(x) for x in items or [] if str(x).strip()]
         if items:
             lines.extend(["", f"**{title}:**", *[f"- {x}" for x in items]])
 
@@ -249,7 +280,7 @@ def handoff_comment(merged_issue: int, merged_title: str, lane: str, pr: int, to
         lines += ["", "**Interface the ticket specified:**", defang(ticket_interface)]
     diff = str(h.get("interface_differences") or "").strip()
     if diff and diff.lower().rstrip(".") not in {"none", "n/a", "no differences"}:
-        lines += ["", f"⚠️ **Differs from the ticket (reported by the agent):** {defang(diff)}"]
+        lines += ["", f"⚠️ **Differs from the ticket (reported by the agent):** {defang(one_line(diff, 1000))}"]
     elif h:
         lines += ["", "Differences from the ticket: none reported by the agent (not verified mechanically; "
                       "compare the two interfaces above)."]

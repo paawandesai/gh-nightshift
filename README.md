@@ -161,7 +161,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `merge.mode` | `strict` | `strict` or `queue` (see below) |
 | `protected_paths` | `[]` | Added to the built-in list; never replaces it |
 | `models` | `sonnet` / `opus` / `opus` / `opus` | `default`, `escalate`, `review`, `planner` |
-| `limits` | 3, 6, 45, 80, 2, 2 | `max_attempts`, `infra_cap`, `stale_minutes`, `max_turns`, `max_needs_per_issue`, `max_notes_per_issue` |
+| `limits` | 3, 6, 45, 80, 2, 2, `false` | `max_attempts`, `infra_cap`, `stale_minutes`, `max_turns`, `max_needs_per_issue`, `max_notes_per_issue`, `auto_ready_needs` (an agent's request to another lane is queued without a person promoting it) |
 | `planner` | | `docs`, `max_tickets_per_run` (8), `refill_below` (0 = off), `id_prefixes`, `human_paths` (`[contracts/]`), `claude_token_secret`, `schedule`, `enabled` |
 | `labels` | | Rename any of the standard labels (`ready` is `night-safe` by default) |
 | `review_token_secret` | `CLAUDE_TOKEN_REVIEW` | Claude token secret for the review gate |
@@ -215,8 +215,10 @@ these comments in its task file, in a section marked trusted.
 yet reports `waiting`, with up to 2 `needs`. For each need, the publish job does three things:
 
 1. It files a ticket in that lane, or reuses an existing one with the same title. The ticket is
-   `night-safe` if it passes the ticket validator, `proposed` if it does not, and `human` if it touches
-   protected or contract paths.
+   `proposed`, so a person reads it and swaps the label for `night-safe` before the other lane builds it (an
+   agent wrote it, and one agent should not be able to queue work for another unseen). It is `human` if it
+   touches protected or contract paths. With `limits.auto_ready_needs: true`, a ticket that passes the ticket
+   validator is `night-safe` at once.
 2. It appends `Blocked by: #new` to the waiting issue and labels the issue `waiting`.
 3. It records the attempt as not counted.
 

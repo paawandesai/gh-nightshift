@@ -351,6 +351,8 @@ class FakeGitHub:
         return {"name": name, "value": self.variables[name]}
 
     def _get_protection(self, q, b, br):
+        if getattr(self, "protection_error", None):
+            raise GHError(f"Forbidden (HTTP {self.protection_error})", self.protection_error)
         if self.protection is None:
             raise GHError("Branch not protected (HTTP 404)", 404)
         return self.protection
