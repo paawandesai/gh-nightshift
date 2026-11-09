@@ -15,7 +15,7 @@ from fakegh import BOT, FakeGitHub  # noqa: E402
 
 from nightshift import cli  # noqa: E402
 from nightshift import protocol as ns  # noqa: E402
-from nightshift.config import loads  # noqa: E402
+from nightshift.config import ConfigError, loads  # noqa: E402
 from nightshift.picker import Picker, Runtime  # noqa: E402
 
 GREEN_MAIN = [{"status": "completed", "conclusion": "success", "event": "push", "head_sha": "def5678"}]
@@ -907,6 +907,59 @@ class Batch3Fixes(RiskTiers):
         (root / ".github/workflows/night-shift-commands.yml").write_text("jobs:\n  x:\n    secrets: inherit\n")
         _, checks = doctor.local_checks(root)
         self.assertTrue(any(c.level == doctor.FAIL and "night-shift-commands.yml" in c.what for c in checks))
+
+
+FALLBACK = """
+version: 1
+lanes:
+  - name: api
+    claude_token_secret: CLAUDE_TOKEN_DANA
+    fallback_token_secret: CLAUDE_TOKEN_DANA_2
+  - name: web
+    claude_token_secret: CLAUDE_TOKEN_WEB
+"""
+
+
+class FallbackToken(unittest.TestCase):
+    def test_config_and_secret_names(self):
+        cfg = loads(FALLBACK)
+        self.assertEqual(cfg.lane("api").fallback_token_secret, "CLAUDE_TOKEN_DANA_2")
+        self.assertEqual(cfg.lane("web").fallback_token_secret, "")
+        self.assertIn("CLAUDE_TOKEN_DANA_2", cfg.secret_names())
+
+    def test_fallback_must_differ_and_never_be_a_pat(self):
+        with self.assertRaisesRegex(ConfigError, "must differ"):
+            loads(FALLBACK.replace("CLAUDE_TOKEN_DANA_2", "CLAUDE_TOKEN_DANA"))
+        with self.assertRaisesRegex(ConfigError, "both as a Claude token and as a PAT"):
+            loads(FALLBACK.replace("CLAUDE_TOKEN_DANA_2", "AGENT_PAT"))
+
+    def test_caller_passes_the_fallback_only_to_its_lane(self):
+        from nightshift import scaffold
+
+        text = scaffold.lane_workflow(loads(FALLBACK))
+        api = text[text.index("  lane-api:"):text.index("  lane-web:")]
+        web = text[text.index("  lane-web:"):]
+        self.assertIn("claude_token_fallback: ${{ secrets.CLAUDE_TOKEN_DANA_2 }}", api)
+        self.assertNotIn("claude_token_fallback", web)
+        code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertNotIn("secrets[", code)
+        self.assertNotIn("secrets: inherit", code)
+
+    def test_doctor_fails_when_the_caller_drops_the_fallback(self):
+        from nightshift import doctor, scaffold
+
+        root = Path(tempfile.mkdtemp())
+        (root / ".night-shift").mkdir()
+        (root / ".night-shift/config.yml").write_text(FALLBACK)
+        for rel, text in scaffold.files(loads(FALLBACK), FALLBACK, root).items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text)
+        _, checks = doctor.local_checks(root)
+        self.assertFalse([c for c in checks if c.level == doctor.FAIL], checks)
+        wf = root / ".github/workflows/night-shift.yml"
+        wf.write_text("\n".join(ln for ln in wf.read_text().splitlines() if "claude_token_fallback" not in ln))
+        _, checks = doctor.local_checks(root)
+        self.assertTrue(any(c.level == doctor.FAIL and "fallback" in c.what for c in checks))
 
 
 class CrossRepo(unittest.TestCase):

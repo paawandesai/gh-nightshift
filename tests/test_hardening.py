@@ -74,7 +74,7 @@ class Workflows(unittest.TestCase):
         agent = text[text.index("\n  agent:"):text.index("\n  publish:")]
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN: ${{", agent)
         self.assertIn("export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3", agent)
-        self.assertIn("env -u LANE_CLAUDE_TOKEN claude -p", agent)
+        self.assertIn("env -u LANE_CLAUDE_TOKEN -u LANE_CLAUDE_FALLBACK claude -p", agent)
         # The guard runs after the commits are packaged and before anything is uploaded.
         self.assertLess(agent.index("- name: Package commits"), agent.index("- name: Token guard"))
         self.assertLess(agent.index("- name: Token guard"), agent.rindex("actions/upload-artifact"))
@@ -277,7 +277,8 @@ class TokenGuardScript(unittest.TestCase):
         body = step[step.index("run: |\n") + len("run: |\n"):step.index("\n      - uses: actions/upload-artifact")]
         return textwrap.dedent(body)
 
-    def guard(self, commit_text="print(1)\n", message="work", result="{}", stderr="", token=None, branch=True):
+    def guard(self, commit_text="print(1)\n", message="work", result="{}", stderr="", token=None, branch=True,
+              fallback=""):
         tmp = tempfile.mkdtemp()
         repo, out = os.path.join(tmp, "repo"), os.path.join(tmp, "out")
         os.makedirs(repo), os.makedirs(out)
@@ -300,9 +301,12 @@ class TokenGuardScript(unittest.TestCase):
         Path(out, "agent.bundle").write_bytes(b"\x00PACK")
         run = subprocess.run(["bash", "-e", "-c", self.script()], cwd=repo, capture_output=True, text=True,
                              env={**env, "RUNNER_TEMP": tmp, "MAIN_BRANCH": "main", "BRANCH": "agent/api/issue-1",
-                                  "LANE_CLAUDE_TOKEN": self.TOKEN if token is None else token})
+                                  "LANE_CLAUDE_TOKEN": self.TOKEN if token is None else token,
+                                  "LANE_CLAUDE_FALLBACK": fallback})
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn(self.TOKEN, run.stdout + run.stderr)
+        if fallback:
+            self.assertNotIn(fallback, run.stdout + run.stderr)
         return sorted(os.listdir(out)), Path(out, "result.json").read_text(), run.stdout
 
     def assert_withheld(self, got, where):
@@ -342,3 +346,93 @@ class TokenGuardScript(unittest.TestCase):
     def test_empty_secret_and_no_branch_are_fine(self):
         self.assertIn("no token to guard", self.guard(token="")[2])
         self.assertIn("token guard: clean", self.guard(branch=False)[2])
+
+    def test_fallback_token_is_guarded_too(self):
+        fallback = "sk-ant-oat01-" + "Fb7" * 20
+        self.assert_withheld(self.guard(commit_text=f"KEY = '{fallback}'\n", fallback=fallback), "its commits")
+        self.assert_withheld(self.guard(token="", stderr=fallback, fallback=fallback), "the run's result or log")
+        self.assertIn("token guard: clean", self.guard(fallback=fallback)[2])
+
+
+class AgentRunScript(unittest.TestCase):
+    """Runs the real `Run agent` step from lane.yml with a fake `claude` that reads its token from fd 3."""
+    GOOD = "sk-ant-oat01-" + "Gd1" * 20
+    LIMITED = "sk-ant-oat01-" + "Lm2" * 20
+    FAKE_CLAUDE = textwrap.dedent("""\
+        #!/bin/bash
+        tok="$(cat <&3)"
+        printf '%s\\n' "$tok" >> "$NS_CALLS"
+        env | grep -c '^LANE_CLAUDE' >> "$NS_ENVLEAK"
+        if [ "$tok" = "$NS_GOOD" ]; then
+          echo '{"num_turns": 5, "structured_output": {"status": "done", "summary": "ok"}}'
+        elif [ "$tok" = "$NS_HALF" ]; then
+          echo '{"num_turns": 7, "result": "turn limit"}'; exit 1
+        else
+          echo '{"num_turns": 1, "is_error": true, "result": "Claude usage limit reached"}'; exit 1
+        fi
+        """)
+
+    def script(self):
+        text = workflow("lane.yml")
+        step = text[text.index("- name: Run agent"):]
+        body = step[step.index("run: |\n") + len("run: |\n"):step.index("\n      - name: Package commits")]
+        return textwrap.dedent(body)
+
+    def run_agent(self, token, fallback, half="", rc=0):
+        tmp = tempfile.mkdtemp()
+        repo, bin_dir, task = (os.path.join(tmp, d) for d in ("repo", "bin", "task"))
+        for d in (repo, bin_dir, task):
+            os.makedirs(d)
+        Path(bin_dir, "claude").write_text(self.FAKE_CLAUDE)
+        os.chmod(Path(bin_dir, "claude"), 0o755)
+        Path(task, "prompt.md").write_text("do __TASK_FILE__")
+        Path(task, "schema.json").write_text("{}")
+        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": tmp, "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_CONFIG_SYSTEM": os.devnull}
+        for args in (["init", "-q", "-b", "main"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                                                     "--allow-empty", "-m", "base"],
+                     ["update-ref", "refs/remotes/origin/main", "HEAD"]):
+            subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+        calls, leak = os.path.join(tmp, "calls"), os.path.join(tmp, "leak")
+        run = subprocess.run(["bash", "-e", "-c", self.script()], cwd=repo, capture_output=True, text=True,
+                             env={**env, "RUNNER_TEMP": tmp, "MAIN_BRANCH": "main", "BRANCH": "agent/api/issue-1",
+                                  "LANE_CLAUDE_TOKEN": token, "LANE_CLAUDE_FALLBACK": fallback,
+                                  "TOKEN_IN_ENV": "false", "MODEL": "sonnet", "MAX_TURNS": "80",
+                                  "PERMISSION_FLAGS": "", "NS_CALLS": calls, "NS_ENVLEAK": leak,
+                                  "NS_GOOD": self.GOOD, "NS_HALF": half})
+        self.assertEqual(run.returncode, rc, run.stderr)  # the step fails exactly when the last claude run did
+        for secret in (token, fallback):
+            if secret:
+                self.assertNotIn(secret, run.stdout + run.stderr)
+        used = Path(calls).read_text().split()
+        self.assertEqual(set(Path(leak).read_text().split()), {"0"})  # claude never sees either secret's variable
+        return used, json.loads(Path(tmp, "out", "result.json").read_text()), run.stdout, sorted(os.listdir(Path(tmp, "out")))
+
+    def test_working_token_runs_once(self):
+        used, result, log, _ = self.run_agent(self.GOOD, self.LIMITED)
+        self.assertEqual(used, [self.GOOD])
+        self.assertEqual(result["structured_output"]["status"], "done")
+        self.assertNotIn("fallback", log)
+
+    def test_usage_limit_switches_to_the_fallback(self):
+        used, result, log, files = self.run_agent(self.LIMITED, self.GOOD)
+        self.assertEqual(used, [self.LIMITED, self.GOOD])
+        self.assertEqual(result["structured_output"]["status"], "done")
+        self.assertIn("claude token: fallback", log)
+        self.assertIn("claude.primary.stderr", files)
+
+    def test_no_fallback_configured_runs_once(self):
+        used, result, _, _ = self.run_agent(self.LIMITED, "", rc=1)
+        self.assertEqual(used, [self.LIMITED])
+        self.assertEqual(result["num_turns"], 1)
+
+    def test_empty_primary_uses_the_fallback_directly(self):
+        used, _, log, _ = self.run_agent("", self.GOOD)
+        self.assertEqual(used, [self.GOOD])
+        self.assertIn("claude token: fallback", log)
+
+    def test_a_run_that_did_real_work_is_not_retried(self):
+        half = "sk-ant-oat01-" + "Hf3" * 20
+        used, result, _, _ = self.run_agent(half, self.GOOD, half=half, rc=1)
+        self.assertEqual(used, [half])
+        self.assertEqual(result["num_turns"], 7)

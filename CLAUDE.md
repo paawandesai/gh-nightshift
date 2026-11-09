@@ -16,7 +16,8 @@ parallel lanes. It was extracted from the hackathon kit in `legacy/hackathon-kit
 
 ## Security rules (never weaken these)
 - The LLM never holds the GitHub PAT. Only the pick and publish jobs see it; the agent job gets the lane's Claude token only.
-- Exactly two secrets reach each lane, by explicit name: that lane's Claude token and the PAT. Never `secrets[...]`
+- Exactly two secrets reach each lane, by explicit name: that lane's Claude token and the PAT. A lane that names a
+  `fallback_token_secret` also receives that second Claude token (handled like the first; never a PAT). Never `secrets[...]`
   lookups, never `secrets: inherit`. `doctor` checks this; keep that check.
 - Agent changes to `.github/`, `.claude/`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `.night-shift/` or any configured
   protected path are rejected in the publish job.

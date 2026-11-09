@@ -68,6 +68,11 @@ Python 3.10 or newer, and a CI workflow whose test job is called `test`. If it h
    `CLAUDE_TOKEN_<OWNER>` and `AGENT_PAT_<OWNER>`, the owners become `trusted_logins`, and each owner stores their
    two secrets with `gh nightshift join --lane <lane>`. The planner, digest and commands still use `AGENT_PAT`.
 
+   A lane can also name `fallback_token_secret`, a second Claude token (for example from its owner's second
+   account). The agent switches to it only when the lane's own token cannot start a run (usage limit, expired or
+   revoked token); the run log says `claude token: fallback`. Store it with `gh nightshift join --lane <lane>
+   --fallback`, and run `gh nightshift init --regenerate` after adding the key so the caller passes it.
+
 4. Commit and push the new files to main, then protect main and check the setup.
 
    ```sh
@@ -148,7 +153,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 
 | Key | Default | What it does |
 |---|---|---|
-| `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image` |
+| `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `fallback_token_secret` (a second Claude token used only when the first cannot start a run), `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image` |
 | `main_branch` | `main` | Branch the lanes build on and protect |
 | `ci_workflow` | `ci.yml` | CI file whose runs on main gate every lane |
 | `required_checks` | `[test, "review / verdict"]` | Required status checks; a PR counts as green only when all have reported |
@@ -268,7 +273,7 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 |---|---|
 | `init` | `--template hackathon` starts from a weekend-build setup (planner refill below 3, 2 attempts, 30-minute stale limit, digest every 4 hours, a `docs/PRD.md` and `contracts/` stub). Write config and workflows, set up labels, settings, variables, night log, roadmap, secrets (branch protection: run `setup` after pushing). `--yes`, `--lanes`, `--tool-ref`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets`, `--dry-run`. Fully non-interactive with `--yes --lanes api,web --preset python --paths api=api/ --budget 5 --secrets-from-env`. `--owners api=alice,web=bob --lane-pats --bot-login night-bot` gives each lane its owner's own PAT and Claude token |
 | `setup` | Re-apply labels, settings, variables, branch protection, the night log and the roadmap |
-| `join --lane X` | A teammate stores their Claude token and their own PAT for a lane (`--no-pat` to skip); prints the `trusted_logins` line to add |
+| `join --lane X` | A teammate stores their Claude token and their own PAT for a lane (`--no-pat` to skip); prints the `trusted_logins` line to add. `--fallback` stores the lane's fallback Claude token instead |
 | `doctor` | Read-only checks with a fix for each problem (`--pat-env VAR` checks a PAT; repeat it for each) |
 | `status` | What each lane would do now, the queue, open agent PRs, blocked and waiting issues, the night log |
 | `stats` | Merge rate with a 95% interval, reason codes, escalation share, cost per merged PR (`--audit CSV` adds the review gate's catch rate; `--org ORG` summarises every repo in an org that has a night-shift config). Counts PRs and markers from `bot_login` in the config (default: you), so set it when the PAT is another account. |
@@ -422,7 +427,8 @@ Intervals are Wilson score intervals (`nightshift/stats_math.py`).
 
 ## Security
 
-The agent never holds the GitHub PAT. Each lane receives exactly two secrets, named explicitly. Changes to
+The agent never holds the GitHub PAT. Each lane receives exactly two secrets, named explicitly (three if it names a
+fallback Claude token). Changes to
 protected paths are rejected before push. Only comments from the PAT's own login are trusted. The full threat
 model and its known gaps are in [SECURITY.md](SECURITY.md).
 

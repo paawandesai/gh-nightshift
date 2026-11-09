@@ -83,6 +83,11 @@ token at their prompt. Never paste a token into an issue, a PR, a chat or this r
 
 The admin can check which secrets exist (names only) with `gh secret list -R OWNER/REPO`.
 
+**A second account as a fallback.** If a lane owner has a second Claude account, the lane can switch to it when
+the first one hits its usage limit. The admin adds `fallback_token_secret: CLAUDE_TOKEN_<OWNER>_2` to that lane in
+`.night-shift/config.yml`, runs `gh nightshift init --regenerate` and commits; the owner then signs in to the second
+account and runs `gh nightshift join --lane <lane> --fallback`. Check that this fits your Claude plan's terms.
+
 ## 4. Write the first tickets (repo admin)
 
 Agents pick issues labelled `night-safe` plus exactly one `lane:<name>`. Good first tickets are small and

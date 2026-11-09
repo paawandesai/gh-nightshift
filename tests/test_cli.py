@@ -18,7 +18,7 @@ from fakegh import FakeGitHub
 
 from nightshift import audit, cli, prompts, scaffold
 from nightshift import protocol as ns
-from nightshift.config import CONFIG_PATH, load
+from nightshift.config import CONFIG_PATH, ConfigError, load
 from nightshift.gh import command_for
 
 ENV_DROP = ("GITHUB_REPOSITORY", "GH_REPO", "AGENTS_ENABLED", "GH_TOKEN", "GITHUB_TOKEN", "COMMENT_AUTHOR",
@@ -453,6 +453,23 @@ class SetupJoinTests(CliTestCase):
                           secret_setter=lambda *a: self.fail("must not set"))
         self.assertEqual(rc, 0)
         self.assertIn("[dry-run] gh secret set CLAUDE_TOKEN_API -R o/r", out.getvalue())
+
+    def test_join_fallback_stores_only_the_fallback_token(self):
+        write_config(self.root, lane_extra={"api": {"fallback_token_secret": "CLAUDE_TOKEN_API_2"}})
+        stored = []
+        ctx, out = self.ctx("join", "--lane", "api", "--fallback")
+        rc = cli.cmd_join(ctx, secret_ask=lambda p: "sk-ant-oat-SECOND-ACCOUNT",
+                          secret_setter=lambda repo, n, v: stored.append((n, v)),
+                          run=lambda *a, **k: self.fail("must not check a PAT"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(stored, [("CLAUDE_TOKEN_API_2", "sk-ant-oat-SECOND-ACCOUNT")])
+        self.assertIn("second Claude account", out.getvalue())
+        self.assertNotIn("SECOND-ACCOUNT", out.getvalue())
+
+    def test_join_fallback_without_one_configured(self):
+        ctx, _ = self.ctx("join", "--lane", "api", "--fallback")
+        with self.assertRaisesRegex(ConfigError, "fallback_token_secret: CLAUDE_TOKEN_API_FALLBACK"):
+            cli.cmd_join(ctx, secret_ask=lambda p: self.fail("must not ask"), secret_setter=lambda *a: self.fail("no"))
 
     def test_join_unknown_lane(self):
         rc, _ = self.run_cli("join", "--lane", "nope")

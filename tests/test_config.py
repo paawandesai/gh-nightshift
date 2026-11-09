@@ -39,8 +39,8 @@ class Schema(unittest.TestCase):
         self.assertEqual(cfg.lane("api").postgres_image, "postgres:16")
         self.assertEqual(cfg.id_prefix("web"), "W")
         self.assertIn("contracts/", cfg.protected_paths)
-        self.assertEqual(cfg.secret_names(), ["AGENT_PAT", "AGENT_PAT_BOB", "CLAUDE_TOKEN_ALICE", "CLAUDE_TOKEN_BOB",
-                                              "CLAUDE_TOKEN_REVIEW"])
+        self.assertEqual(cfg.secret_names(), ["AGENT_PAT", "AGENT_PAT_BOB", "CLAUDE_TOKEN_ALICE", "CLAUDE_TOKEN_ALICE_2",
+                                              "CLAUDE_TOKEN_BOB", "CLAUDE_TOKEN_REVIEW"])
 
     def test_defaults(self):
         cfg = loads(MINIMAL)

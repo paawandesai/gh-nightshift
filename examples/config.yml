@@ -49,6 +49,7 @@ lanes:
     description: REST API and database
     paths: [api/]
     claude_token_secret: CLAUDE_TOKEN_ALICE
+    fallback_token_secret: CLAUDE_TOKEN_ALICE_2   # optional: used only when Alice's token hits a usage limit
     model: sonnet
     postgres_image: "postgres:16"
     setup:

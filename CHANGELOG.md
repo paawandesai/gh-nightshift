@@ -23,6 +23,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `lanes[].fallback_token_secret`: an optional second Claude token per lane (for example from a second account).
+  The agent job switches to it only when the lane's token cannot start a run (usage limit, expired or revoked
+  token). It reaches Claude on the same pipe and the token guard checks it too; the lane then receives three
+  secrets. `join --lane X --fallback` stores it.
 - `docs/ALPHA.md`: a guide for alpha testers (install, set up a repo, join a lane, what to report).
 
 ### Fixed

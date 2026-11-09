@@ -183,6 +183,10 @@ def secret_hint(cfg: Config, name: str) -> str:
     lanes = [lane.name for lane in cfg.lanes if lane.token_secret == name]
     if lanes:
         return f"`claude setup-token` from the owner of lane(s) {', '.join(lanes)}"
+    fallbacks = [lane.name for lane in cfg.lanes if lane.fallback_token_secret == name]
+    if fallbacks:
+        return (f"`claude setup-token` from a second Claude account, used by lane(s) {', '.join(fallbacks)} only when "
+                "the first token cannot start a run")
     pats = [lane.name for lane in cfg.lanes if lane.pat_secret == name]
     if pats:
         return f"lane owner's own PAT for {', '.join(pats)}, same permissions as AGENT_PAT"

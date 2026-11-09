@@ -329,6 +329,15 @@ def cmd_join(ctx: Ctx, secret_ask=None, secret_setter=None, run=subprocess.run) 
         kwargs["ask"] = secret_ask
     if secret_setter:
         kwargs["setter"] = secret_setter
+    if getattr(ctx.args, "fallback", False):
+        if not lane.fallback_token_secret:
+            raise ConfigError(f"lane {lane.name} has no fallback_token_secret in {CONFIG_PATH}; add e.g. "
+                              f"`fallback_token_secret: {lane.token_secret}_FALLBACK` to the lane, commit it and run "
+                              "`gh nightshift init --regenerate`")
+        ctx.say(f"Lane {lane.name}: sign in to the second Claude account, run `claude setup-token` and paste the token.")
+        ctx.say(repo_setup.prompt_secret(ctx.gh, lane.fallback_token_secret,
+                                         repo_setup.secret_hint(cfg, lane.fallback_token_secret), **kwargs))
+        return 0
     ctx.say(f"Lane {lane.name}: run `claude setup-token` and paste the token.")
     ctx.say(repo_setup.prompt_secret(ctx.gh, lane.token_secret, f"Claude token for lane {lane.name}", **kwargs))
     if not lane.pat_secret or ctx.args.no_pat:
@@ -862,6 +871,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--lane", required=True)
     s.add_argument("--pat", action="store_true", help=argparse.SUPPRESS)  # kept for compatibility; now the default
     s.add_argument("--no-pat", action="store_true", help="do not ask for the lane's own PAT (agent_pat_secret)")
+    s.add_argument("--fallback", action="store_true",
+                   help="store the lane's fallback Claude token (fallback_token_secret) instead, e.g. from a second account")
     s = sub.add_parser("doctor", parents=[common], help="check the setup; prints a fix for each problem")
     s.add_argument("--pat-env", action="append", default=[],
                    help="env var holding a PAT to check (repeat for each per-contributor PAT)")

@@ -219,6 +219,10 @@
           "agent_pat_secret": {
             "$ref": "#/$defs/secret"
           },
+          "fallback_token_secret": {
+            "$ref": "#/$defs/secret",
+            "description": "Optional second Claude token (for example from the owner's second account). The agent job switches to it only when the first token cannot start a run (usage limit, expired or revoked token). The lane then receives three secrets."
+          },
           "model": {
             "$ref": "#/$defs/model"
           },
