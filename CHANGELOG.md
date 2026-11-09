@@ -1,0 +1,84 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.0] - Unreleased
+
+First release, extracted from the hackathon night-shift kit (`legacy/hackathon-kit/`, see `docs/EXTRACTION.md`).
+
+### Added
+
+- `gh nightshift` CLI extension (Python 3.10+, standard library only) with the commands `init`, `setup`,
+  `join`, `doctor`, `status`, `stats`, `plan`, `start`, `pause`, `freeze`, `resume`, `lint` and `audit`.
+- The review gate fetches the base branch with the job token for that one command, so it works on private
+  repos (the checkouts keep no credentials).
+- `check-pat` (run at the start of every lane) probes the repo, contents, issues, pull requests, Actions, checks and commit
+  statuses with the PAT and names the missing fine-grained permission, instead of `pick` failing later on a bare 404. The PAT now also needs
+  Commit statuses: Read. Fine-grained PATs cannot have Checks, so the picker reads a PR's CI from its Actions jobs
+  when the check-runs endpoint answers 403 (App mode keeps Checks: read).
+  Every command that writes to GitHub supports `--dry-run`, which prints the exact `gh api` calls.
+- `.night-shift/config.yml`, validated against `nightshift/schema/config.schema.json`, with an annotated
+  example in `examples/config.yml`.
+- Reusable workflow `lane.yml` that runs each lane as three jobs. `pick` holds the PAT, `agent` holds only
+  the lane's Claude token, and `publish` holds the PAT and validates the agent's git bundle on a clean
+  runner.
+- A generated caller workflow with one job per lane and explicit secret names. It has no `secrets[...]`
+  lookups and no `secrets: inherit`.
+- Per-lane setup commands, an optional local composite action, and an optional Postgres service, all run
+  only in the agent job.
+- Protected paths (`.github/`, `.claude/`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `.night-shift/` plus
+  configured ones). Agent changes to them are rejected in the publish job.
+- `check-pat` step in every lane run. It fails a PAT that does not authenticate or has the classic
+  `workflow` scope.
+- Reusable review gate `review.yml` (required check `review / verdict`). It reads its prompt and rules from
+  the base branch, runs with read-only tools, and checks main drift since the PR's base
+  (`git diff <merge-base>..origin/main --stat` plus overlapping diffs).
+- Merge modes `strict` (up-to-date branch protection and automatic `update-branch`) and `queue` (merge
+  queue ruleset).
+- Comment protocol with `<!-- ns:{...} -->` markers. Only markers posted by the PAT's own login are
+  trusted.
+- Hand-offs to dependent issues on merge. They restate the interface as built and flag differences from
+  the ticket.
+- `waiting` status with cross-lane `needs`: capped at 2 per issue, cycles refused, attempt not counted.
+  Also notes to other issues (capped at 2 per issue), and follow-ups filed as `proposed`.
+- PR reason codes: `verdict_passed`, `verdict_failed`, `checks_failed`, `conflict`, `stale`, `superseded`,
+  `manual`.
+- Reusable planner workflow `planner.yml` with modes `prd`, `gap` and `review` (`/night-shift plan` from a
+  user with write access), plus scheduled refill below `planner.refill_below`.
+- A ticket validator for the planner: required sections, a required `## Interface` section for tickets
+  with dependencies, `human` tickets for protected and contract paths, dedupe, a per-run cap, and a
+  coverage stopping rule.
+- The ticket guide `docs/NIGHT_SHIFT_ISSUES.md`, an issue template and `AGENT_RULES.md`, written into
+  projects by `init`.
+- `gh nightshift audit`: a seeded sample of merged agent PRs, an evidence folder, a mechanical test check
+  (tests at the merge commit and with the implementation reverted), optional LLM labels, and a report with
+  Wilson intervals, the detection floor and Cohen's kappa.
+- `gh nightshift stats`: merge rate with a 95% interval, reason codes, escalation share, cost per merged PR
+  and the review gate's estimated catch rate.
+- Kill switch and code freeze: the `AGENTS_ENABLED` repo variable, `pause`, `freeze` and `resume`.
+- `README.md`, `SECURITY.md` (threat model and known gaps) and this changelog.
+- Per-contributor PATs: `trusted_logins`, `join` stores and checks the lane owner's PAT, `doctor` checks each.
+- `init` runs fully from flags, with optional `--preset python|node|go` and a starter CI when none exists.
+- `pause` and `freeze` cancel lane runs in flight (`--no-cancel` to keep them).
+- Optional nightly budget per lane (`budget_usd_per_night`), off by default.
+- Morning digest: `gh nightshift digest`, posted daily to the night log by `night-shift-digest.yml`, with
+  an optional Slack or Discord webhook (`digest.webhook_secret`).
+- Comment commands `/night-shift take` and `/night-shift retry` (and `take N` / `retry N` in the CLI).
+- Risk tiers: `risk.approve_labels`, `approve_paths`, `default: approve` with `auto_labels`; such PRs wait
+  for one human approval before the picker merges them.
+- GitHub App auth (`auth.mode: app`, `app manifest`, `app check`, `init --app-id --app-key-file`): a
+  down-scoped installation token minted in the PAT jobs only.
+- `init --template hackathon`.
+- CODEOWNERS-aware lanes: `init` suggests lane owners from CODEOWNERS and sets `risk.codeowners`, which
+  makes PRs touching owned files wait for an owner's approval.
+- Org-wide config inheritance: `extends:` plus `gh nightshift config pull` (`.night-shift/base.yml`).
+- Cross-repo `Blocked by: org/repo#n` with pull-style hand-offs.
+- `stats --org`, a weekly report (`digest --weekly`, `digest.weekly_schedule`) and `audit-log` export
+  (model, prompt version, cost per agent PR); PR bodies now carry the prompt version.
+- Roadmap issue: waves, status per ticket and lane, Blocked-by mermaid graph; created by `init`/`setup`,
+  refreshed by the planner, every merge and the digest; `gh nightshift roadmap` and `plan --show`.
+
+[0.1.0]: https://github.com/paawandesai/gh-nightshift/tree/build/v0.1

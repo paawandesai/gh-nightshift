@@ -1,0 +1,73 @@
+# Night shift: one agent per lane, running on GitHub's runners so nobody's laptop has to stay awake.
+# On every merge to main (and every 20 minutes as a backstop) each lane runs night-shift-lane.yml: pick an issue -> agent works -> publish a PR.
+#
+# Setup: see RUNBOOK.md. Needed:
+#   secrets  AGENT_PAT            fine-grained token, this repo only. Read and write: Contents, Issues, Pull requests.
+#                                 Read: Actions. Do NOT grant Workflows (it is what stops agents from editing CI).
+#            CLAUDE_TOKEN_<PERSON> one per person, output of `claude setup-token`; lanes reference their owner's
+#            AGENT_PAT_DEBU       optional: same scopes as AGENT_PAT, from debudash. The cloud lane picks and
+#                                 publishes with it, so its PRs and squash commits are credited to debudash.
+#                                 Unset or empty: the cloud lane falls back to AGENT_PAT.
+#   vars    AGENTS_ENABLED=true  the kill switch (set to false to stop everything)
+#   optional vars: FIX_LANE, READY_LABEL (night-safe), CI_WORKFLOW (ci.yml), MAIN_BRANCH (main),
+#                  MAX_TURNS (80), CLAUDE_CODE_VERSION (latest), CLAUDE_PERMISSION_FLAGS,
+#                  ESCALATE_MODEL (opus), REVIEW_MODEL (opus)
+
+name: night-shift
+
+on:
+  # Every merge into main starts the next issue in every lane right away; the timer is the backstop.
+  push:
+    branches: [main]
+  # When a PR's checks finish, the picker merges it (or closes it) right away instead of waiting for the timer.
+  # This matters most when auto-merge is unavailable (private repos without GitHub Pro).
+  workflow_run:
+    workflows: [CI, agent-review]
+    types: [completed]
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Run only this lane (blank = every lane)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  lane:
+    if: vars.AGENTS_ENABLED == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # >>> EDIT: one entry per lane. Lane names must match the lane:<name> labels.
+          # More lanes = more agents in parallel. A person can own several lanes: reuse their token_secret.
+          # model = first-try model for the lane (alias like sonnet/opus/haiku or a full model name).
+          # Retries and fix-main use ESCALATE_MODEL (default opus); a model:<alias> issue label overrides both.
+          - lane: field
+            token_secret: CLAUDE_TOKEN_PAAWAN
+            model: sonnet
+          - lane: cloud
+            token_secret: CLAUDE_TOKEN_DEBU
+            model: sonnet
+          - lane: engine
+            token_secret: CLAUDE_TOKEN_TYLER
+            model: sonnet
+    concurrency:
+      group: night-shift-${{ matrix.lane }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/night-shift-lane.yml
+    with:
+      lane: ${{ matrix.lane }}
+      token_secret: ${{ matrix.token_secret }}
+      only_lane: ${{ inputs.lane || '' }}
+      model: ${{ matrix.model || 'sonnet' }}
+    # Pass exactly two secrets. Never `secrets: inherit` + secrets[...] lookups in the lane workflow:
+    # a computed secret name makes GitHub send every repo secret to that runner, AGENT_PAT included.
+    # A lane owner's own PAT is chosen with fixed secret names (never secrets[...]), falling back to AGENT_PAT.
+    secrets:
+      claude_token: ${{ secrets[matrix.token_secret] }}
+      agent_pat: ${{ matrix.lane == 'cloud' && secrets.AGENT_PAT_DEBU || secrets.AGENT_PAT }}

@@ -1,0 +1,137 @@
+# gh-nightshift: the independent review gate for agent PRs (head branch agent/...).
+# A separate Claude run with read-only tools answers one yes/no question per failure type, plus whether
+# main moved under the PR in anything it touches (audit add-on B). The `verdict` job fails on "fail",
+# which blocks the merge; the picker then closes the PR with reason `verdict_failed`.
+#
+# Trust boundary: the prompt and the reviewer's working directory (CLAUDE.md, .claude/, .night-shift/)
+# come from the BASE branch. The PR's code is mounted read-only as material under review.
+name: night-shift-review
+
+on:
+  workflow_call:
+    inputs:
+      tool_repo:
+        type: string
+        required: false
+        default: paawandesai/gh-nightshift
+      tool_ref:
+        type: string
+        required: false
+        default: main
+      model:
+        type: string
+        required: false
+        default: ""
+    secrets:
+      claude_token:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verdict:
+    if: startsWith(github.head_ref, 'agent/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_REF: ${{ github.head_ref }}
+      BASE_REF: ${{ github.base_ref }}
+      PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+      # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
+      PYTHONSAFEPATH: "1"
+    steps:
+      - name: Check out base (trusted)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - name: Check out PR head (under review)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out gh-nightshift scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+
+      - name: Gather ticket, diff and what changed on main
+        id: gather
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/review"; mkdir -p "$WORK"
+          # The checkouts keep no credentials (persist-credentials: false), so on a private repo this fetch must
+          # carry the job token itself. It is passed for this one command only and never written to disk.
+          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::${AUTH#AUTHORIZATION: basic }"
+          git -C pr -c "http.https://github.com/.extraheader=$AUTH" fetch -q origin "$BASE_REF"
+          python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
+            --out-dir "$WORK" --github-output "$GITHUB_OUTPUT"
+
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+
+      - name: Review
+        id: review
+        working-directory: base
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          REVIEW_MODEL: ${{ inputs.model || vars.REVIEW_MODEL || 'opus' }}
+        run: |
+          set -uo pipefail
+          WORK="$RUNNER_TEMP/review"; PR_DIR="$GITHUB_WORKSPACE/pr"
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::The review Claude token (review_token_secret, default CLAUDE_TOKEN_REVIEW) is empty"; exit 1; fi
+          # Prompt: base branch's .night-shift/prompts/review.md if present, else gh-nightshift's default.
+          PROMPT="$(python3 -m nightshift prompt review --root . --set ISSUE_FILE="$WORK/issue.md" \
+            --set DIFF_FILE="$WORK/diff.patch" --set DRIFT_FILE="$WORK/drift.md" --set PR_DIR="$PR_DIR")"
+          SCHEMA="$(python3 -m nightshift schema review)"
+          # Read-only: in -p runs, any tool not allowed here is denied.
+          claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" --max-turns 30 --model "$REVIEW_MODEL" \
+            --add-dir "$WORK" "$PR_DIR" --allowedTools "Read,Grep,Glob" \
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$WORK/review.json" 2> "$WORK/review.stderr"
+          echo "claude exit code: $?"
+          python3 -m nightshift review-report --result "$WORK/review.json" --out "$WORK/comment.md" \
+            --overlap "${{ steps.gather.outputs.overlap || 0 }}" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Post review and set verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERDICT: ${{ steps.review.outputs.verdict }}
+          ISSUE: ${{ steps.gather.outputs.issue }}
+        run: |
+          set -uo pipefail
+          WORK="$RUNNER_TEMP/review"
+          jq -n --rawfile b "$WORK/comment.md" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$PR/comments" --input - >/dev/null || true
+          if [ "$VERDICT" = "error" ]; then
+            # The reviewer itself broke (expired token, usage limit): the picker refunds the attempt.
+            gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=review-error" >/dev/null || true
+            echo "::error::Review run failed (not a verdict on the code)"; exit 1
+          fi
+          if [ "$VERDICT" != "pass" ] && [ -n "$ISSUE" ]; then
+            # Put the findings on the issue too, so the next attempt reads them.
+            jq -n --rawfile b "$WORK/comment.md" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$ISSUE/comments" --input - >/dev/null || true
+          fi
+          if [ "$VERDICT" != "pass" ]; then echo "::error::Review verdict: $VERDICT"; exit 1; fi
+
+      - name: Mark a review gate that broke before the reviewer answered
+        # e.g. the gather step failed: not a verdict on the code, so the picker refunds the attempt.
+        if: failure() && steps.review.outputs.verdict == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=review-error" >/dev/null || true

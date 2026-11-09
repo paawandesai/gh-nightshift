@@ -1,0 +1,162 @@
+# gh-nightshift: the planner. Turns docs, a gap analysis or a request into night-shift tickets.
+#   context  (GITHUB_TOKEN, read)   decide whether to run and write the planning context
+#   draft    (Claude token only)    read-only Claude run -> plan.json (tickets + coverage)
+#   create   (PAT)                  validate against the ticket guide, dedupe, cap, create the issues
+name: night-shift-planner
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: prd | gap | review | refill
+        type: string
+        required: true
+      docs:
+        description: Comma-separated doc paths (prd mode; default planner.docs)
+        type: string
+        required: false
+        default: ""
+      lane:
+        type: string
+        required: false
+        default: ""
+      model:
+        type: string
+        required: false
+        default: opus
+      tool_repo:
+        type: string
+        required: false
+        default: paawandesai/gh-nightshift
+      tool_ref:
+        type: string
+        required: false
+        default: main
+      app_id:
+        description: GitHub App id (auth.mode app); empty means the PAT
+        type: string
+        required: false
+        default: ""
+    secrets:
+      claude_token:
+        required: false
+      agent_pat:
+        required: false   # one of agent_pat or app_id + app_private_key
+      app_private_key:
+        required: false
+
+permissions:
+  contents: read
+  issues: read
+
+env:
+  REPO: ${{ github.repository }}
+  PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+  # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
+  PYTHONSAFEPATH: "1"
+
+jobs:
+  context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.ctx.outputs.run }}
+      mode: ${{ steps.ctx.outputs.mode }}
+      lane: ${{ steps.ctx.outputs.lane }}
+      issue: ${{ steps.ctx.outputs.issue }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - name: Planning context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+          DOCS: ${{ inputs.docs }}
+          LANE: ${{ inputs.lane }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          # review mode: the comment that asked for a plan (checked for write access in Python)
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 -m nightshift plan context --mode "$MODE" --docs "$DOCS" --lane "$LANE" \
+            --out-dir "$RUNNER_TEMP/plan" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: steps.ctx.outputs.run == 'true'
+        with:
+          name: plan-context
+          path: ${{ runner.temp }}/plan
+          retention-days: 3
+
+  draft:
+    needs: context
+    if: needs.context.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan-context
+          path: ${{ runner.temp }}/plan
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+      - name: Draft tickets (read-only)
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          MODEL: ${{ vars.PLANNER_MODEL || inputs.model }}
+        run: |
+          set -uo pipefail
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::planner Claude token is empty"; exit 1; fi
+          P="$RUNNER_TEMP/plan"
+          claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
+            --model "$MODEL" --max-turns 60 --add-dir "$P" --allowedTools "Read,Grep,Glob" \
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$P/plan.json" 2> "$P/claude.stderr"
+          rc=$?; echo "claude exit code: $rc"; tail -n 20 "$P/claude.stderr" || true
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan-draft
+          path: ${{ runner.temp }}/plan/plan.json
+          retention-days: 7
+
+  create:
+    needs: [context, draft]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        if: inputs.app_id != ''
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan-draft
+          path: ${{ runner.temp }}/plan
+      - name: Validate and create issues
+        env:
+          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          LANE: ${{ needs.context.outputs.lane }}
+          ISSUE: ${{ needs.context.outputs.issue }}
+        run: python3 -m nightshift plan publish "$RUNNER_TEMP/plan/plan.json" --lane "$LANE" --reply-to "$ISSUE"

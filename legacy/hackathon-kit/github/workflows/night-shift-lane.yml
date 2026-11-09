@@ -1,0 +1,368 @@
+# One lane's night-shift run, called by night-shift.yml. Three jobs on three separate runners:
+#   pick     (AGENT_PAT)          choose the issue, write the task file, count the attempt
+#   agent    (Claude token only)  do the work; hands back result.json + a git bundle as artifacts
+#   publish  (AGENT_PAT)          validate the bundle on a clean runner, push, open the PR, log
+# The agent never shares a machine with the GitHub token.
+
+name: night-shift-lane
+
+on:
+  workflow_call:
+    inputs:
+      lane:
+        type: string
+        required: true
+      token_secret:
+        type: string
+        required: true
+      only_lane:
+        type: string
+        required: false
+        default: ""
+      model:
+        type: string
+        required: false
+        default: sonnet
+    secrets:
+      claude_token:
+        required: false   # checked in the pick job so a missing one gives a clear error
+      agent_pat:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  LANE: ${{ inputs.lane }}
+  REPO: ${{ github.repository }}
+  # Scheduled runs carry no repository payload, so fall back to a variable, then "main".
+  MAIN_BRANCH: ${{ github.event.repository.default_branch || vars.MAIN_BRANCH || 'main' }}
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.pick.outputs.mode }}
+      issue: ${{ steps.pick.outputs.issue }}
+      branch: ${{ steps.prep.outputs.branch }}
+      title: ${{ steps.prep.outputs.title }}
+      attempt_comment: ${{ steps.prep.outputs.attempt_comment }}
+      fail_sha: ${{ steps.pick.outputs.fail_sha }}
+      model: ${{ steps.pick.outputs.model }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.MAIN_BRANCH }}
+          persist-credentials: false
+
+      - name: Check lane token exists
+        env:
+          LANE_TOKEN: ${{ secrets.claude_token }}
+          TOKEN_NAME: ${{ inputs.token_secret }}
+        run: |
+          if [ -z "$LANE_TOKEN" ]; then echo "::error::Secret $TOKEN_NAME is empty or missing"; exit 1; fi
+
+      - name: Show the account this lane publishes as
+        env:
+          GH_TOKEN: ${{ secrets.agent_pat }}
+        run: echo "Lane $LANE picks and publishes as $(gh api user --jq .login)"
+
+      - name: Pick next issue
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.agent_pat }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          READY_LABEL: ${{ vars.READY_LABEL }}
+          FIX_LANE: ${{ vars.FIX_LANE }}
+          CI_WORKFLOW: ${{ vars.CI_WORKFLOW }}
+          ONLY_LANE: ${{ inputs.only_lane }}
+          LANE_MODEL: ${{ inputs.model }}
+          ESCALATE_MODEL: ${{ vars.ESCALATE_MODEL }}
+        run: python3 .github/night-shift/agent_pick.py
+
+      - name: Write task and record attempt
+        id: prep
+        if: steps.pick.outputs.mode != 'skip'
+        env:
+          GH_TOKEN: ${{ secrets.agent_pat }}
+          MODE: ${{ steps.pick.outputs.mode }}
+          ISSUE: ${{ steps.pick.outputs.issue }}
+          FAIL_SHA: ${{ steps.pick.outputs.fail_sha }}
+          CI_WORKFLOW: ${{ vars.CI_WORKFLOW || 'ci.yml' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/task"
+          TASK="$RUNNER_TEMP/task/task.md"
+          if [ "$MODE" = "issue" ]; then
+            BRANCH="agent/$LANE/issue-$ISSUE"
+            # Only comments from repo members/collaborators and from the review bot reach the agent.
+            gh issue view "$ISSUE" -R "$REPO" --json number,title,body,comments --jq '
+              "# Issue #\(.number): \(.title)\n\n\(.body)\n\n## Comments (oldest first)\n" +
+              ([.comments[]
+                | select(.authorAssociation == "OWNER" or .authorAssociation == "MEMBER"
+                         or .authorAssociation == "COLLABORATOR" or (.author.login | startswith("github-actions")))
+                | select(.body | contains("<!-- agent-attempt -->") | not)
+                | "- **\(.author.login)**: \(.body)"] | join("\n"))' > "$TASK"
+            TITLE="$(gh issue view "$ISSUE" -R "$REPO" --json title --jq .title)"
+            gh issue edit "$ISSUE" -R "$REPO" --add-label agent:in-progress
+            URL="$(printf '<!-- agent-attempt -->\nNight shift lane `%s` started an attempt: %s\n' "$LANE" "$RUN_URL" \
+              | gh issue comment "$ISSUE" -R "$REPO" --body-file -)"
+          else
+            BRANCH="agent/$LANE/fix-main-$GITHUB_RUN_ID"
+            TITLE="Fix failing CI on $MAIN_BRANCH"
+            FAILED_RUN="$(gh run list -R "$REPO" --workflow "$CI_WORKFLOW" --branch "$MAIN_BRANCH" \
+              --status failure --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            {
+              echo "# Fix failing CI on $MAIN_BRANCH"
+              echo
+              echo "The latest CI run on $MAIN_BRANCH failed, and every other lane is paused until it is green."
+              echo "Find the root cause and make the smallest fix that makes the full test suite pass."
+              echo "Do not delete or skip tests to make them pass."
+              echo
+              echo "## Failure log (last 200 lines)"
+              echo '```'
+              if [ -n "$FAILED_RUN" ]; then gh run view "$FAILED_RUN" -R "$REPO" --log-failed 2>/dev/null | tail -n 200 || true; fi
+              echo '```'
+            } > "$TASK"
+            LOG_ISSUE="$(gh issue list -R "$REPO" --label night-log --state open --limit 1 --json number --jq '.[0].number // empty')"
+            URL=""
+            if [ -n "$LOG_ISSUE" ]; then
+              URL="$(printf '<!-- fix-main-attempt sha=%s -->\nLane `%s` is trying to fix main: %s\n' "$FAIL_SHA" "$LANE" "$RUN_URL" \
+                | gh issue comment "$LOG_ISSUE" -R "$REPO" --body-file -)"
+            fi
+          fi
+          {
+            echo "branch=$BRANCH"
+            echo "title=$(echo "$TITLE" | tr '\n' ' ')"
+            echo "attempt_comment=${URL##*issuecomment-}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.pick.outputs.mode != 'skip'
+        with:
+          name: task-${{ inputs.lane }}
+          path: ${{ runner.temp }}/task/task.md
+          retention-days: 3
+
+  agent:
+    needs: pick
+    if: needs.pick.outputs.mode != 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    env:
+      BRANCH: ${{ needs.pick.outputs.branch }}
+      # The CI environment (see ci.yml), so the agent can run its lane's tests before finishing.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.MAIN_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: task-${{ inputs.lane }}
+          path: ${{ runner.temp }}/task
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            constraints.txt
+            */requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints.txt --group dev \
+            -r shared/requirements.txt -r field/requirements.txt \
+            -r engine/requirements.txt -r evals/requirements.txt
+
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: cloud/.tool-versions
+          version-type: strict
+
+      - name: Fetch and compile cloud dependencies
+        working-directory: cloud
+        env:
+          MIX_ENV: test
+        run: mix deps.get && mix deps.compile
+
+      - name: Install Mercury
+        if: inputs.lane == 'engine'
+        uses: ./.github/actions/install-mercury
+
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+
+      - name: Run agent
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          MODEL: ${{ needs.pick.outputs.model || 'sonnet' }}
+          MAX_TURNS: ${{ vars.MAX_TURNS || '80' }}
+          # This runner holds no GitHub write credentials and is discarded after the job.
+          PERMISSION_FLAGS: ${{ vars.CLAUDE_PERMISSION_FLAGS || '--dangerously-skip-permissions' }}
+        run: |
+          set -uo pipefail
+          OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
+          TASK_FILE="$RUNNER_TEMP/task/task.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          PROMPT="$(sed -e "s|__LANE__|$LANE|g" -e "s|__TASK_FILE__|$TASK_FILE|g" .github/night-shift/worker-prompt.md)"
+          SCHEMA='{"type":"object","properties":{"status":{"type":"string","enum":["done","stuck"]},"summary":{"type":"string"},"assumptions":{"type":"array","items":{"type":"string"}},"tests_passed":{"type":"boolean"}},"required":["status","summary","assumptions","tests_passed"]}'
+          # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
+          claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" \
+            --model "$MODEL" --max-turns "$MAX_TURNS" $PERMISSION_FLAGS > "$OUT/result.json" 2> "$OUT/claude.stderr"
+          echo "claude exit code: $? (model $MODEL)"
+          tail -n 50 "$OUT/claude.stderr" || true
+
+      - name: Package commits
+        if: always()
+        run: |
+          set -uo pipefail
+          OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
+          STATUS="$(jq -r '.structured_output.status // empty' "$OUT/result.json" 2>/dev/null || true)"
+          if [ "$STATUS" = "done" ] && [ -n "$(git status --porcelain)" ]; then
+            git add -A && git commit -m "night-shift($LANE): uncommitted changes from agent run"
+          fi
+          if [ "$(git rev-parse --abbrev-ref HEAD)" = "$BRANCH" ] && \
+             [ "$(git rev-list --count "origin/$MAIN_BRANCH..HEAD")" -gt 0 ]; then
+            git bundle create "$OUT/agent.bundle" "$BRANCH" "^origin/$MAIN_BRANCH"
+          fi
+          ls -la "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: out-${{ inputs.lane }}
+          path: ${{ runner.temp }}/out
+          retention-days: 3
+
+  publish:
+    needs: [pick, agent]
+    if: always() && needs.pick.result == 'success' && needs.pick.outputs.mode != 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MODE: ${{ needs.pick.outputs.mode }}
+      ISSUE: ${{ needs.pick.outputs.issue }}
+      BRANCH: ${{ needs.pick.outputs.branch }}
+      TITLE: ${{ needs.pick.outputs.title }}
+      ATTEMPT_COMMENT: ${{ needs.pick.outputs.attempt_comment }}
+      FAIL_SHA: ${{ needs.pick.outputs.fail_sha }}
+      MODEL: ${{ needs.pick.outputs.model }}
+      GH_TOKEN: ${{ secrets.agent_pat }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.MAIN_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: out-${{ inputs.lane }}
+          path: ${{ runner.temp }}/out
+
+      - name: Validate, open PR, report
+        run: |
+          set -uo pipefail
+          OUT="$RUNNER_TEMP/out"; RESULT="$OUT/result.json"; BUNDLE="$OUT/agent.bundle"
+          # Classify the run. A run that never really started (no result file: setup failed; or fewer
+          # than 2 turns with no structured output: expired token, usage limit, outage) is refunded,
+          # not counted. Refunds are capped separately by the picker so they can't loop all night.
+          if [ ! -f "$RESULT" ]; then
+            STATUS="infra-error"; SUMMARY="The agent job never produced a result (setup failed); see the run log."
+          elif ! jq -e . "$RESULT" >/dev/null 2>&1; then
+            STATUS="stuck"; SUMMARY="The agent run was cut off (crash or timeout); see the run log."
+          elif jq -e '.structured_output.status' "$RESULT" >/dev/null 2>&1; then
+            STATUS="$(jq -r '.structured_output.status' "$RESULT")"
+            SUMMARY="$(jq -r '.structured_output.summary // ""' "$RESULT")"
+            ASSUMPTIONS="$(jq -r '(.structured_output.assumptions // []) | map("- " + .) | join("\n")' "$RESULT")"
+          elif [ "$(jq -r '.num_turns // 0' "$RESULT")" -lt 2 ]; then
+            STATUS="infra-error"; SUMMARY="$(jq -r '.result // "no result"' "$RESULT" | head -c 500)"
+          else
+            STATUS="stuck"; SUMMARY="Run ended without a structured result (likely hit the turn limit)."
+          fi
+          COST="$(jq -r '.total_cost_usd // empty' "$RESULT" 2>/dev/null || true)"
+          ASSUMPTIONS="${ASSUMPTIONS:-}"
+          OUTCOME="$STATUS"
+
+          if [ "$STATUS" = "done" ]; then
+            if [ ! -f "$BUNDLE" ]; then
+              OUTCOME="done but no commits"
+            elif ! git fetch -q "$BUNDLE" "refs/heads/$BRANCH:refs/heads/$BRANCH"; then
+              OUTCOME="rejected: unreadable bundle"
+            else
+              git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+                "refs/heads/$BRANCH:refs/heads/$BRANCH"
+              BODY="$RUNNER_TEMP/pr-body.md"
+              {
+                if [ "$MODE" = "issue" ]; then echo "Closes #$ISSUE"; echo; fi
+                echo "**Lane:** \`$LANE\` (night shift) · **Model:** \`$MODEL\`"
+                echo
+                echo "$SUMMARY"
+                if [ -n "$ASSUMPTIONS" ]; then
+                  echo
+                  echo "**Assumptions the agent made (review in the morning):**"
+                  echo "$ASSUMPTIONS"
+                fi
+              } > "$BODY"
+              LABELS=(--label agent --label "lane:$LANE")
+              if [ "$MODE" = "fix-main" ]; then LABELS+=(--label fix-main); fi
+              if PR_URL="$(gh pr create -R "$REPO" --base "$MAIN_BRANCH" --head "$BRANCH" \
+                   --title "[$LANE] $TITLE" --body-file "$BODY" "${LABELS[@]}")"; then
+                gh pr merge "$PR_URL" -R "$REPO" --auto --squash --delete-branch \
+                  || echo "Auto-merge unavailable; the picker merges this PR once its checks pass."
+                OUTCOME="PR $PR_URL"
+              else
+                OUTCOME="push ok but PR creation failed"
+              fi
+            fi
+          fi
+
+          if [ "$STATUS" = "infra-error" ] && [ -n "$ATTEMPT_COMMENT" ]; then
+            if [ "$MODE" = "issue" ]; then MARK="<!-- agent-infra -->"; else MARK="<!-- fix-main-infra sha=$FAIL_SHA -->"; fi
+            gh api -X PATCH "repos/$REPO/issues/comments/$ATTEMPT_COMMENT" -f body="$MARK
+          Run did not start; attempt not counted. $SUMMARY" >/dev/null \
+              && OUTCOME="infra-error (attempt not counted)"
+          fi
+
+          if [ "$MODE" = "issue" ]; then
+            case "$OUTCOME" in
+              PR*) ;;
+              *) printf 'Night shift lane `%s`: **%s**\n\n%s\n' "$LANE" "$OUTCOME" "$SUMMARY" \
+                   | gh issue comment "$ISSUE" -R "$REPO" --body-file - || true ;;
+            esac
+            gh issue edit "$ISSUE" -R "$REPO" --remove-label agent:in-progress || true
+          fi
+
+          LOG_ISSUE="$(gh issue list -R "$REPO" --label night-log --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$LOG_ISSUE" ]; then
+            WHAT="$([ "$MODE" = "issue" ] && echo "#$ISSUE" || echo "fix main")"
+            LINE="$(TZ=America/Chicago date +%H:%M) \`$LANE\` $WHAT [$MODEL] → $OUTCOME${COST:+ (≈\$$COST)}"
+            gh issue comment "$LOG_ISSUE" -R "$REPO" --body "$LINE" >/dev/null || true
+          fi
+          echo "$OUTCOME"

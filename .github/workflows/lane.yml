@@ -1,0 +1,291 @@
+# gh-nightshift: one lane's run. Called once per lane by the caller workflow `gh nightshift init` writes.
+# Three jobs on three separate runners:
+#   pick     (PAT)                 hand-offs, close/merge/update PRs, choose the issue, write the task file
+#   agent    (Claude token only)   do the work; hands back result.json + a git bundle as artifacts
+#   publish  (PAT)                 validate the bundle on a clean runner, push, open the PR, log
+# The agent never shares a machine with the GitHub token, and lane setup runs only in the agent job.
+name: night-shift-lane
+
+on:
+  workflow_call:
+    inputs:
+      lane:
+        type: string
+        required: true
+      main_branch:
+        type: string
+        required: false
+        default: ""
+      only_lane:
+        type: string
+        required: false
+        default: ""
+      tool_repo:
+        description: Where gh-nightshift's scripts come from (keep in sync with the `uses:` line).
+        type: string
+        required: false
+        default: paawandesai/gh-nightshift
+      tool_ref:
+        description: The same ref as the `uses:` line, so workflows and scripts always match.
+        type: string
+        required: false
+        default: main
+      app_id:
+        description: GitHub App id (auth.mode app); empty means the PAT
+        type: string
+        required: false
+        default: ""
+    secrets:
+      claude_token:
+        required: false   # checked in the pick job so a missing one gives a clear error
+      agent_pat:
+        required: false   # one of agent_pat or app_id + app_private_key
+      app_private_key:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  LANE: ${{ inputs.lane }}
+  REPO: ${{ github.repository }}
+  MAIN_BRANCH: ${{ inputs.main_branch || github.event.repository.default_branch || 'main' }}
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+      # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
+      # Set per PAT job only, so the agent job and your setup/test commands keep normal Python behaviour.
+      PYTHONSAFEPATH: "1"
+    outputs:
+      mode: ${{ steps.pick.outputs.mode }}
+      issue: ${{ steps.pick.outputs.issue }}
+      fail_sha: ${{ steps.pick.outputs.fail_sha }}
+      model: ${{ steps.pick.outputs.model }}
+      prompt_version: ${{ steps.prep.outputs.prompt_version }}
+      branch: ${{ steps.prep.outputs.branch }}
+      title: ${{ steps.prep.outputs.title }}
+      attempt_comment: ${{ steps.prep.outputs.attempt_comment }}
+      postgres_image: ${{ steps.lane.outputs.postgres_image }}
+      setup_action: ${{ steps.lane.outputs.setup_action }}
+      max_turns: ${{ steps.lane.outputs.max_turns }}
+    steps:
+      - name: Check out the repository (default branch)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.MAIN_BRANCH }}
+          persist-credentials: false
+
+      - name: Check out gh-nightshift scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        if: inputs.app_id != ''
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
+
+      - name: Check lane token exists
+        env:
+          LANE_TOKEN: ${{ secrets.claude_token }}
+        run: |
+          if [ -z "$LANE_TOKEN" ]; then echo "::error::The Claude token secret for lane $LANE is empty or missing (see .night-shift/config.yml)"; exit 1; fi
+
+      - name: Read lane config
+        id: lane
+        run: python3 -m nightshift lane-config --lane "$LANE" --github-output "$GITHUB_OUTPUT"
+
+      - name: Check the PAT (account, no Workflows scope)
+        if: inputs.app_id == ''
+        env:
+          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+        run: python3 -m nightshift check-pat
+
+      - name: Pick next issue
+        id: pick
+        env:
+          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          FIX_LANE: ${{ vars.FIX_LANE }}
+          ONLY_LANE: ${{ inputs.only_lane }}
+          ESCALATE_MODEL: ${{ vars.ESCALATE_MODEL }}
+        run: python3 -m nightshift pick --lane "$LANE" --github-output "$GITHUB_OUTPUT"
+
+      - name: Write task, prompt and record the attempt
+        id: prep
+        if: steps.pick.outputs.mode != 'skip'
+        env:
+          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          MODE: ${{ steps.pick.outputs.mode }}
+          ISSUE: ${{ steps.pick.outputs.issue }}
+          FAIL_SHA: ${{ steps.pick.outputs.fail_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 -m nightshift task --lane "$LANE" --mode "$MODE" --issue "$ISSUE" --fail-sha "$FAIL_SHA" \
+            --run-url "$RUN_URL" --out-dir "$RUNNER_TEMP/task" --github-output "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.pick.outputs.mode != 'skip'
+        with:
+          name: task-${{ inputs.lane }}
+          path: ${{ runner.temp }}/task
+          retention-days: 3
+
+  agent:
+    needs: pick
+    if: needs.pick.outputs.mode != 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    env:
+      BRANCH: ${{ needs.pick.outputs.branch }}
+      DATABASE_URL: ${{ needs.pick.outputs.postgres_image != '' && 'postgres://postgres:postgres@localhost:5432' || '' }}
+    services:
+      postgres:
+        # An empty image means "no service": only lanes with postgres_image get a database.
+        image: ${{ needs.pick.outputs.postgres_image }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.MAIN_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: task-${{ inputs.lane }}
+          path: ${{ runner.temp }}/task
+
+      - name: Lane setup commands
+        run: |
+          if [ -s "$RUNNER_TEMP/task/setup.sh" ]; then bash -euo pipefail "$RUNNER_TEMP/task/setup.sh"; else echo "no setup commands for lane $LANE"; fi
+
+      # A lane's composite action is copied to a fixed path (a `uses:` path cannot be an expression)
+      # and kept out of git so the agent can never commit it.
+      - name: Stage lane setup action
+        if: needs.pick.outputs.setup_action != ''
+        env:
+          SETUP_ACTION: ${{ needs.pick.outputs.setup_action }}
+        run: |
+          cp -r "$SETUP_ACTION" .ns-lane-setup
+          echo ".ns-lane-setup/" >> .git/info/exclude
+      - name: Lane setup action
+        if: needs.pick.outputs.setup_action != ''
+        uses: ./.ns-lane-setup
+
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+
+      - name: Run agent
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          MODEL: ${{ needs.pick.outputs.model || 'sonnet' }}
+          MAX_TURNS: ${{ needs.pick.outputs.max_turns || '80' }}
+          # This runner holds no GitHub write credentials and is discarded after the job.
+          PERMISSION_FLAGS: ${{ vars.CLAUDE_PERMISSION_FLAGS || '--dangerously-skip-permissions' }}
+        run: |
+          set -uo pipefail
+          OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          PROMPT="$(sed "s|__TASK_FILE__|$RUNNER_TEMP/task/task.md|g" "$RUNNER_TEMP/task/prompt.md")"
+          # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
+          claude -p "$PROMPT" --output-format json \
+            --json-schema "$(cat "$RUNNER_TEMP/task/schema.json")" \
+            --model "$MODEL" --max-turns "$MAX_TURNS" $PERMISSION_FLAGS > "$OUT/result.json" 2> "$OUT/claude.stderr"
+          echo "claude exit code: $? (model $MODEL)"
+          tail -n 50 "$OUT/claude.stderr" || true
+
+      - name: Package commits
+        if: always()
+        run: |
+          set -uo pipefail
+          OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
+          STATUS="$(jq -r '.structured_output.status // empty' "$OUT/result.json" 2>/dev/null || true)"
+          if [ "$STATUS" = "done" ] && [ -n "$(git status --porcelain)" ]; then
+            git add -A && git commit -m "night-shift($LANE): uncommitted changes from agent run"
+          fi
+          if [ "$(git rev-parse --abbrev-ref HEAD)" = "$BRANCH" ] && \
+             [ "$(git rev-list --count "origin/$MAIN_BRANCH..HEAD")" -gt 0 ]; then
+            git bundle create "$OUT/agent.bundle" "$BRANCH" "^origin/$MAIN_BRANCH"
+          fi
+          ls -la "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: out-${{ inputs.lane }}
+          path: ${{ runner.temp }}/out
+          retention-days: 3
+
+  publish:
+    needs: [pick, agent]
+    if: always() && needs.pick.result == 'success' && needs.pick.outputs.mode != 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+      PYTHONSAFEPATH: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.MAIN_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out gh-nightshift scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        if: inputs.app_id != ''
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: out-${{ inputs.lane }}
+          path: ${{ runner.temp }}/out
+
+      - name: Validate, open PR, report
+        env:
+          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          MODE: ${{ needs.pick.outputs.mode }}
+          ISSUE: ${{ needs.pick.outputs.issue }}
+          BRANCH: ${{ needs.pick.outputs.branch }}
+          TITLE: ${{ needs.pick.outputs.title }}
+          ATTEMPT_COMMENT: ${{ needs.pick.outputs.attempt_comment }}
+          FAIL_SHA: ${{ needs.pick.outputs.fail_sha }}
+          MODEL: ${{ needs.pick.outputs.model }}
+          PROMPT_VERSION: ${{ needs.pick.outputs.prompt_version }}
+        run: |
+          python3 -m nightshift publish --lane "$LANE" --mode "$MODE" --issue "$ISSUE" --branch "$BRANCH" \
+            --title "$TITLE" --model "$MODEL" --attempt-comment "$ATTEMPT_COMMENT" --fail-sha "$FAIL_SHA" \
+            --prompt-version "$PROMPT_VERSION" \
+            --result "$RUNNER_TEMP/out/result.json" --bundle "$RUNNER_TEMP/out/agent.bundle"

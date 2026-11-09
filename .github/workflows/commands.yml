@@ -1,0 +1,64 @@
+# gh-nightshift: comment commands. `/night-shift take` and `/night-shift retry` from people with write access.
+#   command  (PAT)  check the commenter's permission, relabel/assign the issue, post a trusted marker
+name: night-shift-commands
+
+on:
+  workflow_call:
+    inputs:
+      tool_repo:
+        type: string
+        required: false
+        default: paawandesai/gh-nightshift
+      tool_ref:
+        type: string
+        required: false
+        default: main
+      app_id:
+        description: GitHub App id (auth.mode app); empty means the PAT
+        type: string
+        required: false
+        default: ""
+    secrets:
+      agent_pat:
+        required: false   # one of agent_pat or app_id + app_private_key
+      app_private_key:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  REPO: ${{ github.repository }}
+  PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+  # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
+  PYTHONSAFEPATH: "1"
+
+jobs:
+  command:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .night-shift
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        if: inputs.app_id != ''
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
+      - name: Handle the command
+        env:
+          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          # Through the environment, never `${{ }}` in the script: the comment is untrusted text.
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: python3 -m nightshift command

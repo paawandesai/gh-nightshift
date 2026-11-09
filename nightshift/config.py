@@ -1,0 +1,333 @@
+"""`.night-shift/config.yml`: the one file a project edits to adopt night shift.
+
+Validated against `nightshift/schema/config.schema.json`. Repo *variables* still win at run time for
+the things you flip from a phone (AGENTS_ENABLED, FIX_LANE, models), so the kill switch never needs a
+commit.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from . import schema, yamlish
+
+CONFIG_PATH = ".night-shift/config.yml"
+# Always protected, whatever the config says: agents may never change their own rules or CI.
+BUILTIN_PROTECTED = [".github/", ".claude/", "CLAUDE.md", "AGENTS.md", ".mcp.json", ".night-shift/"]
+DEFAULT_LABELS = {
+    "ready": "night-safe", "blocked": "blocked", "needs_human": "needs-human", "human": "human",
+    "proposed": "proposed", "agent": "agent", "in_progress": "agent:in-progress", "night_log": "night-log",
+}
+
+
+class ConfigError(ValueError):
+    pass
+
+
+@dataclass
+class Lane:
+    name: str
+    token_secret: str
+    model: str = ""
+    escalate_model: str = ""
+    pat_secret: str = ""          # optional per-lane PAT so PRs are credited to the lane owner
+    paths: list[str] = field(default_factory=list)
+    description: str = ""
+    test_command: str = ""
+    setup_commands: str = ""
+    setup_action: str = ""
+    postgres_image: str = ""
+    budget_usd_per_night: float = 0.0  # 0 = no cap
+
+    @property
+    def label(self) -> str:
+        return f"lane:{self.name}"
+
+    @property
+    def claude_token_secret(self) -> str:
+        return self.token_secret
+
+    @property
+    def agent_pat_secret(self) -> str:
+        return self.pat_secret or "AGENT_PAT"
+
+
+@dataclass
+class Config:
+    lanes: list[Lane]
+    main_branch: str = "main"
+    ci_workflow: str = "ci.yml"
+    fix_lane: str = ""
+    required_checks: list[str] = field(default_factory=lambda: ["test", "review / verdict"])
+    timezone: str = "UTC"
+    extra_protected: list[str] = field(default_factory=list)
+    merge_mode: str = "strict"
+    labels: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LABELS))
+    default_model: str = "sonnet"
+    escalate_model: str = "opus"
+    review_model: str = "opus"
+    planner_model: str = "opus"
+    max_attempts: int = 3
+    infra_cap: int = 6
+    stale_minutes: int = 45
+    max_turns: int = 80
+    max_needs_per_issue: int = 2
+    max_notes_per_issue: int = 2
+    planner_enabled: bool = True
+    planner_docs: list[str] = field(default_factory=lambda: ["docs/PRD.md"])
+    planner_max_tickets: int = 8
+    planner_refill_below: int = 0
+    planner_id_prefixes: dict[str, str] = field(default_factory=dict)
+    planner_human_paths: list[str] = field(default_factory=lambda: ["contracts/"])
+    planner_token_secret: str = ""
+    planner_schedule: str = "17 * * * *"
+    review_token_secret: str = "CLAUDE_TOKEN_REVIEW"
+    ci_workflow_name: str = ""
+    tool_ref: str = "main"
+    bot_login: str = ""           # the PAT's login; read-only commands (stats, audit) trust markers from it
+    trusted_logins: list[str] = field(default_factory=list)  # other PAT logins (per-contributor PATs) to trust
+    auth_mode: str = "pat"  # pat | app (GitHub App: an installation token minted in the PAT jobs)
+    app_id: str = ""
+    app_key_secret: str = "NIGHT_SHIFT_APP_KEY"
+    risk_default: str = "auto"  # auto: green PRs merge; approve: they also need one human approval
+    risk_approve_labels: list[str] = field(default_factory=list)
+    risk_approve_paths: list[str] = field(default_factory=list)
+    risk_auto_labels: list[str] = field(default_factory=list)
+    risk_codeowners: bool = False  # PRs touching files with CODEOWNERS owners need one of those owners' approval
+    extends: str = ""  # owner/repo whose .night-shift/config.yml is the org-wide base (`gh nightshift config pull`)
+    digest_enabled: bool = True
+    digest_schedule: str = "0 7 * * *"
+    digest_webhook_secret: str = ""  # optional secret holding a Slack or Discord webhook URL
+    digest_weekly_schedule: str = "0 8 * * 1"  # weekly report (7 days); "" turns it off
+
+    # --- derived -----------------------------------------------------------------------
+    @property
+    def protected_paths(self) -> list[str]:
+        extra = ["CODEOWNERS", "docs/CODEOWNERS"] if self.risk_codeowners else []  # .github/ is already built in
+        return BUILTIN_PROTECTED + [p for p in self.extra_protected + extra if p not in BUILTIN_PROTECTED]
+
+    @property
+    def ready_label(self) -> str:
+        return self.labels["ready"]
+
+    def label(self, key: str) -> str:
+        return self.labels[key]
+
+    @property
+    def skip_labels(self) -> set[str]:
+        return {self.labels["blocked"], self.labels["needs_human"], self.labels["human"], "integrator",
+                self.labels["proposed"]}
+
+    def lane(self, name: str) -> Lane:
+        for lane in self.lanes:
+            if lane.name == name:
+                return lane
+        raise ConfigError(f"unknown lane {name!r}; lanes are {', '.join(self.lane_names)}")
+
+    @property
+    def lane_names(self) -> list[str]:
+        return [lane.name for lane in self.lanes]
+
+    @property
+    def effective_fix_lane(self) -> str:
+        return self.fix_lane or (self.lanes[0].name if self.lanes else "")
+
+    def id_prefix(self, lane: str) -> str:
+        return self.planner_id_prefixes.get(lane) or lane[:1].upper()
+
+    @property
+    def github_secret(self) -> str:
+        """The secret that authenticates the PAT jobs: AGENT_PAT, or the App's private key."""
+        return self.app_key_secret if self.auth_mode == "app" else "AGENT_PAT"
+
+    def secret_names(self) -> list[str]:
+        names = {self.github_secret, self.review_token_secret, self.planner_token_secret or self.lanes[0].token_secret}
+        for lane in self.lanes:
+            names.add(lane.token_secret)
+            if lane.pat_secret:
+                names.add(lane.pat_secret)
+        return sorted(names)
+
+
+def parse(data: dict) -> Config:
+    if not isinstance(data, dict):
+        raise ConfigError("config must be a mapping")
+    errors = schema.validate(data, schema.load("config"))
+    if errors:
+        raise ConfigError("invalid .night-shift/config.yml:\n  " + "\n  ".join(errors))
+    lanes = []
+    for raw in data["lanes"]:
+        setup = raw.get("setup") or {}
+        cmds = setup.get("commands") or ""
+        if isinstance(cmds, list):
+            cmds = "\n".join(cmds)
+        lanes.append(Lane(name=raw["name"], token_secret=raw["claude_token_secret"],
+                          pat_secret=raw.get("agent_pat_secret", ""), model=raw.get("model", ""),
+                          escalate_model=raw.get("escalate_model", ""), paths=raw.get("paths", []),
+                          description=raw.get("description", ""), test_command=raw.get("test_command", ""),
+                          setup_commands=cmds, setup_action=(setup.get("action") or "").removeprefix("./"),
+                          postgres_image=raw.get("postgres_image", ""),
+                          budget_usd_per_night=float(raw.get("budget_usd_per_night", 0) or 0)))
+    names = [lane.name for lane in lanes]
+    if len(set(names)) != len(names):
+        raise ConfigError("lane names must be unique")
+    models = data.get("models", {})
+    limits = data.get("limits", {})
+    planner = data.get("planner", {})
+    cfg = Config(
+        lanes=lanes,
+        main_branch=data.get("main_branch", "main"),
+        ci_workflow=data.get("ci_workflow", "ci.yml"),
+        fix_lane=data.get("fix_lane", ""),
+        required_checks=data.get("required_checks", ["test", "review / verdict"]),
+        timezone=data.get("timezone", "UTC"),
+        extra_protected=data.get("protected_paths", []),
+        merge_mode=(data.get("merge") or {}).get("mode", "strict"),
+        labels={**DEFAULT_LABELS, **(data.get("labels") or {})},
+        default_model=models.get("default", "sonnet"),
+        escalate_model=models.get("escalate", "opus"),
+        review_model=models.get("review", "opus"),
+        planner_model=models.get("planner", "opus"),
+        max_attempts=limits.get("max_attempts", 3),
+        infra_cap=limits.get("infra_cap", limits.get("max_attempts", 3) * 2),
+        stale_minutes=limits.get("stale_minutes", 45),
+        max_turns=limits.get("max_turns", 80),
+        max_needs_per_issue=limits.get("max_needs_per_issue", 2),
+        max_notes_per_issue=limits.get("max_notes_per_issue", 2),
+        planner_enabled=planner.get("enabled", True),
+        planner_docs=planner.get("docs", ["docs/PRD.md"]),
+        planner_max_tickets=planner.get("max_tickets_per_run", 8),
+        planner_refill_below=planner.get("refill_below", 0),
+        planner_id_prefixes=planner.get("id_prefixes", {}),
+        planner_human_paths=planner.get("human_paths", ["contracts/"]),
+        planner_token_secret=planner.get("claude_token_secret", lanes[0].token_secret),
+        planner_schedule=planner.get("schedule", "17 * * * *"),
+        review_token_secret=data.get("review_token_secret", "CLAUDE_TOKEN_REVIEW"),
+        ci_workflow_name=data.get("ci_workflow_name", ""),
+        tool_ref=data.get("tool_ref", "main"),
+        bot_login=data.get("bot_login", ""),
+        trusted_logins=data.get("trusted_logins", []),
+        auth_mode=(data.get("auth") or {}).get("mode", "pat"),
+        app_id=str((data.get("auth") or {}).get("app_id", "") or ""),
+        app_key_secret=(data.get("auth") or {}).get("private_key_secret", "NIGHT_SHIFT_APP_KEY"),
+        risk_default=(data.get("risk") or {}).get("default", "auto"),
+        risk_approve_labels=list((data.get("risk") or {}).get("approve_labels", [])),
+        risk_approve_paths=list((data.get("risk") or {}).get("approve_paths", [])),
+        risk_auto_labels=list((data.get("risk") or {}).get("auto_labels", [])),
+        risk_codeowners=bool((data.get("risk") or {}).get("codeowners", False)),
+        extends=data.get("extends", ""),
+        digest_enabled=(data.get("digest") or {}).get("enabled", True),
+        digest_schedule=str((data.get("digest") or {}).get("schedule", "0 7 * * *")),
+        digest_webhook_secret=(data.get("digest") or {}).get("webhook_secret", ""),
+        digest_weekly_schedule=str((data.get("digest") or {}).get("weekly_schedule", "0 8 * * 1")),
+    )
+    if not re.fullmatch(r"[0-9*/,\- ]{9,60}", cfg.digest_schedule) or len(cfg.digest_schedule.split()) != 5:
+        raise ConfigError(f"digest.schedule {cfg.digest_schedule!r} is not a 5-field cron expression")
+    if cfg.extends and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", cfg.extends)
+                        or cfg.extends.split("/")[1] in (".", "..")):
+        raise ConfigError(f"extends must be owner/repo, not {cfg.extends!r}")
+    if cfg.auth_mode not in ("pat", "app"):
+        raise ConfigError(f"auth.mode must be pat or app, not {cfg.auth_mode!r}")
+    if cfg.auth_mode == "app":
+        if not re.fullmatch(r"[0-9]{1,12}", cfg.app_id):
+            raise ConfigError("auth.app_id must be the GitHub App's numeric id")
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cfg.app_key_secret):
+            raise ConfigError("auth.private_key_secret must be a secret name (A-Z, 0-9, _)")
+        if any(lane.pat_secret for lane in cfg.lanes):
+            raise ConfigError("auth.mode app replaces every PAT: remove agent_pat_secret from the lanes")
+        if cfg.app_key_secret in {lane.token_secret for lane in lanes} | {cfg.planner_token_secret,
+                                                                           cfg.review_token_secret}:
+            raise ConfigError(f"secret {cfg.app_key_secret} is used both as a Claude token and as the App key")
+    if cfg.risk_default not in ("auto", "approve"):
+        raise ConfigError(f"risk.default must be auto or approve, not {cfg.risk_default!r}")
+    weekly = cfg.digest_weekly_schedule
+    if weekly and (not re.fullmatch(r"[0-9*/,\- ]{9,60}", weekly) or len(weekly.split()) != 5 or weekly == cfg.digest_schedule):
+        raise ConfigError(f"digest.weekly_schedule {weekly!r} must be a 5-field cron expression unlike digest.schedule")
+    if cfg.digest_webhook_secret and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cfg.digest_webhook_secret):
+        raise ConfigError("digest.webhook_secret must be a secret name (A-Z, 0-9, _)")
+    if cfg.digest_webhook_secret in pats_or_claude(cfg):
+        raise ConfigError("digest.webhook_secret must not be a PAT or Claude token secret")
+    if cfg.fix_lane and cfg.fix_lane not in names:
+        raise ConfigError(f"fix_lane {cfg.fix_lane!r} is not a lane")
+    unknown = sorted(set(cfg.planner_id_prefixes) - set(names))
+    if unknown:
+        raise ConfigError(f"planner.id_prefixes names unknown lane(s): {', '.join(unknown)}")
+    # A Claude token secret that is also a PAT secret would hand the PAT to the agent job.
+    pats = {"AGENT_PAT"} | {lane.agent_pat_secret for lane in lanes}  # AGENT_PAT is always passed as fallback
+    claude = {lane.token_secret for lane in lanes} | {cfg.planner_token_secret, cfg.review_token_secret}
+    clash = sorted(pats & claude)
+    if clash:
+        raise ConfigError(f"secret(s) {', '.join(clash)} used both as a Claude token and as a PAT: the agent job "
+                          "would receive the PAT")
+    return cfg
+
+
+def pats_or_claude(cfg: Config) -> set[str]:
+    return ({"AGENT_PAT", cfg.planner_token_secret, cfg.review_token_secret}
+            | {lane.token_secret for lane in cfg.lanes} | {lane.agent_pat_secret for lane in cfg.lanes})
+
+
+BASE_PATH = ".night-shift/base.yml"  # written by `gh nightshift config pull` from the `extends:` repo
+# What an org-wide base may set. Lanes, identities, auth and secret names always stay in the repo's own config.
+# Labels, merge mode and tool_ref are left out: each could switch a safety check off (a renamed `human` label
+# makes taken tickets pickable, queue mode skips risk tiers, tool_ref picks the code that runs with the PAT).
+INHERITABLE = {"models", "limits", "protected_paths", "required_checks", "timezone", "risk", "digest", "planner"}
+NOT_FROM_BASE = {"planner": {"claude_token_secret"}, "digest": {"webhook_secret"}}
+
+
+def merge_base(base: dict, local: dict) -> dict:
+    """Local wins key by key (one level deep for mappings); protected_paths are the union of both."""
+    out = dict(local)
+    for key, value in (base or {}).items():
+        if key not in INHERITABLE:
+            continue
+        if isinstance(value, dict):
+            value = {k: v for k, v in value.items() if k not in NOT_FROM_BASE.get(key, set())}
+        if key == "protected_paths":
+            out[key] = list(value or []) + [p for p in (local.get(key) or []) if p not in (value or [])]
+        elif key == "required_checks":
+            # Added to the repo's own (or default) checks, never replacing them: the review gate stays required.
+            own = local.get(key) or ["test", "review / verdict"]
+            out[key] = list(dict.fromkeys(list(own) + list(value or [])))
+        elif key == "planner" and isinstance(value, dict):
+            mine = dict(local.get("planner") or {})
+            merged = {**value, **mine}
+            merged["human_paths"] = list(dict.fromkeys(list(mine.get("human_paths") or ["contracts/"])
+                                                       + list(value.get("human_paths") or [])))
+            out[key] = merged
+        elif key == "risk" and isinstance(value, dict):
+            # Only stricter: approval rules add up, and `approve`/codeowners from either side win.
+            mine = dict(local.get("risk") or {})
+            merged = {k: list(dict.fromkeys(list(value.get(k) or []) + list(mine.get(k) or [])))
+                      for k in ("approve_labels", "approve_paths") if value.get(k) or mine.get(k)}
+            if mine.get("auto_labels"):
+                merged["auto_labels"] = mine["auto_labels"]
+            if "approve" in (value.get("default"), mine.get("default")):
+                merged["default"] = "approve"
+            if value.get("codeowners") or mine.get("codeowners"):
+                merged["codeowners"] = True
+            out[key] = merged
+        elif isinstance(value, dict) and isinstance(local.get(key), dict):
+            out[key] = {**value, **local[key]}
+        elif key not in local:
+            out[key] = value
+    return out
+
+
+def loads(text: str, base_text: str | None = None) -> Config:
+    try:
+        data = yamlish.loads(text)
+        if base_text is not None and isinstance(data, dict):
+            data = merge_base(yamlish.loads(base_text) or {}, data)
+        return parse(data)
+    except yamlish.YAMLError as err:
+        raise ConfigError(f"{CONFIG_PATH}: {err}") from err
+
+
+def load(root: str | Path = ".") -> Config:
+    path = Path(root) / CONFIG_PATH
+    if not path.exists():
+        raise ConfigError(f"{path} not found; run `gh nightshift init` first")
+    base = Path(root) / BASE_PATH
+    return loads(path.read_text(encoding="utf-8"), base.read_text(encoding="utf-8") if base.is_file() else None)
