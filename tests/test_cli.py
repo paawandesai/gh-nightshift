@@ -628,7 +628,7 @@ class PlanTests(CliTestCase):
             cli.cmd_plan(ctx)
         self.assertIn("--plan-file", str(cm.exception))
 
-    # Regression (fixed): nightshift/cli.py:552,558 (parser()) gives the `plan context` / `plan publish` sub-subparsers `parents=[common]`,
+    # Regression: `plan context|publish` sub-subparsers used `parents=[common]`,
     # so their defaults (dry_run=False, repo=None, root=".") overwrite the same flags given before the
     # sub-command. `plan --dry-run publish FILE` therefore creates real issues.
     def test_plan_dry_run_before_publish_subcommand(self):
