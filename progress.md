@@ -47,3 +47,5 @@ per step, then the step is marked blocked.
   falls back to the Actions jobs of the commit's runs; the PAT also needs Commit statuses: Read;
   the review gate authenticates its base fetch on private repos (exit 128 before) and labels `review-error` when it
   breaks before the reviewer answers, so the attempt is refunded.
+- Rehearsal result (2026-11-09): 5 checks passed, 0 failed. The api lane rebuilt A after the broken review (PR #6 closed,
+  PR #8 merged), the hand-off reached B (#4), the web lane opened PR #10 for B, and C's forced need filed #7 (PR #11).
