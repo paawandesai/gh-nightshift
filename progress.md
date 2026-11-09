@@ -18,3 +18,14 @@ per step, then the step is marked blocked.
 - Step 6 (kit CI, rehearsal script and doc): verify 1 PASS (CI green on 0a8ab12: test 3.10, test 3.12, lint; shellcheck clean; dry run makes no network calls). Two doc mismatches fixed in 62b4f1d.
 - Step 7 (README with F results, SECURITY, CHANGELOG, NIGHT_SHIFT_ISSUES.md): verify 1 PASS (10 SECURITY claims checked against code; templates identical). Five low doc defects fixed in 62b4f1d.
   - F (results from the first real run, A-C as audit-driven changes): verify 1 PASS (Wilson intervals recomputed: 72-85%, 52-86%, 75-98%; floor 36 points).
+
+## Additions after the first verify (approved by Paawan)
+
+- Batch 1 (a58b54a): built, tests in tests/test_team.py; verify pending.
+  - Per-contributor PATs (trusted_logins, join stores/checks the PAT, doctor checks each PAT).
+  - (1) Init fully from flags, presets python/node/go, starter CI.
+  - (4) pause/freeze cancel runs in flight.
+  - (2) Optional nightly budget per lane, off by default.
+- Batch 2: built, tests in tests/test_team.py (Roadmap, Digest); verify pending.
+  - (3) Morning digest: `digest` command, night-log post with a digest marker, Slack/Discord webhook, reusable digest.yml and generated caller.
+  - Roadmap issue: `roadmap` command, created by init/setup, refreshed by planner publish, every merge hand-off and the digest; `plan --show`. Pinning is GraphQL-only: manual.

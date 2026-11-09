@@ -54,5 +54,13 @@ First release, extracted from the hackathon night-shift kit (`legacy/hackathon-k
   and the review gate's estimated catch rate.
 - Kill switch and code freeze: the `AGENTS_ENABLED` repo variable, `pause`, `freeze` and `resume`.
 - `README.md`, `SECURITY.md` (threat model and known gaps) and this changelog.
+- Per-contributor PATs: `trusted_logins`, `join` stores and checks the lane owner's PAT, `doctor` checks each.
+- `init` runs fully from flags, with optional `--preset python|node|go` and a starter CI when none exists.
+- `pause` and `freeze` cancel lane runs in flight (`--no-cancel` to keep them).
+- Optional nightly budget per lane (`budget_usd_per_night`), off by default.
+- Morning digest: `gh nightshift digest`, posted daily to the night log by `night-shift-digest.yml`, with
+  an optional Slack or Discord webhook (`digest.webhook_secret`).
+- Roadmap issue: waves, status per ticket and lane, Blocked-by mermaid graph; created by `init`/`setup`,
+  refreshed by the planner, every merge and the digest; `gh nightshift roadmap` and `plan --show`.
 
 [0.1.0]: https://github.com/paawandesai/gh-nightshift/tree/build/v0.1

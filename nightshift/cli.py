@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from collections.abc import Callable
 
-from . import __version__, planner, prompts, repo_setup, scaffold
+from . import __version__, digest, planner, prompts, repo_setup, roadmap, scaffold
 from . import protocol as ns
 from .config import CONFIG_PATH, Config, ConfigError, load, loads
 from .gh import GH, GHError
@@ -423,6 +423,9 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
         return 0
     if a.plan_action == "publish":
         return publish_plan_file(ctx, a.file, a.lane, a.reply_to)
+    if a.show:
+        ctx.say(roadmap.render(cfg, roadmap.tickets(ctx.gh, cfg)).split("\n", 1)[1].rstrip())
+        return 0
     # Local run: gh nightshift plan --from PATH | --gap | --lane X
     mode = "gap" if a.gap or (a.lane and not a.from_path) else "prd"
     docs = [a.from_path] if a.from_path else None
@@ -455,6 +458,26 @@ def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str) -> int:
         marker = ns.marker("plan", lane=lane or "*", complete=result.coverage_complete,
                            docs_sha=docs_sha(gh, cfg.planner_docs), created=len(result.created) + len(result.human))
         gh.comment(log, marker + "\n" + summary)
+    ctx.say(roadmap.safe_update(gh, cfg))
+    return 0
+
+
+def cmd_roadmap(ctx: Ctx) -> int:
+    ctx.say(roadmap.update(ctx.gh, ctx.cfg, create=True))
+    return 0
+
+
+def cmd_digest(ctx: Ctx) -> int:
+    a = ctx.args
+    text = digest.build(ctx.gh, ctx.cfg, hours=a.hours)
+    if not a.post:
+        ctx.say(text.rstrip())
+        return 0
+    ctx.say(digest.post(ctx.gh, ctx.cfg, text))
+    if a.webhook_env:
+        url = os.environ.get(a.webhook_env, "").strip()
+        ctx.say(digest.send_webhook(url, text, dry_run=ctx.gh.dry_run) if url
+                else f"no webhook: ${a.webhook_env} is empty")
     return 0
 
 
@@ -634,6 +657,12 @@ def parser() -> argparse.ArgumentParser:
         if name in ("pause", "freeze"):
             s.add_argument("--no-cancel", action="store_true", help="let runs already in flight finish")
     sub.add_parser("lint", parents=[common], help="check ready issues against the ticket guide")
+    sub.add_parser("roadmap", parents=[common], help="create or refresh the roadmap issue")
+    s = sub.add_parser("digest", parents=[common], help="summarise the last night: merged, stuck, cost")
+    s.add_argument("--hours", type=float, default=24)
+    s.add_argument("--post", action="store_true", help="post it on the night-log issue (and the webhook)")
+    s.add_argument("--webhook-env", default="", metavar="VAR",
+                   help="env var holding a Slack or Discord webhook URL (the URL is never printed)")
 
     s = sub.add_parser("plan", parents=[common], help="draft tickets: --from PATH | --gap | --lane X")
     s.add_argument("--from", dest="from_path", help="plan from this doc (prd mode)")
@@ -641,6 +670,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--lane", default="", help="only plan for this lane")
     s.add_argument("--plan-file", help="publish an existing plan.json instead of running claude")
     s.add_argument("--out-dir", help="where to keep the context and draft")
+    s.add_argument("--show", action="store_true", help="print the roadmap (waves, status, Blocked-by graph) and exit")
     psub = s.add_subparsers(dest="plan_action")
     c = psub.add_parser("context", parents=[sub_common], help="(workflow) write the planning context")
     c.add_argument("--mode", required=True)
@@ -700,7 +730,8 @@ def parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "init": cmd_init, "setup": cmd_setup, "join": cmd_join, "doctor": cmd_doctor, "status": cmd_status,
     "stats": cmd_stats, "start": cmd_switch, "pause": cmd_switch, "freeze": cmd_switch, "resume": cmd_switch,
-    "lint": cmd_lint, "plan": cmd_plan, "audit": cmd_audit, "lane-config": cmd_lane_config,
+    "lint": cmd_lint, "plan": cmd_plan, "roadmap": cmd_roadmap, "digest": cmd_digest,
+    "audit": cmd_audit, "lane-config": cmd_lane_config,
     "check-pat": cmd_check_pat, "pick": cmd_pick, "task": cmd_task, "publish": cmd_publish, "prompt": cmd_prompt,
     "schema": cmd_schema, "review-inputs": cmd_review_inputs, "review-report": cmd_review_report,
 }

@@ -6,6 +6,7 @@ commit.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -86,6 +87,9 @@ class Config:
     tool_ref: str = "main"
     bot_login: str = ""           # the PAT's login; read-only commands (stats, audit) trust markers from it
     trusted_logins: list[str] = field(default_factory=list)  # other PAT logins (per-contributor PATs) to trust
+    digest_enabled: bool = True
+    digest_schedule: str = "0 7 * * *"
+    digest_webhook_secret: str = ""  # optional secret holding a Slack or Discord webhook URL
 
     # --- derived -----------------------------------------------------------------------
     @property
@@ -188,7 +192,16 @@ def parse(data: dict) -> Config:
         tool_ref=data.get("tool_ref", "main"),
         bot_login=data.get("bot_login", ""),
         trusted_logins=data.get("trusted_logins", []),
+        digest_enabled=(data.get("digest") or {}).get("enabled", True),
+        digest_schedule=str((data.get("digest") or {}).get("schedule", "0 7 * * *")),
+        digest_webhook_secret=(data.get("digest") or {}).get("webhook_secret", ""),
     )
+    if not re.fullmatch(r"[0-9*/,\- ]{9,60}", cfg.digest_schedule) or len(cfg.digest_schedule.split()) != 5:
+        raise ConfigError(f"digest.schedule {cfg.digest_schedule!r} is not a 5-field cron expression")
+    if cfg.digest_webhook_secret and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cfg.digest_webhook_secret):
+        raise ConfigError("digest.webhook_secret must be a secret name (A-Z, 0-9, _)")
+    if cfg.digest_webhook_secret in pats_or_claude(cfg):
+        raise ConfigError("digest.webhook_secret must not be a PAT or Claude token secret")
     if cfg.fix_lane and cfg.fix_lane not in names:
         raise ConfigError(f"fix_lane {cfg.fix_lane!r} is not a lane")
     unknown = sorted(set(cfg.planner_id_prefixes) - set(names))
@@ -202,6 +215,11 @@ def parse(data: dict) -> Config:
         raise ConfigError(f"secret(s) {', '.join(clash)} used both as a Claude token and as a PAT: the agent job "
                           "would receive the PAT")
     return cfg
+
+
+def pats_or_claude(cfg: Config) -> set[str]:
+    return ({"AGENT_PAT", cfg.planner_token_secret, cfg.review_token_secret}
+            | {lane.token_secret for lane in cfg.lanes} | {lane.agent_pat_secret for lane in cfg.lanes})
 
 
 def loads(text: str) -> Config:

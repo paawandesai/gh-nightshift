@@ -117,7 +117,10 @@ def ensure_night_log(gh: GH, cfg: Config) -> list[str]:
 def setup(gh: GH, cfg: Config, protection: bool = True) -> list[str]:
     prot = ensure_protection(gh, cfg) if protection else ["branch protection: skipped for now; run "
                                                           "`gh nightshift setup` after pushing the new files"]
-    return ensure_labels(gh, cfg) + repo_settings(gh) + ensure_variables(gh, cfg) + prot + ensure_night_log(gh, cfg)
+    from . import roadmap
+
+    return (ensure_labels(gh, cfg) + repo_settings(gh) + ensure_variables(gh, cfg) + prot + ensure_night_log(gh, cfg)
+            + [roadmap.update(gh, cfg, create=True)])
 
 
 # --- secrets --------------------------------------------------------------------------

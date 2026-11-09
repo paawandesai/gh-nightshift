@@ -275,13 +275,35 @@
     },
     "trusted_logins": {
       "type": "array",
-      "items": {"type": "string", "pattern": "^[A-Za-z0-9-]+(\\[bot\\])?$"},
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9-]+(\\[bot\\])?$"
+      },
       "uniqueItems": true,
       "description": "Logins of per-contributor PATs (lanes[].agent_pat_secret). Their ns markers and PRs are trusted like the shared PAT's. Default: only the login of the PAT the job runs with."
     },
     "tool_ref": {
       "type": "string",
       "description": "gh-nightshift ref the caller workflows pin (default main; pin a tag or SHA)."
+    },
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Morning digest on the night-log issue (and an optional Slack/Discord webhook)",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "schedule": {
+          "type": "string",
+          "description": "cron, UTC; default 0 7 * * *"
+        },
+        "webhook_secret": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$",
+          "description": "secret holding a Slack or Discord webhook URL"
+        }
+      }
     }
   },
   "$defs": {

@@ -173,6 +173,9 @@ class Picker:
             body = ns.marker("pr", reason="verdict_passed", pr=num, issue=issue) + "\n" + body
         self.gh.comment(num, body + "\nNight shift: merged; hand-off sent to "
                         + (", ".join(f"#{n}" for n in posted) or "no waiting issues") + ".")
+        from . import roadmap
+
+        roadmap.safe_update(self.gh, self.cfg)
         return f"PR #{num} handed off to {posted or 'nobody'}"
 
     # --- 3. lane busy ------------------------------------------------------------------

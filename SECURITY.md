@@ -44,6 +44,7 @@ names. The workflow has no matrix, no `secrets[...]` lookup and no `secrets: inh
 makes GitHub send every repository secret to the runner. `gh nightshift doctor` fails if the caller workflow
 contains `secrets[` or `secrets: inherit`, or if a lane's job does not pass that lane's token. The review
 workflow receives only the review token. The planner workflow receives one Claude token and `AGENT_PAT`.
+The digest workflow receives `AGENT_PAT` and, if configured, the webhook secret; no Claude token and no model.
 
 **The PAT.** It should be a fine-grained token for this repo only, with:
 
@@ -68,6 +69,13 @@ push and the PR come from the PAT's account.
   forged by outsiders. Text the agent writes (summary, assumptions, notes, needs, hand-off) is re-posted
   under the PAT's login, so it is defanged first (`protocol.defang` turns `<!--` into `&lt;!--`); an agent
   cannot plant a trusted marker. Repo writers can still edit bot comments (see Known gaps).
+- **Per-contributor PATs.** When lanes use their owners' own PATs, list those logins in `trusted_logins`;
+  markers, PRs and night-log cost lines from them count too. The default is just the PAT's own login.
+  `join` refuses a classic PAT with the `workflow` scope, and `doctor --pat-env` checks every PAT and warns
+  about a PAT login missing from `trusted_logins`.
+- **Roadmap and digest.** The roadmap issue is the one labelled `roadmap` *and* opened by a trusted login;
+  a `roadmap` label on anyone else's issue is ignored, so it is never overwritten. Ticket titles are
+  defanged in the roadmap and the digest, and escaped inside mermaid labels.
 - **What the agent reads** (`nightshift/task.py`):
   1. The issue title and body. If the issue's author is not an owner, member or collaborator of the repo, the body is fenced and labelled
      as a request from an outsider, because they can edit it after a maintainer labels it.
@@ -141,9 +149,11 @@ auto-merge. The risk is that a wrong but plausible change lands on main overnigh
   can flip the variable from the GitHub web UI or mobile app; no commit is needed.
 - `gh nightshift freeze` pauses and moves every ready issue to `human` + `frozen`, so nothing is picked even
   if someone turns the switch back on. `gh nightshift resume` undoes both.
-- Neither command cancels a run already in progress. Its publish job can still open a PR. Nothing merges
-  while paused, because merging happens in the next pick job, which does not run. To stop an in-flight
-  agent immediately, cancel the run (`gh run cancel <id>`).
+- Both also cancel lane runs that are queued, waiting or in progress (`POST actions/runs/{id}/cancel`), so
+  an in-flight publish job cannot still open a PR. Cancelling needs Actions write, which your own `gh`
+  login has and the PAT must not; run them as yourself. `--no-cancel` lets runs in flight finish. A run
+  that reaches its publish step in the second between the variable flip and the cancel can still open a
+  PR; nothing merges while `AGENTS_ENABLED` is false.
 
 ## Known gaps
 
@@ -169,10 +179,11 @@ These are not enforced by v0.1. They are listed so you can judge the risk yourse
 7. **Repo collaborators with write access are trusted.** They can label issues `night-safe`, edit
     comments, including the PAT's marker comments, and edit PR bodies. The trust rule keeps out outsiders,
     not your own team.
-8. **`pause` and `freeze` do not cancel a run already in progress.** Its publish job can still open a PR;
-   nothing merges while `AGENTS_ENABLED` is false. Cancel the run in the Actions tab if you need it gone now.
-9. **Interface differences in a hand-off are self-reported.** The hand-off shows the ticket's interface next to
+8. **Interface differences in a hand-off are self-reported.** The hand-off shows the ticket's interface next to
    the one the agent says it built, but nothing compares them mechanically.
+9. **The digest webhook URL is a bearer secret.** Anyone holding a Slack or Discord webhook URL can post to
+   that channel. It is passed by explicit name (`digest.webhook_secret`) only to the digest workflow, never
+   to a lane, and the tool never prints it, but it lives in the same job as the PAT.
 
 ## Reporting a vulnerability
 

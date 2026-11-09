@@ -203,7 +203,7 @@ class InitTests(CliTestCase):
         self.assertIsNone(fake.protection)
         self.assertIn("gh nightshift setup", text)
         self.assertTrue(fake.repo_settings["allow_auto_merge"])
-        self.assertEqual([i["title"] for i in fake.issues.values()], ["Night-shift log"])
+        self.assertEqual([i["title"] for i in fake.issues.values()], ["Night-shift log", "Night-shift roadmap"])
         self.assertIn("night-log issue #1 created", text)
         self.assertNotIn("would set", text)
         self.assertIn("gh nightshift doctor", text)
@@ -325,7 +325,7 @@ class InitTests(CliTestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(self.fake.calls, [])
         self.assertEqual(sorted(ln for ln in text.splitlines() if ln),
-                         ["wrote .github/workflows/night-shift-planner.yml",
+                         ["wrote .github/workflows/night-shift-digest.yml", "wrote .github/workflows/night-shift-planner.yml",
                           "wrote .github/workflows/night-shift-review.yml", "wrote .github/workflows/night-shift.yml"])
         wf = Path(self.root, ".github/workflows/night-shift.yml").read_text()
         self.assertIn("lane-db:", wf)
@@ -369,7 +369,7 @@ class SetupJoinTests(CliTestCase):
         self.assertEqual(set(self.fake.labels), names)
         self.assertEqual(self.fake.variables["AGENTS_ENABLED"], "false")
         self.assertIn("protected main", text)
-        self.assertEqual(len(self.fake.issues), 1)
+        self.assertEqual(len(self.fake.issues), 2)
 
     def test_setup_is_idempotent_and_keeps_switch_on(self):
         self.run_cli("setup")

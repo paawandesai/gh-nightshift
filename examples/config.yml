@@ -27,6 +27,9 @@ planner:
   refill_below: 3              # auto-refill: run gap mode for a lane with fewer ready issues
   id_prefixes: {api: A, web: W}
   human_paths: [contracts/]
+digest:
+  schedule: "0 7 * * *"         # morning summary on the night-log issue (UTC)
+  webhook_secret: NIGHT_SHIFT_WEBHOOK   # optional: Slack or Discord webhook URL
 lanes:
   - name: api
     description: REST API and database

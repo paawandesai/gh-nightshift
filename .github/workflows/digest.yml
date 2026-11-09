@@ -1,0 +1,60 @@
+# gh-nightshift: the morning digest. Posts what merged, what is stuck and what it cost on the night-log issue,
+# refreshes the roadmap issue, and optionally sends the digest to a Slack or Discord webhook.
+#   digest  (PAT)  read issues and PRs, post one comment, PATCH the roadmap body
+name: night-shift-digest
+
+on:
+  workflow_call:
+    inputs:
+      hours:
+        type: string
+        required: false
+        default: "24"
+      tool_repo:
+        type: string
+        required: false
+        default: paawandesai/gh-nightshift
+      tool_ref:
+        type: string
+        required: false
+        default: main
+    secrets:
+      agent_pat:
+        required: true
+      webhook_url:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  REPO: ${{ github.repository }}
+  PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+  # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
+  PYTHONSAFEPATH: "1"
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .night-shift
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - name: Refresh the roadmap
+        env:
+          GH_TOKEN: ${{ secrets.agent_pat }}
+        run: python3 -m nightshift roadmap || echo "roadmap refresh failed; the digest still runs"
+      - name: Post the digest
+        env:
+          GH_TOKEN: ${{ secrets.agent_pat }}
+          NIGHT_SHIFT_WEBHOOK_URL: ${{ secrets.webhook_url }}
+          HOURS: ${{ inputs.hours }}
+        run: python3 -m nightshift digest --post --hours "$HOURS" --webhook-env NIGHT_SHIFT_WEBHOOK_URL

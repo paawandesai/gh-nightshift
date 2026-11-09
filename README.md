@@ -155,6 +155,10 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `review_token_secret` | `CLAUDE_TOKEN_REVIEW` | Claude token secret for the review gate |
 | `timezone` | `UTC` | Time zone for night-log lines |
 | `tool_ref` | `main` | Ref of gh-nightshift the workflows use. Pin a tag or SHA; `doctor` warns about a moving branch. |
+| `bot_login` | you | The PAT's login, for read-only commands run as someone else (`stats`, `audit`, `digest`) |
+| `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
+| `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
+| `digest` | | `enabled` (true), `schedule` (`0 7 * * *`, UTC), `webhook_secret` (optional secret holding a Slack or Discord webhook URL) |
 
 Repo variables override some settings at run time without a commit: `AGENTS_ENABLED`, `FIX_LANE`,
 `ESCALATE_MODEL`, `REVIEW_MODEL` (fallback), `PLANNER_MODEL`, `CLAUDE_CODE_VERSION` and
@@ -252,15 +256,17 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 
 | Command | What it does |
 |---|---|
-| `init` | Write config and workflows, set up labels, settings, variables, night log, secrets (branch protection: run `setup` after pushing). `--yes`, `--lanes`, `--tool-ref`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets`, `--dry-run` |
-| `setup` | Re-apply labels, settings, variables, branch protection and the night log |
-| `join --lane X` | A teammate stores their Claude token for a lane (`--pat` also sets the lane's own PAT) |
-| `doctor` | Read-only checks with a fix for each problem (`--pat-env VAR` checks the PAT) |
+| `init` | Write config and workflows, set up labels, settings, variables, night log, roadmap, secrets (branch protection: run `setup` after pushing). `--yes`, `--lanes`, `--tool-ref`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets`, `--dry-run`. Fully non-interactive with `--yes --lanes api,web --preset python --paths api=api/ --budget 5 --secrets-from-env` |
+| `setup` | Re-apply labels, settings, variables, branch protection, the night log and the roadmap |
+| `join --lane X` | A teammate stores their Claude token and their own PAT for a lane (`--no-pat` to skip); prints the `trusted_logins` line to add |
+| `doctor` | Read-only checks with a fix for each problem (`--pat-env VAR` checks a PAT; repeat it for each) |
 | `status` | What each lane would do now, the queue, open agent PRs, blocked and waiting issues, the night log |
 | `stats` | Merge rate with a 95% interval, reason codes, escalation share, cost per merged PR (`--audit CSV` adds the review gate's catch rate). Counts PRs and markers from `bot_login` in the config (default: you), so set it when the PAT is another account. |
 | `plan` | Draft and create tickets: `--from PATH`, `--gap`, `--lane X`, `--plan-file` (publish an existing draft) |
-| `start` / `pause` | Set `AGENTS_ENABLED` to `true` / `false` (the kill switch) |
-| `freeze` / `resume` | Pause and move every ready issue to `human` + `frozen`; `resume` undoes it and starts |
+| `start` / `pause` | Set `AGENTS_ENABLED` to `true` / `false` (the kill switch); `pause` also cancels lane runs in flight (`--no-cancel` to let them finish) |
+| `freeze` / `resume` | Pause (and cancel) and move every ready issue to `human` + `frozen`; `resume` undoes it and starts |
+| `roadmap` | Create or refresh the roadmap issue: tickets by wave with status, a Blocked-by mermaid graph, counts per lane. The planner and every merge refresh it too. `plan --show` prints it without writing. |
+| `digest` | Summarise the last `--hours 24`: merged, closed with reasons, stuck, cost per lane. `--post` puts it on the night log; `--webhook-env VAR` also sends it to the Slack or Discord webhook URL in `$VAR`. The generated `night-shift-digest.yml` runs it every morning. |
 | `lint` | Check ready issues against the ticket guide |
 | `audit` | Sample merged agent PRs (`--sample 25 --seed 1`), collect evidence, optionally rerun tests (`--test-cmd`), and report rates (`--report CSV`; `--label-llm CSV` pre-fills LLM labels, which are not ground truth) |
 
