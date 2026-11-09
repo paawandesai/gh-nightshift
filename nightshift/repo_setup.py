@@ -4,6 +4,7 @@ exact `gh api` call instead of making it."""
 from __future__ import annotations
 
 import getpass
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -140,7 +141,11 @@ def gh_secret_set(repo: str, name: str, value: str) -> None:
     """`gh secret set` encrypts with the repo's public key over REST; the value goes in on stdin."""
     result = subprocess.run(["gh", "secret", "set", name, "-R", repo], input=value, capture_output=True, text=True)
     if result.returncode != 0:
-        raise GHError(f"gh secret set {name}: {result.stderr.strip()}")
+        err = result.stderr.strip()
+        if re.search(r"HTTP 40[34]|not found|forbidden|must have admin", err, re.I):
+            err += (f"\n  Setting repository secrets needs admin access to {repo} (or a custom role that can manage "
+                    "secrets). Ask a repo admin to grant it, then run this again.")
+        raise GHError(f"gh secret set {name}: {err}")
 
 
 def prompt_secret(gh: GH, name: str, hint: str, setter: SecretSetter | None = None,

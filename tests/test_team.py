@@ -1221,6 +1221,20 @@ class Batch4Fixes(CodeOwners):
         data = scaffold.apply_template({"protected_paths": ["secrets/"]}, "hackathon")
         self.assertEqual(data["protected_paths"], ["secrets/", "contracts/"])
 
+    def test_secret_set_without_admin_explains_what_to_ask_for(self):
+        import subprocess
+        from unittest import mock
+
+        from nightshift import repo_setup
+        from nightshift.gh import GHError
+
+        denied = subprocess.CompletedProcess([], 1, "", "failed to fetch public key: HTTP 403: Resource not accessible")
+        with mock.patch.object(repo_setup.subprocess, "run", return_value=denied):
+            with self.assertRaises(GHError) as err:
+                repo_setup.gh_secret_set("o/r", "CLAUDE_TOKEN_ALICE", "sk-ant-x")
+        self.assertIn("needs admin access to o/r", str(err.exception))
+        self.assertNotIn("sk-ant-x", str(err.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

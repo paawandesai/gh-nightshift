@@ -194,6 +194,11 @@ class InitTests(CliTestCase):
         self.assertEqual(cfg.lane("api").token_secret, "CLAUDE_TOKEN_API")
         self.assertEqual(cfg.lane("api").test_command, "cd api && pytest")  # from the detected stack
         self.assertEqual(cfg.lane("web").paths, ["web/"])
+        # web/ has no stack marker: it must not inherit api/'s commands.
+        self.assertEqual(cfg.lane("web").test_command, "")
+        # New setups pin the release of the extension that wrote them, not the moving main branch.
+        from nightshift import __version__
+        self.assertEqual(cfg.tool_ref, f"v{__version__}")
         self.assertEqual(cfg.fix_lane, "api")
         # GitHub side: labels, settings, variables, protection, night log.
         self.assertIn("lane:api", fake.labels)

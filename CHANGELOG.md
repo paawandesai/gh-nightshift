@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.2] - unreleased
 
 ### Security
 
@@ -19,6 +19,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - With `--repo`, commands run from a folder without a night-shift config read the config, workflows and CODEOWNERS
   from the repo's default branch, so `setup`, `doctor`, `status` and the switches work from any folder. `start`
   refuses a repo that has no config on main yet.
+- `init` pins the workflows to the installed extension's release (`tool_ref: v0.1.2`) instead of `main`.
+
+### Added
+
+- `docs/ALPHA.md`: a guide for alpha testers (install, set up a repo, join a lane, what to report).
+
+### Fixed
+
+- The `gh nightshift` launcher now finds Python on Windows: it also tries `python` and `py -3`, skips a `python3`
+  that is only the Microsoft Store stub, and passes a Windows-style `PYTHONPATH`.
+- `init` suggests setup and test commands only from the lane's own folder or the repo root, never from another
+  lane's folder.
+- A failed `gh secret set` in `init` or `join` explains that repository secrets need admin access.
+- `gh nightshift --help` lists only the commands people run.
+
+## [0.1.1] - 2026-11-09
 
 ### Added
 
@@ -28,8 +44,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- The `gh nightshift` launcher now finds Python on Windows: it also tries `python` and `py -3`, skips a `python3`
-  that is only the Microsoft Store stub, and passes a Windows-style `PYTHONPATH`.
 - Agent runs ignore build and test caches (`__pycache__/`, `*.pyc`, `.pytest_cache/`, `node_modules/`, ...) even
   when the repo has no `.gitignore` for them, so they never end up in an agent PR.
 

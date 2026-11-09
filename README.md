@@ -18,6 +18,9 @@ your machine overnight.
 It was extracted from the kit used in a hackathon. `docs/EXTRACTION.md` lists every hackathon-specific
 assumption and what became of it.
 
+**Alpha testers:** start with [docs/ALPHA.md](docs/ALPHA.md). It covers install, setup, joining a lane,
+troubleshooting and what to report.
+
 ## 10-minute setup
 
 You need admin rights on the repo, `gh` logged in with the `workflow` scope (`gh auth refresh -s workflow`),
@@ -48,7 +51,8 @@ Python 3.10 or newer, and a CI workflow whose test job is called `test`. If it h
    Then it sets up the repo: labels, squash merge and delete-branch-on-merge, the `AGENTS_ENABLED`
    (`false`) and `FIX_LANE` variables, and a `night-log` issue. Last, it asks for any missing secrets, without
    echoing them. Branch protection waits until step 4, so it does not refuse the push of these files.
-   `--tool-ref v0.1.0` pins the workflows to a release (recommended once one exists).
+   The workflows are pinned to the release of the extension you installed (`tool_ref: v0.1.2`); `--tool-ref`
+   picks another tag or SHA.
 
 3. Create the secrets (`init` asks for them; `gh nightshift join --lane <name>` lets a teammate add their own).
 
@@ -157,7 +161,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `labels` | | Rename any of the standard labels (`ready` is `night-safe` by default) |
 | `review_token_secret` | `CLAUDE_TOKEN_REVIEW` | Claude token secret for the review gate |
 | `timezone` | `UTC` | Time zone for night-log lines |
-| `tool_ref` | `main` | Ref of gh-nightshift the workflows use. Pin a tag or SHA; `doctor` warns about a moving branch. |
+| `tool_ref` | `main` (`init` writes the installed release) | Ref of gh-nightshift the workflows use. Pin a tag or SHA; `doctor` warns about a moving branch. |
 | `bot_login` | you | The PAT's login, for read-only commands run as someone else (`stats`, `audit`, `digest`) |
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
