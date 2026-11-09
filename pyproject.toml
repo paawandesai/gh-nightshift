@@ -1,6 +1,6 @@
 [project]
 name = "gh-nightshift"
-version = "0.1.0"
+version = "0.1.2"
 description = "Night shift: Claude agents build your GitHub issues overnight in parallel lanes (gh extension + reusable workflows)"
 requires-python = ">=3.10"
 license = { text = "MIT" }

@@ -18,6 +18,9 @@ your machine overnight.
 It was extracted from the kit used in a hackathon. `docs/EXTRACTION.md` lists every hackathon-specific
 assumption and what became of it.
 
+**Alpha testers:** start with [docs/ALPHA.md](docs/ALPHA.md). It covers install, setup, joining a lane,
+troubleshooting and what to report.
+
 ## 10-minute setup
 
 You need admin rights on the repo, `gh` logged in with the `workflow` scope (`gh auth refresh -s workflow`),
@@ -48,7 +51,8 @@ Python 3.10 or newer, and a CI workflow whose test job is called `test`. If it h
    Then it sets up the repo: labels, squash merge and delete-branch-on-merge, the `AGENTS_ENABLED`
    (`false`) and `FIX_LANE` variables, and a `night-log` issue. Last, it asks for any missing secrets, without
    echoing them. Branch protection waits until step 4, so it does not refuse the push of these files.
-   `--tool-ref v0.1.0` pins the workflows to a release (recommended once one exists).
+   The workflows are pinned to the release of the extension you installed (`tool_ref: v0.1.2`); `--tool-ref`
+   picks another tag or SHA.
 
 3. Create the secrets (`init` asks for them; `gh nightshift join --lane <name>` lets a teammate add their own).
 
@@ -63,6 +67,11 @@ Python 3.10 or newer, and a CI workflow whose test job is called `test`. If it h
    at once, run `init --owners api=alice,web=bob --lane-pats --bot-login <AGENT_PAT's login>`: each lane gets
    `CLAUDE_TOKEN_<OWNER>` and `AGENT_PAT_<OWNER>`, the owners become `trusted_logins`, and each owner stores their
    two secrets with `gh nightshift join --lane <lane>`. The planner, digest and commands still use `AGENT_PAT`.
+
+   A lane can also name `fallback_token_secret`, a second Claude token (for example from its owner's second
+   account). The agent switches to it only when the lane's own token cannot start a run (usage limit, expired or
+   revoked token); the run log says `claude token: fallback`. Store it with `gh nightshift join --lane <lane>
+   --fallback`, and run `gh nightshift init --regenerate` after adding the key so the caller passes it.
 
 4. Commit and push the new files to main, then protect main and check the setup.
 
@@ -144,7 +153,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 
 | Key | Default | What it does |
 |---|---|---|
-| `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image` |
+| `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `fallback_token_secret` (a second Claude token used only when the first cannot start a run), `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image` |
 | `main_branch` | `main` | Branch the lanes build on and protect |
 | `ci_workflow` | `ci.yml` | CI file whose runs on main gate every lane |
 | `required_checks` | `[test, "review / verdict"]` | Required status checks; a PR counts as green only when all have reported |
@@ -157,7 +166,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `labels` | | Rename any of the standard labels (`ready` is `night-safe` by default) |
 | `review_token_secret` | `CLAUDE_TOKEN_REVIEW` | Claude token secret for the review gate |
 | `timezone` | `UTC` | Time zone for night-log lines |
-| `tool_ref` | `main` | Ref of gh-nightshift the workflows use. Pin a tag or SHA; `doctor` warns about a moving branch. |
+| `tool_ref` | `main` (`init` writes the installed release) | Ref of gh-nightshift the workflows use. Pin a tag or SHA; `doctor` warns about a moving branch. |
 | `bot_login` | you | The PAT's login, for read-only commands run as someone else (`stats`, `audit`, `digest`) |
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
@@ -264,7 +273,7 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 |---|---|
 | `init` | `--template hackathon` starts from a weekend-build setup (planner refill below 3, 2 attempts, 30-minute stale limit, digest every 4 hours, a `docs/PRD.md` and `contracts/` stub). Write config and workflows, set up labels, settings, variables, night log, roadmap, secrets (branch protection: run `setup` after pushing). `--yes`, `--lanes`, `--tool-ref`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets`, `--dry-run`. Fully non-interactive with `--yes --lanes api,web --preset python --paths api=api/ --budget 5 --secrets-from-env`. `--owners api=alice,web=bob --lane-pats --bot-login night-bot` gives each lane its owner's own PAT and Claude token |
 | `setup` | Re-apply labels, settings, variables, branch protection, the night log and the roadmap |
-| `join --lane X` | A teammate stores their Claude token and their own PAT for a lane (`--no-pat` to skip); prints the `trusted_logins` line to add |
+| `join --lane X` | A teammate stores their Claude token and their own PAT for a lane (`--no-pat` to skip); prints the `trusted_logins` line to add. `--fallback` stores the lane's fallback Claude token instead |
 | `doctor` | Read-only checks with a fix for each problem (`--pat-env VAR` checks a PAT; repeat it for each) |
 | `status` | What each lane would do now, the queue, open agent PRs, blocked and waiting issues, the night log |
 | `stats` | Merge rate with a 95% interval, reason codes, escalation share, cost per merged PR (`--audit CSV` adds the review gate's catch rate; `--org ORG` summarises every repo in an org that has a night-shift config). Counts PRs and markers from `bot_login` in the config (default: you), so set it when the PAT is another account. |
@@ -418,7 +427,8 @@ Intervals are Wilson score intervals (`nightshift/stats_math.py`).
 
 ## Security
 
-The agent never holds the GitHub PAT. Each lane receives exactly two secrets, named explicitly. Changes to
+The agent never holds the GitHub PAT. Each lane receives exactly two secrets, named explicitly (three if it names a
+fallback Claude token). Changes to
 protected paths are rejected before push. Only comments from the PAT's own login are trusted. The full threat
 model and its known gaps are in [SECURITY.md](SECURITY.md).
 

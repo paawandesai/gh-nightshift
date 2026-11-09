@@ -159,6 +159,10 @@ def _pairs(text: str | None) -> dict[str, str]:
     return out
 
 
+# New setups pin the workflows to the release of the extension that wrote them.
+DEFAULT_TOOL_REF = f"v{__version__}"
+
+
 def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, out=None,
                  tool_ref: str = "main", opts: argparse.Namespace | None = None) -> dict:
     """Interactive (or fully non-interactive with --yes and flags) config: lanes from the detected stack or a
@@ -195,7 +199,10 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
             folder = lane_paths.split(";")[0].rstrip("/")
             guess = scaffold.preset_commands(preset, folder if folder not in ("", ".") else "")
         else:
-            guess = next((s for s in stacks if s["path"].rstrip("/") == name), stacks[0] if stacks else None)
+            # Only the lane's own folder or the repo root: another folder's commands would be wrong for this lane.
+            folder = lane_paths.split(";")[0].split(",")[0].strip().rstrip("/")
+            guess = next((s for s in stacks if s["path"].rstrip("/") in (folder, name)), None) or \
+                next((s for s in stacks if s["path"] == "./"), None)
         # CODEOWNERS-aware: the lane's folder owner (a user, not a team) is the suggested lane owner.
         co_users = codeowners.user_owners(codeowners.owners_for(co_rules, lane_paths.split(";")[0].rstrip("/") + "/x"))
         suggested_owner = sorted(co_users)[0] if co_users else name
@@ -280,7 +287,7 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
             ctx.say(f"note: --tool-ref ignored; the config pins {cfg.tool_ref}. Edit tool_ref in {CONFIG_PATH}, "
                     "then run `gh nightshift init --regenerate`.")
     else:
-        data = build_config(ctx.root, ask, a.lanes, a.yes, ctx.out, a.tool_ref or "main", a)
+        data = build_config(ctx.root, ask, a.lanes, a.yes, ctx.out, a.tool_ref or DEFAULT_TOOL_REF, a)
         if getattr(a, "template", None):
             data = scaffold.apply_template(data, a.template)
         text = scaffold.config_yaml(data)
@@ -322,6 +329,15 @@ def cmd_join(ctx: Ctx, secret_ask=None, secret_setter=None, run=subprocess.run) 
         kwargs["ask"] = secret_ask
     if secret_setter:
         kwargs["setter"] = secret_setter
+    if getattr(ctx.args, "fallback", False):
+        if not lane.fallback_token_secret:
+            raise ConfigError(f"lane {lane.name} has no fallback_token_secret in {CONFIG_PATH}; add e.g. "
+                              f"`fallback_token_secret: {lane.token_secret}_FALLBACK` to the lane, commit it and run "
+                              "`gh nightshift init --regenerate`")
+        ctx.say(f"Lane {lane.name}: sign in to the second Claude account, run `claude setup-token` and paste the token.")
+        ctx.say(repo_setup.prompt_secret(ctx.gh, lane.fallback_token_secret,
+                                         repo_setup.secret_hint(cfg, lane.fallback_token_secret), **kwargs))
+        return 0
     ctx.say(f"Lane {lane.name}: run `claude setup-token` and paste the token.")
     ctx.say(repo_setup.prompt_secret(ctx.gh, lane.token_secret, f"Claude token for lane {lane.name}", **kwargs))
     if not lane.pat_secret or ctx.args.no_pat:
@@ -823,7 +839,8 @@ def parser() -> argparse.ArgumentParser:
     sub_common.add_argument("--repo", default=argparse.SUPPRESS)
     sub_common.add_argument("--root", default=argparse.SUPPRESS)
     sub_common.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
-    sub = p.add_subparsers(dest="command", required=True)
+    # The metavar lists only the commands people run; the workflow-internal ones stay callable but unlisted.
+    sub = p.add_subparsers(dest="command", required=True, metavar="<command>")
 
     s = sub.add_parser("init", parents=[common], help="set up night shift in this repo (interactive)")
     s.add_argument("--lanes", help="comma-separated lane names (skips that question)")
@@ -832,7 +849,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--regenerate", action="store_true", help="only rewrite the caller workflows from the config")
     s.add_argument("--files-only", action="store_true", help="write files; skip labels, settings and secrets")
     s.add_argument("--skip-secrets", action="store_true", help="do not prompt for secrets")
-    s.add_argument("--tool-ref", help="gh-nightshift ref the workflows use (tag or SHA; default main)")
+    s.add_argument("--tool-ref", help=f"gh-nightshift ref the workflows use (tag or SHA; default {DEFAULT_TOOL_REF})")
     s.add_argument("--preset", help="stack preset for setup/test commands: python, node or go; per lane: api=python,web=node")
     s.add_argument("--paths", help="folders per lane, e.g. api=api/,web=web/;shared/ (default <lane>/)")
     s.add_argument("--owners", help="lane owners' GitHub logins, which name their secrets, e.g. api=alice,web=bob")
@@ -854,6 +871,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--lane", required=True)
     s.add_argument("--pat", action="store_true", help=argparse.SUPPRESS)  # kept for compatibility; now the default
     s.add_argument("--no-pat", action="store_true", help="do not ask for the lane's own PAT (agent_pat_secret)")
+    s.add_argument("--fallback", action="store_true",
+                   help="store the lane's fallback Claude token (fallback_token_secret) instead, e.g. from a second account")
     s = sub.add_parser("doctor", parents=[common], help="check the setup; prints a fix for each problem")
     s.add_argument("--pat-env", action="append", default=[],
                    help="env var holding a PAT to check (repeat for each per-contributor PAT)")

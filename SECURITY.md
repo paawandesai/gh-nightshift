@@ -36,7 +36,7 @@ imported. Pushes take the PAT from `$GH_TOKEN` through a credential helper set i
 appears on a command line (`ps`) or in a git error message. Config refuses a secret name used both as a Claude
 token and as a PAT.
 
-**Exactly two secrets reach each lane, by explicit name.** `init` generates the caller workflow
+**Exactly two secrets reach each lane, by explicit name (three with a fallback Claude token).** `init` generates the caller workflow
 (`.github/workflows/night-shift.yml`, built in `nightshift/scaffold.py`) with one job per lane. Each job
 passes `claude_token: ${{ secrets.<that lane's token> }}` and `agent_pat: ${{ secrets.AGENT_PAT }}`. If the
 lane names its own PAT, that becomes `secrets.<agent_pat_secret> || secrets.AGENT_PAT`, still with explicit
@@ -46,6 +46,15 @@ contains `secrets[` or `secrets: inherit`, or if a lane's job does not pass that
 workflow receives only the review token. The planner workflow receives one Claude token and `AGENT_PAT`.
 The digest workflow receives `AGENT_PAT` and, if configured, the webhook secret; no Claude token and no model.
 The commands workflow receives only `AGENT_PAT`.
+
+**Fallback Claude token.** A lane may name `fallback_token_secret`, a second Claude token (for example from its
+owner's second account). The caller passes it by explicit name as `claude_token_fallback`, so that lane receives
+three secrets. It is handled exactly like the lane's own token: the agent job uses it only when the first token did
+not start a run (no structured output, fewer than 2 turns, no commits: a usage limit, an expired or revoked token),
+hands it to Claude on the same pipe, keeps it out of the agent's environment, and the token guard searches for both
+tokens. The pick job only checks that one of the two is set. Config refuses a fallback that is also a PAT secret or
+the lane's own token, and `doctor` fails if the caller stops passing it. A fallback adds a second credential an agent
+could find (see known gap 2). Check that using a second account this way fits your Claude plan's terms.
 
 **GitHub App mode.** With `auth.mode: app`, every caller passes the App's private key (`NIGHT_SHIFT_APP_KEY`)
 instead of `AGENT_PAT`, so a lane still receives exactly two secrets. Only the jobs that would hold the PAT

@@ -122,6 +122,9 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
             elif f"secrets.{lane.token_secret} " not in text:
                 out.append(Check(FAIL, f"lane {lane.name}'s job does not pass secrets.{lane.token_secret}",
                                  "run `gh nightshift init --regenerate`"))
+            elif lane.fallback_token_secret and f"secrets.{lane.fallback_token_secret} " not in text:
+                out.append(Check(FAIL, f"lane {lane.name}'s job does not pass its fallback secrets."
+                                       f"{lane.fallback_token_secret}", "run `gh nightshift init --regenerate`"))
         if cfg.extends and not (root / ".night-shift/base.yml").is_file():
             out.append(Check(WARN, f"config extends {cfg.extends} but .night-shift/base.yml is missing",
                              "run `gh nightshift config pull` and commit the file"))

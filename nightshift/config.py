@@ -32,6 +32,7 @@ class Lane:
     model: str = ""
     escalate_model: str = ""
     pat_secret: str = ""          # optional per-lane PAT so PRs are credited to the lane owner
+    fallback_token_secret: str = ""  # optional second Claude token, used when the first one cannot start a run
     paths: list[str] = field(default_factory=list)
     description: str = ""
     test_command: str = ""
@@ -147,6 +148,8 @@ class Config:
             names.add(lane.token_secret)
             if lane.pat_secret:
                 names.add(lane.pat_secret)
+            if lane.fallback_token_secret:
+                names.add(lane.fallback_token_secret)
         return sorted(names)
 
 
@@ -164,6 +167,7 @@ def parse(data: dict) -> Config:
             cmds = "\n".join(cmds)
         lanes.append(Lane(name=raw["name"], token_secret=raw["claude_token_secret"],
                           pat_secret=raw.get("agent_pat_secret", ""), model=raw.get("model", ""),
+                          fallback_token_secret=raw.get("fallback_token_secret", ""),
                           escalate_model=raw.get("escalate_model", ""), paths=raw.get("paths", []),
                           description=raw.get("description", ""), test_command=raw.get("test_command", ""),
                           setup_commands=cmds, setup_action=(setup.get("action") or "").removeprefix("./"),
@@ -172,6 +176,9 @@ def parse(data: dict) -> Config:
     names = [lane.name for lane in lanes]
     if len(set(names)) != len(names):
         raise ConfigError("lane names must be unique")
+    for lane in lanes:
+        if lane.fallback_token_secret and lane.fallback_token_secret == lane.token_secret:
+            raise ConfigError(f"lane {lane.name}: fallback_token_secret must differ from claude_token_secret")
     models = data.get("models", {})
     limits = data.get("limits", {})
     planner = data.get("planner", {})
@@ -236,7 +243,7 @@ def parse(data: dict) -> Config:
             raise ConfigError("auth.private_key_secret must be a secret name (A-Z, 0-9, _)")
         if any(lane.pat_secret for lane in cfg.lanes):
             raise ConfigError("auth.mode app replaces every PAT: remove agent_pat_secret from the lanes")
-        if cfg.app_key_secret in {lane.token_secret for lane in lanes} | {cfg.planner_token_secret,
+        if cfg.app_key_secret in claude_secrets(cfg) | {cfg.planner_token_secret,
                                                                            cfg.review_token_secret}:
             raise ConfigError(f"secret {cfg.app_key_secret} is used both as a Claude token and as the App key")
     if cfg.risk_default not in ("auto", "approve"):
@@ -255,7 +262,7 @@ def parse(data: dict) -> Config:
         raise ConfigError(f"planner.id_prefixes names unknown lane(s): {', '.join(unknown)}")
     # A Claude token secret that is also a PAT secret would hand the PAT to the agent job.
     pats = {"AGENT_PAT"} | {lane.agent_pat_secret for lane in lanes}  # AGENT_PAT is always passed as fallback
-    claude = {lane.token_secret for lane in lanes} | {cfg.planner_token_secret, cfg.review_token_secret}
+    claude = claude_secrets(cfg) | {cfg.planner_token_secret, cfg.review_token_secret}
     clash = sorted(pats & claude)
     if clash:
         raise ConfigError(f"secret(s) {', '.join(clash)} used both as a Claude token and as a PAT: the agent job "
@@ -263,9 +270,15 @@ def parse(data: dict) -> Config:
     return cfg
 
 
+def claude_secrets(cfg: Config) -> set[str]:
+    """Every lane's Claude token secrets, fallbacks included."""
+    return {lane.token_secret for lane in cfg.lanes} | {lane.fallback_token_secret for lane in cfg.lanes
+                                                        if lane.fallback_token_secret}
+
+
 def pats_or_claude(cfg: Config) -> set[str]:
     return ({"AGENT_PAT", cfg.planner_token_secret, cfg.review_token_secret}
-            | {lane.token_secret for lane in cfg.lanes} | {lane.agent_pat_secret for lane in cfg.lanes})
+            | claude_secrets(cfg) | {lane.agent_pat_secret for lane in cfg.lanes})
 
 
 BASE_PATH = ".night-shift/base.yml"  # written by `gh nightshift config pull` from the `extends:` repo
