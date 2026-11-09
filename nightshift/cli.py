@@ -383,7 +383,7 @@ def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str) -> int:
         raise ConfigError(f"plan file not found: {path}")
     raw = Path(path).read_text(encoding="utf-8")
     result = planner.publish_plan(gh, cfg, raw, lane)
-    lines = result.lines()
+    lines = [ns.defang(line) for line in result.lines()]  # titles, notes, keys come from the model
     ctx.say(*lines)
     summary = "**Night shift planner**\n\n" + "\n".join(f"- {line}" for line in lines)
     if reply_to:

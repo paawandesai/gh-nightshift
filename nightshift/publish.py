@@ -38,10 +38,11 @@ def _git_env() -> dict[str, str]:
     PAT never appears in git's argv (visible in `ps`) or in error messages."""
     env = dict(os.environ)
     if env.get("GH_TOKEN"):
-        env.update({"GIT_CONFIG_COUNT": "2",
-                    "GIT_CONFIG_KEY_0": "credential.https://github.com.helper", "GIT_CONFIG_VALUE_0": "",
-                    "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
-                    "GIT_CONFIG_VALUE_1": '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f',
+        n = int(env.get("GIT_CONFIG_COUNT") or 0)  # keep entries the runner already set
+        env.update({"GIT_CONFIG_COUNT": str(n + 2),
+                    f"GIT_CONFIG_KEY_{n}": "credential.https://github.com.helper", f"GIT_CONFIG_VALUE_{n}": "",
+                    f"GIT_CONFIG_KEY_{n + 1}": "credential.https://github.com.helper",
+                    f"GIT_CONFIG_VALUE_{n + 1}": '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f',
                     "GIT_TERMINAL_PROMPT": "0"})
     return env
 
@@ -276,8 +277,8 @@ def park_waiting(gh: GH, cfg: Config, job: Job, issue: dict, res: Result) -> str
                             + ", ".join(f"#{p}" for p in providers) + ".")
         return "waiting on " + ", ".join(f"#{p}" for p in providers) + " (attempt not counted)"
     # Nothing could be filed: this was a failed attempt after all.
-    gh.comment(me, "Night shift: the agent reported it is waiting on another lane, but no request could be "
-                   "filed (" + ("; ".join(lines) or "no needs given") + "). Counted as a failed attempt.")
+    gh.comment(me, "Night shift lane: the agent reported it is waiting on another lane, but no request could be "
+                   "filed (" + ns.defang("; ".join(lines) or "no needs given") + "). Counted as a failed attempt.")
     return "stuck (waiting with no valid needs)"
 
 

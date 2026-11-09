@@ -35,7 +35,8 @@ PR_REASONS = ("verdict_passed", "verdict_failed", "checks_failed", "conflict", "
 # Markers written by the original hackathon kit; still counted so a repo can migrate mid-flight.
 LEGACY = {"attempt": "<!-- agent-attempt -->", "infra": "<!-- agent-infra -->", "blocked": "<!-- agent-blocked -->"}
 # The kit's block notice, recognised only as the start of a bot comment (agent text is never at the start).
-LEGACY_BLOCK_RE = re.compile(r"\A(?:<!-- agent-blocked -->\s*)?Night shift: [^\n]*marking blocked for a human")
+LEGACY_BLOCK_RE = re.compile(r"\A(?:<!-- agent-blocked -->\s*)?Night shift: (?:\d+ failed attempts|\d+ runs that never "
+                             r"started \(check the lane token and usage\)); marking blocked for a human\.")
 
 
 @dataclass(frozen=True)
