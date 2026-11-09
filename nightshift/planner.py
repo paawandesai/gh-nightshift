@@ -183,6 +183,13 @@ def check_ticket(t: Ticket, cfg: Config, depended_on: bool, existing: dict[int, 
         if any(CONTROL_LINE_RE.search(x) or parse_deps(x) for x in value):
             problems.append(f"{name} contains a heading, HTML comment or Blocked-by/Depends-on line; "
                             "dependencies go in blocked_by only")
+    if model_text and not any("contains a heading" in x for x in problems):
+        # Files and Covers items are joined into one line when rendered, so items that are harmless alone can form
+        # a Blocked-by line together (["R1 blocked by", "#9"] -> "Covers: R1 blocked by, #9"). Check the body the
+        # picker will actually read, without the real Blocked-by line.
+        if parse_deps(render(Ticket(**{**t.__dict__, "blocked_by": []}), {})):
+            problems.append("Files or Requirements items together form a Blocked-by/Depends-on line; "
+                            "dependencies go in blocked_by only")
     for item in t.do + t.acceptance + t.files + t.requirements if model_text else []:
         if "\n" in item:
             problems.append("list items must be single lines")

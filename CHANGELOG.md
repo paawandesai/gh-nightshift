@@ -5,11 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-09
 
 First release, extracted from the hackathon night-shift kit (`legacy/hackathon-kit/`, see `docs/EXTRACTION.md`).
 
 ### Added
+
+- The planner rejects tickets whose Files or Requirements items, joined on one line when rendered, would form a
+  `Blocked by` line (a dependency the plan never declared).
 
 - `gh nightshift` CLI extension (Python 3.10+, standard library only) with the commands `init`, `setup`,
   `join`, `doctor`, `status`, `stats`, `plan`, `start`, `pause`, `freeze`, `resume`, `lint` and `audit`.
