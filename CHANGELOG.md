@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A token guard in the agent job searches the commits, the result and the log for the lane's Claude token before
   anything is uploaded or pushed. On a hit the run is withheld and the issue is labelled `needs-human`.
 
+### Changed
+
+- With `--repo`, commands run from a folder without a night-shift config read the config, workflows and CODEOWNERS
+  from the repo's default branch, so `setup`, `doctor`, `status` and the switches work from any folder. `start`
+  refuses a repo that has no config on main yet.
+
 ### Added
 
 - `init --lane-pats` (with `--owners` and `--bot-login`) pairs every lane with its owner's own PAT and Claude
