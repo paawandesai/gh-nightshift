@@ -13,8 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - The issue template files tickets as `proposed`, not `night-safe`. GitHub applies a template's labels for
     anyone who opens an issue, so an outsider's ticket arrived already approved. Re-run `gh nightshift init
     --force` (or edit `.github/ISSUE_TEMPLATE/night-shift-ticket.md`) in repos set up before this release.
-  - A ticket an agent requests in another lane (`needs`) is filed as `proposed`; `limits.auto_ready_needs: true`
-    restores the old behaviour.
+  - New `limits.auto_ready_needs` (default `true`, the behaviour so far). Set it to `false` and a ticket an agent
+    requests in another lane (`needs`) is filed as `proposed` until a person promotes it.
   - Hand-off items are single lines, so agent text cannot start a section of its own in a trusted comment.
   - The run's cost and turn count are read as numbers. A crafted cost could put a trusted marker on the night
     log, and a non-numeric turn count crashed the publish job.

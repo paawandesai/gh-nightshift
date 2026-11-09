@@ -98,9 +98,10 @@ push and the PR come from the PAT's account.
   (`picker.merge_body`) instead of taking the agent's commit messages. So an agent cannot close other tickets
   or the night log, or put `[skip ci]` on main. Without an open night-log issue, a lane with a budget and the
   fix-main lane stop instead of running uncounted.
-- **Tickets an agent asks for.** A `needs` ticket in another lane is filed as `proposed`; a person swaps the
-  label for `night-safe`. `limits.auto_ready_needs: true` restores the old behaviour (ready at once when the
-  ticket passes the validator) and cannot be set from an org-wide base config.
+- **Tickets an agent asks for.** A `needs` ticket in another lane is ready at once when it passes the ticket
+  validator, so by default one agent can queue work for another with nobody in between (see Known gaps 12).
+  Set `limits.auto_ready_needs: false` to file these as `proposed`; a person then swaps the label for
+  `night-safe`.
 - **Per-contributor PATs.** When lanes use their owners' own PATs, list those logins in `trusted_logins`;
   markers, PRs and night-log cost lines from them count too. The default is just the PAT's own login.
   `join` refuses a classic PAT with the `workflow` scope, and `doctor --pat-env` checks every PAT and warns
@@ -133,7 +134,7 @@ push and the PR come from the PAT's account.
 - **Cross-repo hand-offs.** Text from another repository (title, `## Interface`) is defanged, fenced and
   labelled as data; its trust markers are never read, because that repo's PAT login is not this repo's.
 - **Org-wide base config.** `.night-shift/base.yml` cannot set lanes, labels, the merge mode, `tool_ref`,
-  `bot_login`, `trusted_logins`, `auth`, `extends`, `limits.auto_ready_needs` or any secret name, and its
+  `bot_login`, `trusted_logins`, `auth`, `extends` or any secret name, and its
   `risk` settings can only make approval stricter (`planner.claude_token_secret` and `digest.webhook_secret`
   are dropped from it), so whoever controls the org repo cannot widen trust or route a secret. Its other
   settings are not clamped: a base can raise `limits` (attempts, turns) or switch on planner refill. It lives

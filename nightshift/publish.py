@@ -283,8 +283,8 @@ def park_waiting(gh: GH, cfg: Config, job: Job, issue: dict, res: Result) -> str
         else:
             ticket.title = planner.next_id(gh.issues(state="all"), cfg.id_prefix(lane)) + " " + ticket.plain_title
             problems, human = planner.check_ticket(ticket, cfg, depended_on=True, existing={})
-            # An agent wrote this ticket. It goes straight to the other lane only when the repo opted in
-            # (limits.auto_ready_needs); otherwise a person promotes it, so one agent cannot queue work for another.
+            # An agent wrote this ticket. It goes straight to the other lane when it passes the validator, unless
+            # the repo set limits.auto_ready_needs: false; then a person promotes it.
             ready = cfg.auto_ready_needs and not problems and not human
             labels = [f"lane:{lane}", f"wave:{ticket.wave}",
                       cfg.ready_label if ready else (cfg.label("human") if human else cfg.label("proposed"))]
@@ -293,7 +293,7 @@ def park_waiting(gh: GH, cfg: Config, job: Job, issue: dict, res: Result) -> str
                 body_text += "\n**Why this is not night-safe yet:**\n" + "\n".join(f"- {p}" for p in problems) + "\n"
             elif not ready and not human:
                 body_text += ("\nWritten by an agent, so it waits for a person: swap `" + cfg.label("proposed") + "` for `"
-                              + cfg.ready_label + "` to queue it (or set `limits.auto_ready_needs: true`).\n")
+                              + cfg.ready_label + "` to queue it (`limits.auto_ready_needs` is off).\n")
             provider = gh.create_issue(ticket.title, body_text, labels).get("number", 0)
         if provider and ns.would_cycle(edges, me, provider):
             gh.add_labels(me, [cfg.label("needs_human")])

@@ -148,22 +148,19 @@ class Needs(unittest.TestCase):
     def new_issue(self):
         return max(self.f.issues)
 
-    def test_need_is_proposed_until_a_person_promotes_it(self):
-        # An agent wrote the ticket: by default it never reaches another lane's agent without a person.
+    def test_need_is_proposed_until_a_person_promotes_it_when_auto_ready_is_off(self):
+        self.cfg = loads(CONFIG + "limits:\n  auto_ready_needs: false\n")
         self.run_publish(needs=[NEED])
         new = self.new_issue()
         self.assertEqual(self.f.label_names(new), {"lane:api", "wave:2", "proposed"})
         self.assertIn("waits for a person", self.f.issues[new]["body"])
         self.assertIn("waiting", self.f.label_names(5))
 
-    def test_auto_ready_needs_cannot_come_from_an_org_base(self):
-        base = "limits:\n  auto_ready_needs: true\n  max_attempts: 2\n"
-        cfg = loads(CONFIG, base)
-        self.assertFalse(cfg.auto_ready_needs)
-        self.assertEqual(cfg.max_attempts, 2)
+    def test_an_org_base_can_switch_auto_ready_needs_off(self):
+        self.assertTrue(loads(CONFIG).auto_ready_needs)
+        self.assertFalse(loads(CONFIG, "limits:\n  auto_ready_needs: false\n").auto_ready_needs)
 
     def test_need_creates_ready_ticket_appends_blocked_by_and_refunds(self):
-        self.cfg = loads(CONFIG + "limits:\n  auto_ready_needs: true\n")
         outcome = self.run_publish(needs=[NEED])
         new = self.new_issue()
         self.assertIn(f"waiting on #{new}", outcome)

@@ -143,7 +143,7 @@
         },
         "auto_ready_needs": {
           "type": "boolean",
-          "description": "false (default): a ticket an agent requests in another lane (`needs`) is filed as `proposed` and a person promotes it. true: it gets the ready label at once when it passes the ticket validator, so agents can queue work for each other with nobody in between. Never taken from an org-wide base config."
+          "description": "true (default): a ticket an agent requests in another lane (`needs`) gets the ready label at once when it passes the ticket validator. false: it is filed as `proposed` and a person promotes it, so agents cannot queue work for each other with nobody in between."
         }
       }
     },
