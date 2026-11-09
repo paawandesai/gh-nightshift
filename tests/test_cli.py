@@ -477,6 +477,31 @@ class SwitchTests(CliTestCase):
         self.assertEqual(self.fake.variables["AGENTS_ENABLED"], "false")
         self.assertEqual(self.fake.writes("PATCH")[-1][1], "repos/o/r/actions/variables/AGENTS_ENABLED")
 
+    def test_any_folder_with_repo_reads_the_config_from_github(self):
+        # Seen live: `setup/doctor --repo org/x` run from a folder that is not a clone said "config not found".
+        empty = self.tempdir()
+        self.fake.contents[CONFIG_PATH] = Path(self.root, CONFIG_PATH).read_text()
+        self.fake.contents[".github/workflows/ci.yml"] = "name: CI\n"
+        self.seed(self.fake)
+        rc, text = self.run_cli("status", root=empty)
+        self.assertEqual(rc, 0, text)
+        self.assertIn("api", text)
+        self.assertFalse(Path(empty, CONFIG_PATH).exists())  # a snapshot, never written to the folder
+        import subprocess
+
+        ctx, out = self.ctx("doctor", root=empty)
+        cli.cmd_doctor(ctx, run=lambda args, **kw: subprocess.CompletedProcess(args, 1, "", ""))
+        self.assertIn(".night-shift/config.yml is valid", out.getvalue())
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_start_refuses_a_repo_without_a_config(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, _ = self.run_cli("start", root=self.tempdir())
+        self.assertEqual(rc, 2)
+        self.assertIn("merge the setup PR first", err.getvalue())
+        self.assertEqual(self.fake.writes(), [])
+
     def test_start_pause_dry_run(self):
         for name in ("start", "pause"):
             text, dry = self.assert_dry_run([name], self.seed)

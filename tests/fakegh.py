@@ -245,6 +245,10 @@ class FakeGitHub:
         return copy.deepcopy(self.issues[int(n)])
 
     def _contents(self, q, b, path):
+        prefix = path.rstrip("/") + "/"
+        if path not in self.contents and any(k.startswith(prefix) for k in self.contents):  # a directory listing
+            return [{"type": "file", "path": k, "name": k[len(prefix):]} for k in sorted(self.contents)
+                    if k.startswith(prefix) and "/" not in k[len(prefix):]]
         if path not in self.contents:
             raise GHError(f"not found: {path}", 404)
         return {"content": base64.b64encode(self.contents[path].encode()).decode(), "encoding": "base64"}
