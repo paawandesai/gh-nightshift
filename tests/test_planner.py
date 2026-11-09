@@ -79,6 +79,21 @@ class Validator(unittest.TestCase):
                 problems, human = self.check(t("a", title="[A1] x", files=[f]))
                 self.assertEqual((problems, human), ([], True))
 
+    def test_split_blocked_by_across_joined_items_is_rejected(self):
+        # Step 4's blocked defect: each item is harmless alone, but render() joins them into one line.
+        for raw in (t("a", title="[A1] x", requirements=["R1 blocked by", "#9"]),
+                    t("a", title="[A1] x", files=["api/x.py", "depends on", "#-1"]),
+                    t("a", title="[A1] x", requirements=["R1 Depends on", "#3"])):
+            with self.subTest(raw=raw):
+                problems, _ = self.check(raw)
+                self.assertTrue(any("together form a Blocked-by" in p for p in problems), problems)
+                body = planner.render(planner.Ticket.from_dict(raw), {})
+                self.assertTrue(planner.parse_deps(body))  # the body really would carry the hidden dependency
+
+    def test_joined_items_without_dependency_words_pass(self):
+        problems, _ = self.check(t("a", title="[A1] x", files=["api/x.py", "api/y.py"], requirements=["R1", "R2"]))
+        self.assertEqual(problems, [])
+
     def test_unknown_lane_and_bad_wave(self):
         problems, _ = self.check(t("a", title="[A1] x", lane="db", wave=200))
         self.assertTrue(any("unknown lane" in p for p in problems))
