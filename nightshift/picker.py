@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 from . import protocol as ns
 from .config import Config
+from .commands import can_command
 from .gh import GH, GHError
 from .rules import (
     BRANCH_RE,
@@ -38,6 +39,7 @@ from .rules import (
     lanes_of,
     model_for,
     parse_deps,
+    path_is_protected,
     section,
     wave_of,
 )
@@ -77,6 +79,7 @@ class Picker:
         self.now = now or dt.datetime.now(dt.timezone.utc)
         self._states: dict[int, str] = {}
         self._closed_at: dict[int, str] = {}
+        self.awaiting_approval: set[int] = set()
 
     # --- small helpers -----------------------------------------------------------------
     def issue_state(self, number: int) -> str:
@@ -254,6 +257,12 @@ class Picker:
                 busy = f"PR #{num} in lane {self.lane.name} was behind main; updated, waiting for checks to re-run"
                 continue
             if state == "passed":
+                why = self.approval_needed(pr, int(m.group(2)) if m else None)
+                if why and not self.approved(pr, sha):
+                    self.ask_approval(pr, why)
+                    if m:
+                        self.awaiting_approval.add(int(m.group(2)))  # never re-picked while its PR waits
+                    continue  # waiting for a person does not hold up the lane
                 try:
                     self.gh.put(self.gh.r(f"pulls/{num}/merge"), {"merge_method": "squash", "sha": sha})
                 except GHError as err:
@@ -268,6 +277,48 @@ class Picker:
             # GitHub closes the linked issue a moment after the merge; picking now could re-pick it.
             busy = f"merged PR #{merged[0]}; the next run continues lane {self.lane.name}"
         return busy
+
+    # --- risk tiers (strict mode) -------------------------------------------------------
+    def approval_needed(self, pr: dict, issue_no: int | None) -> str:
+        """Why this green PR needs one human approval before merging, or "" if it may merge on its own."""
+        cfg = self.cfg
+        if not (cfg.risk_approve_labels or cfg.risk_approve_paths or cfg.risk_default == "approve"):
+            return ""
+        labels = label_names(pr) | (label_names(self.gh.issue(issue_no) or {}) if issue_no else set())
+        hit = sorted(labels & set(cfg.risk_approve_labels))
+        if hit:
+            return f"label {hit[0]}"
+        if cfg.risk_approve_paths:
+            files = [f.get("filename", "") for f in self.gh.paginate(self.gh.r(f"pulls/{pr['number']}/files"))]
+            for f in files:
+                if path_is_protected(f, cfg.risk_approve_paths):
+                    return f"changes {f}"
+        if cfg.risk_default == "approve" and not labels & set(cfg.risk_auto_labels):
+            return "risk.default is approve"
+        return ""
+
+    def approved(self, pr: dict, sha: str) -> bool:
+        """One approval of the current head from a person with write access who did not open the PR."""
+        author = (pr.get("user") or {}).get("login", "")
+        latest: dict[str, dict] = {}
+        for r in self.gh.paginate(self.gh.r(f"pulls/{pr['number']}/reviews")):
+            login = (r.get("user") or {}).get("login", "")
+            if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+                latest[login] = r
+        for login, r in latest.items():
+            if (r.get("state") == "APPROVED" and r.get("commit_id") == sha and login != author
+                    and not login.endswith("[bot]") and can_command(self.gh, login)):
+                return True
+        return False
+
+    def ask_approval(self, pr: dict, why: str) -> None:
+        num = pr["number"]
+        if ns.trusted(self.gh.comments(num), self.gh.trusted, "approval"):
+            return
+        self.gh.add_labels(num, ["needs-approval"])
+        self.gh.comment(num, f"{ns.marker('approval', pr=num)}\nNight shift: checks are green, but this PR needs "
+                             f"one approval from a person with write access before it merges ({ns.defang(why)}). "
+                             "Approve the latest commit; the next lane run merges it.")
 
     # --- 4. main health ----------------------------------------------------------------
     def main_status(self) -> tuple[str, str]:
@@ -306,6 +357,8 @@ class Picker:
             if lanes_of(issue) != [self.lane.name]:
                 continue  # exactly one lane label
             num = issue["number"]
+            if num in self.awaiting_approval:
+                continue
             if [d for d in parse_deps(issue.get("body")) if self.issue_state(d) != "closed"]:
                 waiting += 1
                 continue

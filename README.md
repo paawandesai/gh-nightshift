@@ -158,6 +158,8 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `bot_login` | you | The PAT's login, for read-only commands run as someone else (`stats`, `audit`, `digest`) |
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
+| `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
+| `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels` (see Risk tiers) |
 | `digest` | | `enabled` (true), `schedule` (`0 7 * * *`, UTC), `webhook_secret` (optional secret holding a Slack or Discord webhook URL) |
 
 Repo variables override some settings at run time without a commit: `AGENTS_ENABLED`, `FIX_LANE`,
@@ -265,6 +267,8 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 | `plan` | Draft and create tickets: `--from PATH`, `--gap`, `--lane X`, `--plan-file` (publish an existing draft) |
 | `start` / `pause` | Set `AGENTS_ENABLED` to `true` / `false` (the kill switch); `pause` also cancels lane runs in flight (`--no-cancel` to let them finish) |
 | `freeze` / `resume` | Pause (and cancel) and move every ready issue to `human` + `frozen`; `resume` undoes it and starts |
+| `take N` / `retry N` | Take a ticket yourself, or put it back in the queue with fresh attempts (same as the comment commands) |
+| `app manifest` / `app check` | Print the GitHub App to create; mint a token locally and show its login and permissions |
 | `roadmap` | Create or refresh the roadmap issue: tickets by wave with status, a Blocked-by mermaid graph, counts per lane. The planner and every merge refresh it too. `plan --show` prints it without writing. |
 | `digest` | Summarise the last `--hours 24`: merged, closed with reasons, stuck, cost per lane. `--post` puts it on the night log; `--webhook-env VAR` also sends it to the Slack or Discord webhook URL in `$VAR`. The generated `night-shift-digest.yml` runs it every morning. |
 | `lint` | Check ready issues against the ticket guide |
@@ -280,6 +284,51 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
   (`doctor` checks this). The queue tests the merged result, so the branch need not be up to date.
   Limitation in v0.1: the picker does not add PRs to the queue or enable auto-merge, so a person (or other
   automation) must queue green agent PRs. Use `strict` for unattended nights.
+
+## Risk tiers
+
+Green agent PRs merge on their own by default. In `strict` mode you can ask for one human approval first:
+
+```yaml
+risk:
+  default: auto            # or approve: every PR needs one, except tickets with an auto_labels label
+  approve_labels: [risk:high]   # on the issue or the PR
+  approve_paths: [migrations/, infra/]
+  auto_labels: [risk:low]
+```
+
+A PR that needs approval gets the `needs-approval` label and one comment. It merges on the next lane run after
+someone with write access who did not open it approves its latest commit. Waiting for approval does not hold
+up the lane: it moves on to the next ticket and never re-picks that one.
+
+## Comment commands
+
+People with write access can comment on a ticket (or on its agent PR):
+
+| Command | What happens |
+|---|---|
+| `/night-shift take` | You take the ticket: assigned to you, labelled `human`, agents skip it. An agent PR already open for it still merges when green; close it if you don't want that. |
+| `/night-shift retry` | Back in the queue with fresh attempts: `blocked`, `needs-human`, `human` and `frozen` are removed, `night-safe` added, a closed issue is reopened and a `take` is undone. Hints in your comment reach the next agent through the discussion section. |
+
+Both accept `#n` to name another ticket. `gh nightshift take N` and `gh nightshift retry N` do the same from
+the terminal. They run in the generated `night-shift-commands.yml` with the PAT (or the App).
+
+## GitHub App (instead of a PAT)
+
+A GitHub App gives the night shift its own `<app>[bot]` identity and tokens that expire after an hour.
+
+1. `gh nightshift app manifest` prints the App to create: Contents, Issues and Pull requests read/write,
+   Actions read, no Workflows, no webhook. Create it, install it on this repository only, and generate a
+   private key.
+2. `gh nightshift init --app-id <id> --app-key-file key.pem` (or add `auth: {mode: app, app_id: <id>}` to the
+   config, run `init --regenerate` and `gh secret set NIGHT_SHIFT_APP_KEY < key.pem`).
+3. `gh nightshift app check --key-file key.pem` mints a token locally and prints its login and permissions
+   (never the token). Put the login in `bot_login`.
+
+The callers then pass `app_private_key` instead of `agent_pat`, so each lane still receives exactly two
+secrets. Each PAT job (pick, publish, planner create, commands, digest) mints an installation token for this
+repository only, down-scoped to exactly those permissions; the agent job never sees the key or the token.
+Per-lane PATs (`agent_pat_secret`) are not used in App mode.
 
 ## Costs
 

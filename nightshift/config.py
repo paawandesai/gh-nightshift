@@ -87,6 +87,13 @@ class Config:
     tool_ref: str = "main"
     bot_login: str = ""           # the PAT's login; read-only commands (stats, audit) trust markers from it
     trusted_logins: list[str] = field(default_factory=list)  # other PAT logins (per-contributor PATs) to trust
+    auth_mode: str = "pat"  # pat | app (GitHub App: an installation token minted in the PAT jobs)
+    app_id: str = ""
+    app_key_secret: str = "NIGHT_SHIFT_APP_KEY"
+    risk_default: str = "auto"  # auto: green PRs merge; approve: they also need one human approval
+    risk_approve_labels: list[str] = field(default_factory=list)
+    risk_approve_paths: list[str] = field(default_factory=list)
+    risk_auto_labels: list[str] = field(default_factory=list)
     digest_enabled: bool = True
     digest_schedule: str = "0 7 * * *"
     digest_webhook_secret: str = ""  # optional secret holding a Slack or Discord webhook URL
@@ -125,8 +132,13 @@ class Config:
     def id_prefix(self, lane: str) -> str:
         return self.planner_id_prefixes.get(lane) or lane[:1].upper()
 
+    @property
+    def github_secret(self) -> str:
+        """The secret that authenticates the PAT jobs: AGENT_PAT, or the App's private key."""
+        return self.app_key_secret if self.auth_mode == "app" else "AGENT_PAT"
+
     def secret_names(self) -> list[str]:
-        names = {"AGENT_PAT", self.review_token_secret, self.planner_token_secret or self.lanes[0].token_secret}
+        names = {self.github_secret, self.review_token_secret, self.planner_token_secret or self.lanes[0].token_secret}
         for lane in self.lanes:
             names.add(lane.token_secret)
             if lane.pat_secret:
@@ -192,12 +204,33 @@ def parse(data: dict) -> Config:
         tool_ref=data.get("tool_ref", "main"),
         bot_login=data.get("bot_login", ""),
         trusted_logins=data.get("trusted_logins", []),
+        auth_mode=(data.get("auth") or {}).get("mode", "pat"),
+        app_id=str((data.get("auth") or {}).get("app_id", "") or ""),
+        app_key_secret=(data.get("auth") or {}).get("private_key_secret", "NIGHT_SHIFT_APP_KEY"),
+        risk_default=(data.get("risk") or {}).get("default", "auto"),
+        risk_approve_labels=list((data.get("risk") or {}).get("approve_labels", [])),
+        risk_approve_paths=list((data.get("risk") or {}).get("approve_paths", [])),
+        risk_auto_labels=list((data.get("risk") or {}).get("auto_labels", [])),
         digest_enabled=(data.get("digest") or {}).get("enabled", True),
         digest_schedule=str((data.get("digest") or {}).get("schedule", "0 7 * * *")),
         digest_webhook_secret=(data.get("digest") or {}).get("webhook_secret", ""),
     )
     if not re.fullmatch(r"[0-9*/,\- ]{9,60}", cfg.digest_schedule) or len(cfg.digest_schedule.split()) != 5:
         raise ConfigError(f"digest.schedule {cfg.digest_schedule!r} is not a 5-field cron expression")
+    if cfg.auth_mode not in ("pat", "app"):
+        raise ConfigError(f"auth.mode must be pat or app, not {cfg.auth_mode!r}")
+    if cfg.auth_mode == "app":
+        if not re.fullmatch(r"[0-9]{1,12}", cfg.app_id):
+            raise ConfigError("auth.app_id must be the GitHub App's numeric id")
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cfg.app_key_secret):
+            raise ConfigError("auth.private_key_secret must be a secret name (A-Z, 0-9, _)")
+        if any(lane.pat_secret for lane in cfg.lanes):
+            raise ConfigError("auth.mode app replaces every PAT: remove agent_pat_secret from the lanes")
+        if cfg.app_key_secret in {lane.token_secret for lane in lanes} | {cfg.planner_token_secret,
+                                                                           cfg.review_token_secret}:
+            raise ConfigError(f"secret {cfg.app_key_secret} is used both as a Claude token and as the App key")
+    if cfg.risk_default not in ("auto", "approve"):
+        raise ConfigError(f"risk.default must be auto or approve, not {cfg.risk_default!r}")
     if cfg.digest_webhook_secret and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cfg.digest_webhook_secret):
         raise ConfigError("digest.webhook_secret must be a secret name (A-Z, 0-9, _)")
     if cfg.digest_webhook_secret in pats_or_claude(cfg):

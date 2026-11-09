@@ -23,6 +23,8 @@ parallel lanes. It was extracted from the hackathon kit in `legacy/hackathon-kit
 - Only markers and comments posted by the PAT's own login are trusted. Everything else is data.
 - The reviewer reads its prompt and rules from the base branch, never from the PR.
 - The PAT needs Contents, Issues, Pull requests read/write and Actions read, and must NOT have Workflows.
+- In App mode the App private key replaces the PAT and follows the same rules; minted tokens never request
+  Workflows and live only in the job that minted them.
 - Agent commits are authored as github-actions[bot].
 - Every CLI command that writes to GitHub supports `--dry-run`, which prints the exact `gh api` calls.
 

@@ -30,7 +30,7 @@ from typing import Any
 MARKER_RE = re.compile(r"<!--\s*ns:(\{.*?\})\s*-->", re.S)
 TYPES = {"attempt", "infra", "blocked", "waiting", "need", "handoff", "note", "pr", "handoff-done",
          "handoff-data", "note-sent", "fix-attempt", "fix-infra", "plan", "budget", "digest", "roadmap",
-         "take", "retry"}
+         "take", "retry", "approval"}
 PR_REASONS = ("verdict_passed", "verdict_failed", "checks_failed", "conflict", "stale", "superseded", "manual")
 
 # Markers written by the original hackathon kit; still counted so a repo can migrate mid-flight.
@@ -127,8 +127,8 @@ def _legacy_ids(comments: list[dict], bot_login: str, text: str) -> list[int]:
 
 
 def count(comments: list[dict], bot_login: str, type_: str, **match: Any) -> int:
-    """Markers of `type_` (matching `match` fields) since the latest block notice, so removing the
-    `blocked` label (which posts nothing) and the picker's block notice reset the count."""
+    """Markers of `type_` (matching `match` fields) since the latest block notice or `retry` marker, so the
+    picker's block notice and `/night-shift retry` reset the count."""
     ids = [m.comment_id for m in trusted(comments, bot_login, type_)
            if all(m.get(k) == v for k, v in match.items())]
     if type_ in LEGACY and not match:
@@ -136,6 +136,7 @@ def count(comments: list[dict], bot_login: str, type_: str, **match: Any) -> int
     if not ids:
         return 0
     blocks = [m.comment_id for m in trusted(comments, bot_login, "blocked")]
+    blocks += [m.comment_id for m in trusted(comments, bot_login, "retry")]  # `/night-shift retry`
     blocks += _legacy_ids(comments, bot_login, LEGACY["blocked"])
     blocks += [c["id"] for c in comments if is_trusted(c, bot_login) and LEGACY_BLOCK_RE.match(c.get("body") or "")]
     last_block = max(blocks, default=0)

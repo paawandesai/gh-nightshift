@@ -92,6 +92,13 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
             elif f"secrets.{lane.token_secret} " not in text:
                 out.append(Check(FAIL, f"lane {lane.name}'s job does not pass secrets.{lane.token_secret}",
                                  "run `gh nightshift init --regenerate`"))
+        if cfg.auth_mode == "app":
+            if f"app_private_key: ${{{{ secrets.{cfg.app_key_secret} }}}}" not in text or "agent_pat:" in code:
+                out.append(Check(FAIL, f"auth.mode is app but {LANE_WORKFLOW} does not pass only the App key",
+                                 "run `gh nightshift init --regenerate`"))
+            else:
+                out.append(Check(OK, f"lanes authenticate as GitHub App {cfg.app_id}; the key reaches only the "
+                                     "pick and publish jobs"))
         if f"@{cfg.tool_ref}" not in text:
             out.append(Check(WARN, f"caller workflow is not pinned to tool_ref {cfg.tool_ref}",
                              "run `gh nightshift init --regenerate`"))

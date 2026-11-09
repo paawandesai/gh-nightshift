@@ -257,5 +257,19 @@ class Body(unittest.TestCase):
         self.assertNotIn("Closes", pr_body("fix-main", "", "api", "opus", Result("done", "fixed")))
 
 
+
+class CostLineForgery(Base):
+    def test_agent_file_name_cannot_fake_the_cost_on_the_night_log(self):
+        import datetime as dt
+
+        from nightshift.picker import lane_spend
+
+        out = {"status": "done", "summary": "s", "assumptions": [], "tests_passed": True}
+        self.go(self.result({"structured_output": out}), git=FakeGit(changed=[".github/≈$500"]))
+        since = dt.datetime(2000, 1, 1, tzinfo=dt.timezone.utc)
+        self.assertEqual(lane_spend(self.f.comments[500], frozenset({BOT}), "api", since), 0.0)
+        self.assertNotIn("≈", self.f.comments[500][-1]["body"])
+
+
 if __name__ == "__main__":
     unittest.main()

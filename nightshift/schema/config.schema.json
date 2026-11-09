@@ -304,6 +304,60 @@
           "description": "secret holding a Slack or Discord webhook URL"
         }
       }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Risk tiers (strict merge mode): which green agent PRs also need one human approval before the picker merges them",
+      "properties": {
+        "default": {
+          "enum": [
+            "auto",
+            "approve"
+          ]
+        },
+        "approve_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "approve_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "auto_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How the PAT jobs authenticate: a PAT (default) or a GitHub App whose installation token is minted per job",
+      "properties": {
+        "mode": {
+          "enum": [
+            "pat",
+            "app"
+          ]
+        },
+        "app_id": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "private_key_secret": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$"
+        }
+      }
     }
   },
   "$defs": {

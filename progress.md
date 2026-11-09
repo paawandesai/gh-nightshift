@@ -21,11 +21,15 @@ per step, then the step is marked blocked.
 
 ## Additions after the first verify (approved by Paawan)
 
-- Batch 1 (a58b54a): built, tests in tests/test_team.py; verify pending.
+- Batch 1 (a58b54a): built, tests in tests/test_team.py; verify 1 FAIL (with batch 2: bot_login not trusted by lanes on their own PAT; examples missing keys); fix round 1 (FixRound1 tests).
   - Per-contributor PATs (trusted_logins, join stores/checks the PAT, doctor checks each PAT).
   - (1) Init fully from flags, presets python/node/go, starter CI.
   - (4) pause/freeze cancel runs in flight.
   - (2) Optional nightly budget per lane, off by default.
-- Batch 2: built, tests in tests/test_team.py (Roadmap, Digest); verify pending.
+- Batch 2 (1006b94): built, tests in tests/test_team.py (Roadmap, Digest); verify 1 FAIL (workflow PAT could not find the roadmap that setup created; titles and agent file names could fake a cost figure; setup not guarded); fix round 1 (FixRound1 tests, CostLineForgery).
   - (3) Morning digest: `digest` command, night-log post with a digest marker, Slack/Discord webhook, reusable digest.yml and generated caller.
   - Roadmap issue: `roadmap` command, created by init/setup, refreshed by planner publish, every merge hand-off and the digest; `plan --show`. Pinning is GraphQL-only: manual.
+- Batch 3 (v0.1 picks): built, tests in tests/test_team.py (Commands, RiskTiers, GitHubApp); verify pending.
+  - `/night-shift take` and `/night-shift retry` comment commands (commands.yml, generated caller, CLI take/retry).
+  - Risk tiers by label and path, default auto or approve; approval-waiting PRs do not hold the lane.
+  - GitHub App auth: manifest, openssl-signed JWT, down-scoped installation token in PAT jobs only, init/doctor/app check with --dry-run. Creating the App itself is manual (Paawan).

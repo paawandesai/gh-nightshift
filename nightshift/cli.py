@@ -71,9 +71,14 @@ class Ctx:
             self._gh = GH(self.repo, transport=self._transport, dry_run=getattr(self.args, "dry_run", False),
                           out=self.out)
             try:
-                self._gh.trusted_extra = set(self.cfg.trusted_logins)
+                self._gh.trusted_extra = {self.cfg.bot_login, *self.cfg.trusted_logins} - {""}
             except ConfigError:
                 pass  # init, before a config exists
+            # App installation tokens cannot call GET /user; the mint step exports the App's bot login.
+            app_login = os.environ.get("NIGHT_SHIFT_LOGIN", "")
+            app_token = os.environ.get("NIGHT_SHIFT_APP_TOKEN", "")
+            if app_login and app_token and os.environ.get("GH_TOKEN") == app_token:
+                self._gh.login = app_login
         return self._gh
 
     @property
@@ -161,11 +166,15 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
     ci = getattr(o, "ci_workflow", None) or q("CI workflow file (its runs on main gate the lanes)", "ci.yml")
     mode = getattr(o, "merge_mode", None) or q("Merge mode: strict (PRs must be up to date) or queue (GitHub merge queue)",
                                                "strict")
-    return {"version": 1, "main_branch": "main", "ci_workflow": ci,
+    auth = {"mode": "app", "app_id": str(o.app_id)} if getattr(o, "app_id", None) else None
+    data = {"version": 1, "main_branch": "main", "ci_workflow": ci,
             "required_checks": ["test", "review / verdict"], "fix_lane": lanes[0]["name"] if lanes else "",
             "merge": {"mode": mode}, "tool_ref": tool_ref, "lanes": lanes,
             "limits": {"max_attempts": 3, "infra_cap": 6, "max_needs_per_issue": 2, "max_notes_per_issue": 2},
             "planner": {"docs": ["docs/PRD.md"], "max_tickets_per_run": 8, "refill_below": 0}}
+    if auth:
+        data["auth"] = auth
+    return data
 
 
 def write_files(ctx: Ctx, files: dict[str, str], overwrite: bool) -> list[str]:
@@ -218,6 +227,8 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
             kwargs["ask"] = lambda prompt: os.environ.get(prompt.split(" ", 1)[0], "")
         if secret_setter:
             kwargs["setter"] = secret_setter
+        if cfg.auth_mode == "app":
+            kwargs["app_key_file"] = getattr(a, "app_key_file", None) or ""
         ctx.say(*repo_setup.prompt_missing_secrets(ctx.gh, cfg, **kwargs))
     ctx.say("", "Next: commit and push the new files to main (your gh token needs the `workflow` scope), then run "
                 "`gh nightshift setup` (branch protection), `gh nightshift doctor`, label a few issues night-safe, "
@@ -462,6 +473,72 @@ def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str) -> int:
     return 0
 
 
+def cmd_command(ctx: Ctx) -> int:
+    """(workflow) Handle a `/night-shift take|retry` comment; author, body and number come from the env."""
+    from . import commands
+
+    a = ctx.args
+    author = a.author or os.environ.get("COMMENT_AUTHOR", "")
+    body = a.body or os.environ.get("COMMENT_BODY", "")
+    number = int(a.issue or os.environ.get("ISSUE_NUMBER", "0") or 0)
+    ctx.say(commands.handle(ctx.gh, ctx.cfg, author, body, number))
+    return 0
+
+
+def cmd_take_retry(ctx: Ctx) -> int:
+    """Local `take N` / `retry N`: the same as commenting the command, as your own gh login."""
+    from . import commands
+
+    a = ctx.args
+    ctx.say(commands.handle(ctx.gh, ctx.cfg, ctx.gh.login, f"/night-shift {a.command} #{a.number}", a.number))
+    return 0
+
+
+def cmd_app_token(ctx: Ctx) -> int:
+    """(workflow) Mint a down-scoped installation token for this repo and expose it to later steps of this job."""
+    from . import app
+
+    try:
+        result = app.mint(ctx.repo, os.environ.get("APP_ID", ""), os.environ.get("APP_PRIVATE_KEY", ""))
+    except app.AppError as err:
+        ctx.say(f"::error::GitHub App token: {err}")
+        return 1
+    app.write_github_env(ctx.args.github_env, result)
+    ctx.say(f"App token minted for {ctx.repo} as {result['login'] or 'the App'} "
+            f"(permissions: {', '.join(f'{k}={v}' for k, v in sorted(result['permissions'].items()))})")
+    return 0
+
+
+def cmd_app(ctx: Ctx, request=None) -> int:
+    """`app manifest`: the App to create. `app check`: mint a token locally and show what it can do (never the token)."""
+    from . import app
+
+    a = ctx.args
+    if a.app_action == "manifest":
+        ctx.say(json.dumps(app.manifest(a.name), indent=2))
+        ctx.say("", "Create it at https://github.com/settings/apps/new (or your org's Settings > Developer settings > "
+                    "GitHub Apps) with exactly these permissions and no webhook. Install it on this repository only, "
+                    "generate a private key, then run `gh nightshift init --app-id <id> --app-key-file <key.pem>` "
+                    "(or set auth: in the config and `gh secret set NIGHT_SHIFT_APP_KEY < key.pem`).")
+        return 0
+    key = Path(a.key_file).read_text(encoding="utf-8") if a.key_file else os.environ.get("APP_PRIVATE_KEY", "")
+    app_id = a.app_id or ctx.cfg.app_id
+    if ctx.gh.dry_run:
+        ctx.say(f"[dry-run] would mint an installation token for {ctx.repo} with App {app_id or '?'} "
+                "(GET /app, GET /repos/{owner}/{repo}/installation, POST /app/installations/{id}/access_tokens)")
+        return 0
+    try:
+        result = app.mint(ctx.repo, app_id, key, **({"request": request} if request else {}))
+    except app.AppError as err:
+        ctx.say(f"FAIL  {err}")
+        return 1
+    ctx.say(f"OK    the App mints a token for {ctx.repo} as {result['login']}",
+            f"OK    permissions: {', '.join(f'{k}={v}' for k, v in sorted(result['permissions'].items()))} (no workflows)")
+    if result["login"] and result["login"] not in {ctx.cfg.bot_login, *ctx.cfg.trusted_logins}:
+        ctx.say(f"WARN  set `bot_login: {result['login']}` in {CONFIG_PATH} so stats and audit trust its markers")
+    return 0
+
+
 def cmd_roadmap(ctx: Ctx) -> int:
     ctx.say(roadmap.update(ctx.gh, ctx.cfg, create=True))
     return 0
@@ -636,6 +713,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--ci-workflow", help="CI workflow file (default ci.yml); with --preset, written if missing")
     s.add_argument("--merge-mode", choices=["strict", "queue"], help="default strict")
     s.add_argument("--budget", type=float, help="optional nightly budget per lane in USD (API-equivalent); off by default")
+    s.add_argument("--app-id", help="use a GitHub App instead of AGENT_PAT (see `gh nightshift app manifest`)")
+    s.add_argument("--app-key-file", help="the App's private key (.pem); stored as the NIGHT_SHIFT_APP_KEY secret")
     s.add_argument("--secrets-from-env", action="store_true",
                    help="read each missing secret from an environment variable of the same name (for CI); no prompts")
     sub.add_parser("setup", parents=[common], help="labels, settings, variables, branch protection, night log")
@@ -658,6 +737,10 @@ def parser() -> argparse.ArgumentParser:
             s.add_argument("--no-cancel", action="store_true", help="let runs already in flight finish")
     sub.add_parser("lint", parents=[common], help="check ready issues against the ticket guide")
     sub.add_parser("roadmap", parents=[common], help="create or refresh the roadmap issue")
+    s = sub.add_parser("take", parents=[common], help="take a ticket yourself: assigned, labelled human, agents skip it")
+    s.add_argument("number", type=int)
+    s = sub.add_parser("retry", parents=[common], help="put a ticket back in the queue with fresh attempts")
+    s.add_argument("number", type=int)
     s = sub.add_parser("digest", parents=[common], help="summarise the last night: merged, stuck, cost")
     s.add_argument("--hours", type=float, default=24)
     s.add_argument("--post", action="store_true", help="post it on the night-log issue (and the webhook)")
@@ -693,6 +776,18 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--label-llm", metavar="CSV", help="optional: let Claude fill llm_label (not ground truth)")
 
     # Used by the reusable workflows.
+    s = sub.add_parser("app", parents=[common], help="GitHub App auth: print the manifest, or check minting")
+    asub = s.add_subparsers(dest="app_action", required=True)
+    m = asub.add_parser("manifest", parents=[sub_common])
+    m.add_argument("--name", default="night-shift")
+    m = asub.add_parser("check", parents=[sub_common])
+    m.add_argument("--app-id", default="")
+    m.add_argument("--key-file", default="", help="private key .pem (default: $APP_PRIVATE_KEY)")
+    s = sub.add_parser("app-token", parents=[common])
+    s.add_argument("--github-env", required=True)
+    s = sub.add_parser("command", parents=[common])
+    for flag in ("--author", "--body", "--issue"):
+        s.add_argument(flag, default="")
     s = sub.add_parser("lane-config", parents=[common])
     s.add_argument("--lane", required=True)
     s.add_argument("--github-output")
@@ -731,6 +826,7 @@ COMMANDS = {
     "init": cmd_init, "setup": cmd_setup, "join": cmd_join, "doctor": cmd_doctor, "status": cmd_status,
     "stats": cmd_stats, "start": cmd_switch, "pause": cmd_switch, "freeze": cmd_switch, "resume": cmd_switch,
     "lint": cmd_lint, "plan": cmd_plan, "roadmap": cmd_roadmap, "digest": cmd_digest,
+    "app": cmd_app, "app-token": cmd_app_token, "take": cmd_take_retry, "retry": cmd_take_retry, "command": cmd_command,
     "audit": cmd_audit, "lane-config": cmd_lane_config,
     "check-pat": cmd_check_pat, "pick": cmd_pick, "task": cmd_task, "publish": cmd_publish, "prompt": cmd_prompt,
     "schema": cmd_schema, "review-inputs": cmd_review_inputs, "review-report": cmd_review_report,

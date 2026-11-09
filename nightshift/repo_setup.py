@@ -7,6 +7,7 @@ import getpass
 import subprocess
 import sys
 import urllib.parse
+from pathlib import Path
 from collections.abc import Callable
 
 from . import scaffold
@@ -120,7 +121,7 @@ def setup(gh: GH, cfg: Config, protection: bool = True) -> list[str]:
     from . import roadmap
 
     return (ensure_labels(gh, cfg) + repo_settings(gh) + ensure_variables(gh, cfg) + prot + ensure_night_log(gh, cfg)
-            + [roadmap.update(gh, cfg, create=True)])
+            + [roadmap.safe_update(gh, cfg, create=True)])
 
 
 # --- secrets --------------------------------------------------------------------------
@@ -167,6 +168,8 @@ SECRET_HINTS = {
 
 
 def secret_hint(cfg: Config, name: str) -> str:
+    if cfg.auth_mode == "app" and name == cfg.app_key_secret:
+        return "the GitHub App's private key (.pem)"
     if name in SECRET_HINTS:
         return SECRET_HINTS[name]
     if name == cfg.review_token_secret:
@@ -181,9 +184,30 @@ def secret_hint(cfg: Config, name: str) -> str:
 
 
 def prompt_missing_secrets(gh: GH, cfg: Config, setter: SecretSetter | None = None,
-                           ask: Callable[[str], str] = getpass.getpass) -> list[str]:
+                           ask: Callable[[str], str] = getpass.getpass, app_key_file: str = "") -> list[str]:
     have = existing_secrets(gh)
-    return [prompt_secret(gh, n, secret_hint(cfg, n), setter, ask) for n in cfg.secret_names() if n not in have]
+    out = []
+    for n in cfg.secret_names():
+        if n in have:
+            continue
+        if cfg.auth_mode == "app" and n == cfg.app_key_secret:
+            out.append(set_app_key(gh, n, app_key_file, setter))  # a multi-line PEM cannot go through a prompt
+        else:
+            out.append(prompt_secret(gh, n, secret_hint(cfg, n), setter, ask))
+    return out
+
+
+def set_app_key(gh: GH, name: str, path: str, setter: SecretSetter | None = None) -> str:
+    if not path:
+        return f"not set {name}: run `gh secret set {name} -R {gh.repo} < key.pem`"
+    if gh.dry_run:
+        print(f"[dry-run] gh secret set {name} -R {gh.repo}   # value read from {path}", file=gh.out)
+        return f"would set {name}"
+    text = Path(path).read_text(encoding="utf-8")
+    if "PRIVATE KEY-----" not in text:
+        return f"not set {name}: {path} is not a PEM private key"
+    (setter or gh_secret_set)(gh.repo, name, text)
+    return f"secret {name} set from {path}"
 
 
 # --- switches -------------------------------------------------------------------------

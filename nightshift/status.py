@@ -96,7 +96,7 @@ def stats(gh: GH, cfg: Config, audit_csv: str | None = None) -> str:
         writers = {"OWNER", "MEMBER", "COLLABORATOR"}
         costs = [float(m.group(1)) for c in gh.comments(log)
                  if (c.get("author_association") in writers or (c.get("user") or {}).get("login") in trusted)
-                 and (m := COST_RE.search(c.get("body") or ""))]
+                 and (m := COST_RE.search((c.get("body") or "").split("\n", 1)[0]))]
     if merged and costs:
         out.append(f"Est. cost per merged PR: ${sum(costs) / len(merged):.2f} API-equivalent "
                    f"(${sum(costs):.2f} over {len(costs)} logged runs)")

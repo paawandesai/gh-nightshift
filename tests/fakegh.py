@@ -52,6 +52,8 @@ class FakeGitHub:
         self.jobs: dict[int, list[dict]] = {}
         self.job_logs: dict[int, str] = {}
         self.calls: list[tuple[str, str, object]] = []
+        self.reviews: dict[int, list[dict]] = {}
+        self.pull_files: dict[int, list[str]] = {}
         self._ids = itertools.count(1000)
 
     # --- building state ----------------------------------------------------------------
@@ -146,6 +148,11 @@ class FakeGitHub:
             (r"issues/comments/(\d+)", ("PATCH", self._edit_comment)),
             (r"issues/(\d+)/labels", ("POST", self._add_labels)),
             (r"issues/(\d+)/labels/(.+)", ("DELETE", self._remove_label)),
+            (r"issues/(\d+)/assignees", ("POST", self._add_assignees)),
+            (r"issues/(\d+)/assignees", ("DELETE", self._remove_assignees)),
+            (r"pulls/(\d+)/reviews", ("GET", lambda q, b, n: self._page(q, self.reviews.get(int(n), [])))),
+            (r"pulls/(\d+)/files", ("GET", lambda q, b, n: self._page(
+                q, [{"filename": f} for f in self.pull_files.get(int(n), [])]))),
             (r"pulls", ("GET", self._list_pulls)),
             (r"pulls", ("POST", self._create_pull)),
             (r"pulls/(\d+)", ("GET", lambda q, b, n: self._pull(int(n)))),
@@ -204,6 +211,16 @@ class FakeGitHub:
         if n in self.pulls:
             return {**copy.deepcopy(self.pulls[n]), "pull_request": {}}
         raise GHError("Not Found (HTTP 404)", 404)
+
+    def _add_assignees(self, q, b, n):
+        cur = self.issues[int(n)]["assignees"]
+        cur += [{"login": a} for a in b.get("assignees", []) if {"login": a} not in cur]
+        return copy.deepcopy(self.issues[int(n)])
+
+    def _remove_assignees(self, q, b, n):
+        drop = set((b or {}).get("assignees", []))
+        self.issues[int(n)]["assignees"] = [a for a in self.issues[int(n)]["assignees"] if a["login"] not in drop]
+        return copy.deepcopy(self.issues[int(n)])
 
     def _patch_issue(self, q, b, n):
         self.issues[int(n)].update(b)

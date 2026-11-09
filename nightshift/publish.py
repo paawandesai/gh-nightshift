@@ -176,7 +176,9 @@ def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
         except Exception:  # unknown timezone name: fall back to UTC rather than fail the publish
             now = dt.datetime.now(dt.timezone.utc)
         cost = f" (≈${res.cost})" if res.cost else ""
-        gh.comment(log, f"{now:%H:%M} `{job.lane}` {what} [{job.model}] → {ns.defang(outcome)}{cost}")
+        # `≈$` marks the cost; agent text (outcome) must not be able to fake one (budget, stats, digest).
+        text = ns.defang(outcome).replace("≈", "~")
+        gh.comment(log, f"{now:%H:%M} `{job.lane}` {what} [{job.model}] → {text}{cost}")
     return ns.defang(outcome)
 
 

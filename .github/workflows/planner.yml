@@ -32,11 +32,18 @@ on:
         type: string
         required: false
         default: main
+      app_id:
+        description: GitHub App id (auth.mode app); empty means the PAT
+        type: string
+        required: false
+        default: ""
     secrets:
       claude_token:
         required: false
       agent_pat:
-        required: true
+        required: false   # one of agent_pat or app_id + app_private_key
+      app_private_key:
+        required: false
 
 permissions:
   contents: read
@@ -137,13 +144,19 @@ jobs:
           ref: ${{ inputs.tool_ref }}
           path: .nightshift-tool
           persist-credentials: false
+      - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        if: inputs.app_id != ''
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           name: plan-draft
           path: ${{ runner.temp }}/plan
       - name: Validate and create issues
         env:
-          GH_TOKEN: ${{ secrets.agent_pat }}
+          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
           LANE: ${{ needs.context.outputs.lane }}
           ISSUE: ${{ needs.context.outputs.issue }}
         run: python3 -m nightshift plan publish "$RUNNER_TEMP/plan/plan.json" --lane "$LANE" --reply-to "$ISSUE"

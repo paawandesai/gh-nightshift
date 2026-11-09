@@ -60,6 +60,11 @@ First release, extracted from the hackathon night-shift kit (`legacy/hackathon-k
 - Optional nightly budget per lane (`budget_usd_per_night`), off by default.
 - Morning digest: `gh nightshift digest`, posted daily to the night log by `night-shift-digest.yml`, with
   an optional Slack or Discord webhook (`digest.webhook_secret`).
+- Comment commands `/night-shift take` and `/night-shift retry` (and `take N` / `retry N` in the CLI).
+- Risk tiers: `risk.approve_labels`, `approve_paths`, `default: approve` with `auto_labels`; such PRs wait
+  for one human approval before the picker merges them.
+- GitHub App auth (`auth.mode: app`, `app manifest`, `app check`, `init --app-id --app-key-file`): a
+  down-scoped installation token minted in the PAT jobs only.
 - Roadmap issue: waves, status per ticket and lane, Blocked-by mermaid graph; created by `init`/`setup`,
   refreshed by the planner, every merge and the digest; `gh nightshift roadmap` and `plan --show`.
 

@@ -45,6 +45,15 @@ makes GitHub send every repository secret to the runner. `gh nightshift doctor` 
 contains `secrets[` or `secrets: inherit`, or if a lane's job does not pass that lane's token. The review
 workflow receives only the review token. The planner workflow receives one Claude token and `AGENT_PAT`.
 The digest workflow receives `AGENT_PAT` and, if configured, the webhook secret; no Claude token and no model.
+The commands workflow receives only `AGENT_PAT`.
+
+**GitHub App mode.** With `auth.mode: app`, every caller passes the App's private key (`NIGHT_SHIFT_APP_KEY`)
+instead of `AGENT_PAT`, so a lane still receives exactly two secrets. Only the jobs that would hold the PAT
+receive the key. Each mints an installation token (`nightshift/app.py`): a JWT signed with `openssl`, then
+`POST /app/installations/{id}/access_tokens` limited to this repository and to Contents, Issues, Pull requests
+write, Actions and Metadata read. Workflows is never requested, and a token that comes back with Workflows,
+Administration, Secrets or Environments is refused. The token is masked in the log and exported only to later
+steps of the same job, so the agent job never holds the key or the token. It expires after an hour.
 
 **The PAT.** It should be a fine-grained token for this repo only, with:
 
@@ -89,6 +98,11 @@ push and the PR come from the PAT's account.
 - **The planner.** `/night-shift plan` runs only when the commenter has write, maintain or admin permission
   (`planner.can_request_plan`). The request is fenced as data in the planning context. The comment body
   reaches the script through an environment variable, never through `${{ }}` interpolation into shell.
+- **Comment commands.** `/night-shift take` and `/night-shift retry` act only for commenters with write,
+  maintain or admin permission (checked over REST) and only on issues with a lane label. The comment reaches
+  the script through an environment variable. `retry` unassigns only people named in trusted `take` markers.
+- **Risk tiers.** An approval counts only from a person with write access who did not open the PR, on the
+  PR's current head commit, and only if that person's latest review is an approval. Bots never count.
 - **What agents may pick.** Only issues with the ready label (`night-safe`) and exactly one lane label are
   picked. Only people with triage or write access can add labels.
 

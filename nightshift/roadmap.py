@@ -36,15 +36,15 @@ def status_of(issue: dict, cfg: Config, open_numbers: set[int]) -> str:
 
 
 def _text(value: str, limit: int = 70) -> str:
-    """One line, no markup that could break the table or forge a marker."""
+    """One line, no markup that could break the table, forge a marker or fake a cost figure."""
     flat = " ".join(str(value).split())[:limit]
-    return ns.defang(flat.replace("|", "/"))
+    return ns.defang(flat.replace("|", "/").replace("≈", "~"))
 
 
 def _mermaid_label(value: str) -> str:
     # Mermaid labels sit in double quotes; entity codes keep quotes and brackets from closing them.
     flat = " ".join(str(value).split())[:40]
-    return re.sub(r'["<>`\[\]{}()|#;]', lambda m: f"#{ord(m.group(0))};", flat)
+    return re.sub(r'["<>`\[\]{}()|#;≈]', lambda m: f"#{ord(m.group(0))};", flat)
 
 
 def tickets(gh: GH, cfg: Config) -> list[dict]:
@@ -103,10 +103,17 @@ def render(cfg: Config, issues: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+WRITERS = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+
 def find(gh: GH) -> dict | None:
-    """The roadmap issue, only if the PAT's login (or a trusted login) opened it: a label alone is not proof."""
+    """The roadmap issue. A label alone is not proof: it must have been opened by a trusted login, or by a repo
+    writer (`setup` runs as the maintainer) with a body that starts with the roadmap marker."""
     for i in gh.issues(labels=[LABEL]):
-        if (i.get("user") or {}).get("login") in gh.trusted:
+        login = (i.get("user") or {}).get("login")
+        if login in gh.trusted:
+            return i
+        if i.get("author_association") in WRITERS and (i.get("body") or "").startswith(ns.marker("roadmap")):
             return i
     return None
 

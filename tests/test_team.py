@@ -442,5 +442,385 @@ class Digest(unittest.TestCase):
                 loads(TEAM + extra)
 
 
+GREEN = [{"name": "test", "status": "completed", "conclusion": "success"},
+         {"name": "review / verdict", "status": "completed", "conclusion": "success"}]
+
+
+class Commands(unittest.TestCase):
+    def setUp(self):
+        self.f = FakeGitHub()
+        self.f.permissions = {"dana": "write", "rita": "read"}
+        self.f.add_issue(7, title="[W1] x", labels=["lane:web", "night-safe", "wave:1"])
+        self.f.add_issue(8, title="bug", labels=["bug"])
+
+    def handle(self, author, body, number=7, dry_run=False):
+        from nightshift import commands
+
+        gh = self.f.gh(dry_run=dry_run, out=io.StringIO())
+        gh.login = BOT
+        return commands.handle(gh, loads(TEAM), author, body, number)
+
+    def test_take_assigns_labels_human_and_agents_skip_it(self):
+        self.assertIn("taken by dana", self.handle("dana", "/night-shift take"))
+        self.assertEqual(self.f.label_names(7) & {"human", "night-safe"}, {"human"})
+        self.assertEqual(self.f.issues[7]["assignees"], [{"login": "dana"}])
+        self.assertEqual(len(ns.trusted(self.f.comments[7], BOT, "take")), 1)
+        self.f.workflow_runs = list(GREEN_MAIN)
+        self.assertEqual(picker(self.f).decide()["issue"], "")
+
+    def test_retry_requeues_with_fresh_attempts_and_undoes_take(self):
+        self.f.workflow_runs = list(GREEN_MAIN)
+        self.handle("dana", "/night-shift take")
+        for _ in range(3):
+            self.f.add_comment(7, ns.marker("attempt", issue=7))
+        self.f.issues[7]["labels"].append({"name": "blocked"})
+        self.assertIn("re-queued by dana", self.handle("dana", "/night-shift retry try the cache"))
+        self.assertIn("night-safe", self.f.label_names(7))
+        self.assertFalse(self.f.label_names(7) & {"human", "blocked"})
+        self.assertEqual(self.f.issues[7]["assignees"], [])
+        self.assertEqual(ns.count(self.f.comments[7], BOT, "attempt"), 0)
+        self.assertEqual(picker(self.f).decide()["issue"], "7")
+
+    def test_retry_on_an_agent_pr_targets_its_issue_and_reopens_it(self):
+        self.f.issues[7]["state"] = "closed"
+        self.f.add_pull(20, branch="agent/web/issue-7", state="closed")
+        self.handle("dana", "/night-shift retry", number=20)
+        self.assertEqual(self.f.issues[7]["state"], "open")
+        self.assertEqual(len(ns.trusted(self.f.comments[7], BOT, "retry")), 1)
+
+    def test_readers_outsiders_and_non_tickets_are_refused(self):
+        self.assertIn("write access", self.handle("rita", "/night-shift take"))
+        self.assertIn("write access", self.handle("mallory", "/night-shift retry"))
+        self.assertIn("write access", self.handle("x/../y", "/night-shift take"))
+        self.assertEqual(self.f.label_names(7), {"lane:web", "night-safe", "wave:1"})
+        self.assertIn("no lane label", self.handle("dana", "/night-shift take", number=8))
+        self.assertIn("not a /night-shift", self.handle("dana", "please /night-shift take"))
+
+    def test_named_issue_and_dry_run(self):
+        out = io.StringIO()
+        from nightshift import commands
+
+        gh = self.f.gh(dry_run=True, out=out)
+        gh.login = BOT
+        commands.handle(gh, loads(TEAM), "dana", "/night-shift take #7", 8)
+        self.assertIn("[dry-run] gh api -X POST repos/o/r/issues/7/assignees --input -", out.getvalue())
+        self.assertEqual(self.f.issues[7]["assignees"], [])
+
+    def test_untrusted_take_marker_does_not_unassign(self):
+        self.f.issues[7]["assignees"] = [{"login": "erin"}]
+        self.f.add_comment(7, ns.marker("take", issue=7, by="erin"), user="mallory")
+        self.handle("dana", "/night-shift retry")
+        self.assertEqual(self.f.issues[7]["assignees"], [{"login": "erin"}])
+
+    def test_commands_caller_passes_only_the_pat_and_uses_env_for_the_body(self):
+        from nightshift import scaffold
+
+        wf = scaffold.commands_workflow(loads(TEAM))
+        self.assertIn("agent_pat: ${{ secrets.AGENT_PAT }}", wf)
+        self.assertNotIn("CLAUDE", wf)
+        self.assertIn("github.event.comment.user.type == 'User'", wf)
+        reusable = (Path(__file__).parent.parent / ".github/workflows/commands.yml").read_text()
+        self.assertNotIn("run: python3 -m nightshift command ${{", reusable)
+        self.assertIn("COMMENT_BODY: ${{ github.event.comment.body }}", reusable)
+
+
+RISK = TEAM + """risk:
+  approve_labels: [risk:high]
+  approve_paths: [migrations/]
+"""
+
+
+class RiskTiers(unittest.TestCase):
+    def setUp(self):
+        self.f = FakeGitHub()
+        self.f.workflow_runs = list(GREEN_MAIN)
+        self.f.permissions = {"dana": "write", "rita": "read"}
+        self.f.add_issue(1, title="[A1] x", labels=["lane:api", "night-safe", "wave:1"])
+        self.f.add_issue(2, title="[A2] y", labels=["lane:api", "night-safe", "wave:1"])
+        self.f.add_pull(10, sha="s1", branch="agent/api/issue-1")
+        self.f.check_runs["s1"] = list(GREEN)
+
+    def decide(self, text=RISK):
+        return picker(self.f, lane="api", text=text).decide()
+
+    def test_low_risk_green_pr_merges_as_before(self):
+        self.f.pull_files[10] = ["api/x.py"]
+        self.decide()
+        self.assertTrue(self.f.pulls[10]["merged_at"])
+
+    def test_sensitive_path_waits_for_approval_without_holding_the_lane(self):
+        self.f.pull_files[10] = ["api/x.py", "migrations/0002.sql"]
+        d = self.decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+        self.assertIn("needs-approval", {x["name"] for x in self.f.pulls[10]["labels"]})
+        self.assertEqual(d["issue"], "2")  # issue 1 is not re-picked; the lane keeps going
+        self.decide()
+        self.assertEqual(len(ns.trusted(self.f.comments[10], BOT, "approval")), 1)  # asked once
+
+    def test_label_on_the_issue_needs_approval(self):
+        self.f.issues[1]["labels"].append({"name": "risk:high"})
+        self.decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+
+    def test_only_a_writer_approving_the_current_head_counts(self):
+        self.f.pull_files[10] = ["migrations/1.sql"]
+        bad = [{"user": {"login": "rita"}, "state": "APPROVED", "commit_id": "s1"},
+               {"user": {"login": BOT}, "state": "APPROVED", "commit_id": "s1"},
+               {"user": {"login": "dana"}, "state": "APPROVED", "commit_id": "old"},
+               {"user": {"login": "x[bot]"}, "state": "APPROVED", "commit_id": "s1"}]
+        self.f.reviews[10] = bad
+        self.decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+        self.f.reviews[10] = [{"user": {"login": "dana"}, "state": "APPROVED", "commit_id": "s1"},
+                              {"user": {"login": "dana"}, "state": "CHANGES_REQUESTED", "commit_id": "s1"}]
+        self.decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])  # latest review wins
+        self.f.reviews[10] = [{"user": {"login": "dana"}, "state": "APPROVED", "commit_id": "s1"}]
+        self.decide()
+        self.assertTrue(self.f.pulls[10]["merged_at"])
+
+    def test_default_approve_with_auto_labels(self):
+        text = TEAM + "risk:\n  default: approve\n  auto_labels: [risk:low]\n"
+        self.f.add_issue(3, title="[A3] z", labels=["lane:api", "night-safe", "wave:1", "risk:low"])
+        self.f.add_pull(11, sha="s2", branch="agent/api/issue-3")
+        self.f.check_runs["s2"] = list(GREEN)
+        self.decide(text)
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+        self.assertTrue(self.f.pulls[11]["merged_at"])
+
+    def test_config_rejects_unknown_default(self):
+        from nightshift.config import ConfigError
+
+        with self.assertRaises(ConfigError):
+            loads(TEAM + "risk:\n  default: yolo\n")
+
+
+class FixRound1(unittest.TestCase):
+    """Verifier findings on batches 1-2."""
+
+    def test_workflow_pat_finds_the_roadmap_the_maintainer_created(self):
+        from nightshift import roadmap
+
+        f = FakeGitHub()
+        f.add_issue(1, title="[A1] x", labels=["lane:api", "wave:1"])
+        admin = f.gh(out=io.StringIO())
+        admin.login = "maintainer"
+        f.login = "maintainer"
+        roadmap.update(admin, loads(TEAM))
+        num = max(f.issues)
+        f.issues[num]["author_association"] = "OWNER"
+        f.login = BOT
+        bot = f.gh(out=io.StringIO())
+        bot.login = BOT
+        f.issues[1]["state"] = "closed"
+        self.assertIn("updated", roadmap.safe_update(bot, loads(TEAM)))
+        self.assertEqual(max(f.issues), num)
+        # A writer's issue without the marker at the start is still not taken over.
+        f.add_issue(50, title="mine", labels=["roadmap"], body="notes", user="erin")
+        f.issues[50]["author_association"] = "COLLABORATOR"
+        roadmap.update(bot, loads(TEAM))
+        self.assertEqual(f.issues[50]["body"], "notes")
+
+    def test_bot_login_is_trusted_by_lanes_on_their_own_pat(self):
+        root = Path(tempfile.mkdtemp())
+        (root / ".night-shift").mkdir()
+        (root / ".night-shift/config.yml").write_text(TEAM.replace("version: 1\n", "version: 1\nbot_login: night-bot\n"))
+        args = cli.parser().parse_args(["status", "--root", str(root), "--repo", "o/r"])
+        ctx = cli.Ctx(args, transport=FakeGitHub(), out=io.StringIO())
+        ctx.gh.login = "bob"
+        self.assertEqual(ctx.gh.trusted, frozenset({"bob", "night-bot", "dana-pat"}))
+
+    def test_titles_and_agent_outcomes_cannot_fake_cost(self):
+        from nightshift import digest, roadmap
+
+        f = FakeGitHub()
+        f.add_issue(500, title="Night-shift log", labels=["night-log"])
+        f.add_issue(9, title="Fix ≈$9999 rounding", labels=["lane:web", "blocked", "wave:1"])
+        gh = f.gh(out=io.StringIO())
+        gh.login = BOT
+        text = digest.build(gh, loads(TEAM))
+        self.assertNotIn("≈", text)
+        self.assertNotIn("≈", roadmap.render(loads(TEAM), roadmap.tickets(gh, loads(TEAM))))
+
+
+APP = TEAM.replace("    agent_pat_secret: AGENT_PAT_WEB\n", "") + "auth:\n  mode: app\n  app_id: 4242\n"
+
+
+class FakeAppAPI:
+    def __init__(self, perms=None, installed=True):
+        self.calls = []
+        self.perms = perms or {"contents": "write", "issues": "write", "pull_requests": "write",
+                               "actions": "read", "metadata": "read"}
+        self.installed = installed
+
+    def __call__(self, method, path, token, body=None):
+        self.calls.append((method, path, body))
+        assert token.count(".") == 2
+        if path == "/app":
+            return {"slug": "night-shift-o"}
+        if path.endswith("/installation"):
+            return {"id": 77} if self.installed else {}
+        return {"token": "ghs_secret", "permissions": self.perms, "expires_at": "2026-01-01T01:00:00Z"}
+
+
+def fake_sign(message, key):
+    return b"sig"
+
+
+class GitHubApp(unittest.TestCase):
+    def test_jwt_claims(self):
+        import base64
+
+        from nightshift import app
+
+        token = app.jwt("4242", "KEY", now=1_000_000, sign=fake_sign)
+        header, payload, sig = token.split(".")
+        pad = lambda x: x + "=" * (-len(x) % 4)  # noqa: E731
+        self.assertEqual(json.loads(base64.urlsafe_b64decode(pad(header))), {"alg": "RS256", "typ": "JWT"})
+        self.assertEqual(json.loads(base64.urlsafe_b64decode(pad(payload))),
+                         {"iat": 999_940, "exp": 1_000_540, "iss": "4242"})
+
+    def test_openssl_signature_verifies(self):
+        import shutil
+        import subprocess
+
+        from nightshift import app
+
+        if not shutil.which("openssl"):
+            self.skipTest("no openssl")
+        d = Path(tempfile.mkdtemp())
+        subprocess.run(["openssl", "genrsa", "-out", str(d / "k.pem"), "2048"], capture_output=True, check=True)
+        subprocess.run(["openssl", "rsa", "-in", str(d / "k.pem"), "-pubout", "-out", str(d / "p.pem")],
+                       capture_output=True, check=True)
+        token = app.jwt("1", (d / "k.pem").read_text())
+        import base64
+
+        head, payload, sig = token.split(".")
+        (d / "sig").write_bytes(base64.urlsafe_b64decode(sig + "=" * (-len(sig) % 4)))
+        r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", str(d / "p.pem"), "-signature", str(d / "sig")],
+                           input=f"{head}.{payload}".encode(), capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_mint_downscopes_to_this_repo_and_never_workflows(self):
+        from nightshift import app
+
+        api = FakeAppAPI()
+        result = app.mint("o/r", "4242", "KEY", request=api, sign=fake_sign)
+        self.assertEqual(result["login"], "night-shift-o[bot]")
+        post = api.calls[-1]
+        self.assertEqual(post[1], "/app/installations/77/access_tokens")
+        self.assertEqual(post[2]["repositories"], ["r"])
+        self.assertNotIn("workflows", post[2]["permissions"])
+        with self.assertRaises(app.AppError):
+            app.mint("o/r", "4242", "KEY", request=FakeAppAPI(perms={"workflows": "write"}), sign=fake_sign)
+        with self.assertRaises(app.AppError):
+            app.mint("o/r", "4242", "KEY", request=FakeAppAPI(installed=False), sign=fake_sign)
+        with self.assertRaises(app.AppError):
+            app.mint("o/r", "", "KEY", request=api, sign=fake_sign)
+
+    def test_github_env_masks_the_token(self):
+        from contextlib import redirect_stdout
+
+        from nightshift import app
+
+        env = Path(tempfile.mkdtemp()) / "env"
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            app.write_github_env(str(env), {"token": "ghs_secret", "login": "x[bot]"})
+        self.assertEqual(buf.getvalue(), "::add-mask::ghs_secret\n")
+        self.assertEqual(env.read_text(), "NIGHT_SHIFT_APP_TOKEN=ghs_secret\nNIGHT_SHIFT_LOGIN=x[bot]\n")
+
+    def test_app_mode_callers_pass_exactly_two_secrets_per_lane_and_no_pat(self):
+        import re
+
+        from nightshift import scaffold
+
+        cfg = loads(APP)
+        lane_wf = scaffold.lane_workflow(cfg)
+        self.assertNotIn("AGENT_PAT", lane_wf)
+        for job in re.split(r"\n  lane-", lane_wf)[1:]:
+            secrets = re.findall(r"\$\{\{ secrets\.([A-Z0-9_]+) \}\}", job)
+            self.assertEqual(len(secrets), 2, job)
+            self.assertIn("NIGHT_SHIFT_APP_KEY", secrets)
+        self.assertIn("app_id: '4242'", lane_wf)
+        for wf in (scaffold.planner_workflow(cfg), scaffold.commands_workflow(cfg), scaffold.digest_workflow(cfg)):
+            self.assertNotIn("AGENT_PAT", wf)
+            self.assertIn("app_private_key: ${{ secrets.NIGHT_SHIFT_APP_KEY }}", wf)
+        self.assertIn("NIGHT_SHIFT_APP_KEY", cfg.secret_names())
+        self.assertNotIn("AGENT_PAT", cfg.secret_names())
+
+    def test_reusable_workflows_mint_only_in_pat_jobs(self):
+        import re
+
+        lane = (Path(__file__).parent.parent / ".github/workflows/lane.yml").read_text()
+        jobs = re.split(r"\n  (pick|agent|publish):\n", lane)
+        body = dict(zip(jobs[1::2], jobs[2::2]))
+        self.assertIn("app-token", body["pick"])
+        self.assertIn("app-token", body["publish"])
+        self.assertNotIn("app_private_key", body["agent"])
+        self.assertNotIn("NIGHT_SHIFT_APP_TOKEN", body["agent"])
+        self.assertNotIn("agent_pat", body["agent"])
+
+    def test_config_validation(self):
+        from nightshift.config import ConfigError
+
+        sso = TEAM.replace("version: 1", "version: 1\nauth:\n  mode: sso")
+        for text in (APP.replace("app_id: 4242", "app_id: abc"), TEAM + "auth:\n  mode: app\n  app_id: 1\n",
+                     APP + "  private_key_secret: CLAUDE_TOKEN_API\n", sso):
+            with self.subTest(text=text[-60:]), self.assertRaises(ConfigError):
+                loads(text)
+
+    def test_app_token_command_and_login_from_env(self):
+        from unittest import mock
+
+        from nightshift import app
+
+        root = Path(tempfile.mkdtemp())
+        (root / ".night-shift").mkdir()
+        (root / ".night-shift/config.yml").write_text(APP)
+        env_file = root / "github_env"
+        with mock.patch.object(app, "http", FakeAppAPI()), mock.patch.object(app, "openssl_sign", fake_sign), \
+                mock.patch.dict(os.environ, {"APP_ID": "4242", "APP_PRIVATE_KEY": "KEY"}):
+            out = io.StringIO()
+            rc = cli.main(["app-token", "--root", str(root), "--repo", "o/r", "--github-env", str(env_file)], out=out)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ghs_secret", out.getvalue())
+        self.assertIn("NIGHT_SHIFT_APP_TOKEN=ghs_secret", env_file.read_text())
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "ghs_secret", "NIGHT_SHIFT_APP_TOKEN": "ghs_secret",
+                                          "NIGHT_SHIFT_LOGIN": "night-shift-o[bot]"}):
+            args = cli.parser().parse_args(["status", "--root", str(root), "--repo", "o/r"])
+            ctx = cli.Ctx(args, transport=FakeGitHub(), out=io.StringIO())
+            self.assertEqual(ctx.gh.login, "night-shift-o[bot]")
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "other", "NIGHT_SHIFT_APP_TOKEN": "ghs_secret",
+                                          "NIGHT_SHIFT_LOGIN": "spoof[bot]"}):
+            ctx = cli.Ctx(args, transport=FakeGitHub(), out=io.StringIO())
+            self.assertEqual(ctx.gh.login, BOT)
+
+    def test_init_with_app_flags_dry_run(self):
+        root = Path(tempfile.mkdtemp())
+        key = root / "k.pem"
+        key.write_text("-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----\n")
+        f = FakeGitHub()
+        out = io.StringIO()
+        rc = cli.main(["init", "--root", str(root), "--repo", "o/r", "--yes", "--lanes", "api", "--app-id", "4242",
+                       "--app-key-file", str(key), "--dry-run"], transport=f, out=out)
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("[dry-run] gh secret set NIGHT_SHIFT_APP_KEY -R o/r   # value read from", text)
+        self.assertNotIn("BEGIN RSA", text)
+        self.assertNotIn("gh secret set AGENT_PAT", text)
+        data = cli.build_config(root, None, "api", True, io.StringIO(), "main",
+                                cli.parser().parse_args(["init", "--app-id", "4242"]))
+        self.assertEqual(data["auth"], {"mode": "app", "app_id": "4242"})
+
+    def test_manifest_has_minimum_permissions(self):
+        from nightshift import app
+
+        m = app.manifest()
+        self.assertNotIn("workflows", m["default_permissions"])
+        self.assertEqual(m["default_permissions"]["actions"], "read")
+        self.assertFalse(m["hook_attributes"]["active"])
+
+
 if __name__ == "__main__":
     unittest.main()
