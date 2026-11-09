@@ -153,6 +153,26 @@ class GH:
     def issue(self, number: int) -> dict | None:
         return self.get_or_none(self.r(f"issues/{number}"))
 
+    # Events whose runs test a PR's own head commit. Runs started by workflow_run, issue_comment, schedule or
+    # workflow_dispatch (the night shift itself) are not the PR's CI.
+    CI_EVENTS = frozenset({"pull_request", "pull_request_target", "push", "merge_group"})
+
+    def check_runs(self, sha: str) -> list[dict]:
+        """The check runs on a commit. Fine-grained PATs cannot be given the Checks permission (only GitHub Apps
+        can), so on 403 this rebuilds the same list from Actions (Actions: Read): the jobs of every workflow run
+        on that commit, which carry the same names, status and conclusion as their check runs. Checks posted by
+        other apps are not visible that way; commit statuses still are."""
+        try:
+            return self.paginate(self.r(f"commits/{sha}/check-runs"), key="check_runs")
+        except GHError as err:
+            if err.status != 403:
+                raise
+        jobs: list[dict] = []
+        for run in self.paginate(self.r("actions/runs"), {"head_sha": sha}, key="workflow_runs"):
+            if run.get("event") in self.CI_EVENTS:
+                jobs += self.paginate(self.r(f"actions/runs/{run['id']}/jobs"), key="jobs")
+        return jobs
+
     def comments(self, number: int) -> list[dict]:
         return self.paginate(self.r(f"issues/{number}/comments"))
 

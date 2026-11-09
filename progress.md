@@ -43,6 +43,7 @@ per step, then the step is marked blocked.
 ## Live rehearsal fixes (2026-11-09, paawandesai/ns-sandbox)
 
 - e8894b3: `check-pat` probes every endpoint a lane reads and names the missing PAT permission (pick had died on a bare 404).
-- Next commit: the PAT and the App also need Checks: Read and Commit statuses: Read (pick got 403 on a PR's check runs);
+- 64bd195 + next: pick got 403 on a PR's check runs. Fine-grained PATs have no Checks permission, so `GH.check_runs`
+  falls back to the Actions jobs of the commit's runs; the PAT also needs Commit statuses: Read;
   the review gate authenticates its base fetch on private repos (exit 128 before) and labels `review-error` when it
   breaks before the reviewer answers, so the attempt is refunded.

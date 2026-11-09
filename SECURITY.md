@@ -61,7 +61,9 @@ steps of the same job, so the agent job never holds the key or the token. It exp
 - Issues: read/write
 - Pull requests: read/write
 - Actions: read (the picker reads CI runs on main)
-- Checks: read and Commit statuses: read (the picker reads a PR's check runs and statuses before merging)
+- Commit statuses: read (the picker reads a PR's statuses before merging). Fine-grained PATs cannot be given Checks,
+  so with a PAT the picker reads a PR's CI from its Actions jobs instead; in App mode the App also gets Checks: read
+  and sees checks posted by other apps too.
 - **Workflows: no access.** Without it, GitHub refuses any push that changes `.github/workflows/`, a second
   wall behind the protected-path check.
 

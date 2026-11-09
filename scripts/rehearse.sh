@@ -349,7 +349,7 @@ step_b() {
   step "b. gh nightshift init --lanes api,web --yes"
   say "init writes the files and sets labels, settings, variables, the night-log issue and the secrets; after the"
   say "push, \`setup\` adds branch protection. You will be prompted (hidden input) for each missing secret:"
-  say "  AGENT_PAT            fine-grained PAT: Contents, Issues, Pull requests read/write; Actions, Checks, Commit statuses read; NO Workflows"
+  say "  AGENT_PAT            fine-grained PAT: Contents, Issues, Pull requests read/write; Actions, Commit statuses read; NO Workflows"
   say "  CLAUDE_TOKEN_API     \`claude setup-token\` of the api lane owner"
   say "  CLAUDE_TOKEN_WEB     \`claude setup-token\` of the web lane owner"
   say "  CLAUDE_TOKEN_REVIEW  \`claude setup-token\` for the review gate"

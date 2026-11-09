@@ -54,7 +54,7 @@ Python 3.10 or newer, and a CI workflow whose test job is called `test`. If it h
 
    | Secret | What it is |
    |---|---|
-   | `AGENT_PAT` | A fine-grained PAT for this repo only, owned by the account the night shift acts as. Permissions: Contents, Issues and Pull requests read/write; Actions, Checks and Commit statuses read. **No Workflows permission.** |
+   | `AGENT_PAT` | A fine-grained PAT for this repo only, owned by the account the night shift acts as. Permissions: Contents, Issues and Pull requests read/write; Actions and Commit statuses read. **No Workflows permission.** |
    | `CLAUDE_TOKEN_<OWNER>` | One per lane owner, from `claude setup-token`. The secret name is `lanes[].claude_token_secret`. |
    | `CLAUDE_TOKEN_REVIEW` | For the review gate, ideally from someone who does not own a lane (`review_token_secret`). |
 

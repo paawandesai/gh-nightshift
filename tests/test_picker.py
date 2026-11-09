@@ -246,6 +246,31 @@ class Ported(unittest.TestCase):
         self.assertIn("merged PR #10", result["reason"])
         self.assertTrue(self.f.pulls[10]["merged_at"])
 
+    def pat_without_checks(self, jobs_by_run: dict[int, tuple[str, list[dict]]]):
+        # Seen live: fine-grained PATs have no Checks permission, so check-runs answers 403.
+        self.f.forbidden.add(r"commits/[^/]+/check-runs")
+        for run_id, (event, jobs) in jobs_by_run.items():
+            self.f.workflow_runs.append({"id": run_id, "event": event, "head_sha": "s1", "status": "completed"})
+            self.f.jobs[run_id] = jobs
+
+    def test_green_pr_merges_from_actions_jobs_when_checks_are_forbidden(self):
+        ready(self.f, 1), ready(self.f, 2)
+        self.f.add_pull(10, sha="s1")
+        self.pat_without_checks({501: ("pull_request", list(GREEN)),
+                                 # the night shift's own runs are not the PR's CI, even when they failed
+                                 502: ("workflow_run", [{"name": "lane-api / pick", "status": "completed",
+                                                         "conclusion": "failure"}])})
+        result = decide(self.f)
+        self.assertIn("merged PR #10", result["reason"])
+
+    def test_failed_review_job_closes_as_verdict_failed_when_checks_are_forbidden(self):
+        ready(self.f, 1)
+        self.f.add_pull(10, sha="s1")
+        self.pat_without_checks({501: ("pull_request", list(FAILED_VERDICT))})
+        decide(self.f)
+        self.assertEqual(self.f.pulls[10]["state"], "closed")
+        self.assertEqual(ns.pr_reason(self.f.comments[10], BOT), "verdict_failed")
+
     def test_unblocking_gives_fresh_attempts(self):
         ready(self.f, 1)
         for _ in range(3):

@@ -285,7 +285,7 @@ def cmd_join(ctx: Ctx, secret_ask=None, secret_setter=None, run=subprocess.run) 
         return None
 
     ctx.say(f"Lane {lane.name}: create a fine-grained PAT for {ctx.repo} only (Contents, Issues, Pull requests "
-            "read/write; Actions, Checks, Commit statuses read; no Workflows) and paste it.")
+            "read/write; Actions, Commit statuses read; no Workflows) and paste it.")
     ctx.say(repo_setup.prompt_secret(ctx.gh, lane.pat_secret, repo_setup.secret_hint(cfg, lane.pat_secret),
                                      validate=None if ctx.gh.dry_run else check, **kwargs))
     login = seen.get("login")

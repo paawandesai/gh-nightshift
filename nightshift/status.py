@@ -43,7 +43,7 @@ def status(gh: GH, cfg: Config, enabled: bool = True, log_lines: int = 10) -> st
     out.append(f"Open agent PRs: {len(prs)}")
     for p in prs:
         sha = p["head"]["sha"]
-        runs = gh.paginate(gh.r(f"commits/{sha}/check-runs"), key="check_runs")
+        runs = gh.check_runs(sha)
         statuses = (gh.get(gh.r(f"commits/{sha}/status")) or {}).get("statuses", [])
         out.append(f"  #{p['number']} {p.get('title', '')} [{checks_state(runs, statuses, cfg.required_checks)}]")
     stuck = [i for i in gh.issues() if label_names(i) & {cfg.label("blocked"), cfg.label("needs_human"), "waiting"}]

@@ -356,7 +356,7 @@ class CheckPatTests(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertIn("✓ PAT authenticates as bot", text)
         self.assertIn("fine-grained PAT", text)
-        self.assertIn("PAT can read the repo, contents, issues, pull requests, Actions, checks and statuses", text)
+        self.assertIn("PAT can read the repo, contents, issues, pull requests, Actions and commit statuses", text)
 
     def check_denied(self, *paths):
         fake = FakeGitHub()
@@ -375,12 +375,16 @@ class CheckPatTests(unittest.TestCase):
         self.assertIn("Pull requests: Read and write", text)
         self.assertNotIn("cannot read Issues", text)
 
-    def test_missing_checks_permission_fails(self):
-        # Seen live: a PAT without Checks: Read made pick die with 403 reading a PR's check runs.
-        rc, text = self.check_denied("commits/main/check-runs")
+    def test_missing_statuses_permission_fails(self):
+        rc, text = self.check_denied("commits/main/status")
         self.assertEqual(rc, 1)
-        self.assertIn("cannot read Checks on o/r", text)
-        self.assertIn("Checks: Read", text)
+        self.assertIn("cannot read Commit statuses on o/r", text)
+        self.assertIn("Commit statuses: Read", text)
+
+    def test_check_runs_are_not_probed(self):
+        # Fine-grained PATs cannot be given Checks; GH.check_runs falls back to Actions jobs, so no FAIL here.
+        rc, text = self.check_denied("commits/main/check-runs")
+        self.assertEqual(rc, 0, text)
 
     def test_repo_not_selected_fails_once(self):
         rc, text = self.check_denied("")

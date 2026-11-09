@@ -262,7 +262,7 @@ class Picker:
                 continue
             detail = self.gh.get(self.gh.r(f"pulls/{num}")) or pr
             conflicted = detail.get("mergeable") is False and detail.get("mergeable_state") == "dirty"
-            runs = self.gh.paginate(self.gh.r(f"commits/{sha}/check-runs"), key="check_runs")
+            runs = self.gh.check_runs(sha)
             statuses = (self.gh.get(self.gh.r(f"commits/{sha}/status")) or {}).get("statuses", [])
             state = checks_state(runs, statuses, self.cfg.required_checks)
             stale = not runs and not statuses and age_minutes(pr.get("created_at"), self.now) > self.cfg.stale_minutes

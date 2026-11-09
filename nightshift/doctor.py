@@ -72,7 +72,6 @@ ACCESS_PROBES = (("", "Metadata", "the PAT's Repository access list"),
                  ("issues?per_page=1", "Issues", "Issues: Read and write"),
                  ("pulls?per_page=1", "Pull requests", "Pull requests: Read and write"),
                  ("actions/runs?per_page=1", "Actions", "Actions: Read"),
-                 ("commits/{main}/check-runs?per_page=1", "Checks", "Checks: Read"),
                  ("commits/{main}/status", "Commit statuses", "Commit statuses: Read"))
 
 
@@ -92,7 +91,7 @@ def access_checks(gh: GH) -> list[Check]:
                               f"edit the PAT: add {gh.repo} under {fix}")]
             out.append(Check(FAIL, f"the PAT cannot read {what} on {gh.repo} (HTTP {err.status})",
                              f"edit the PAT: set {fix}"))
-    return out or [Check(OK, "PAT can read the repo, contents, issues, pull requests, Actions, checks and statuses "
+    return out or [Check(OK, "PAT can read the repo, contents, issues, pull requests, Actions and commit statuses "
                              f"of {gh.repo}")]
 
 

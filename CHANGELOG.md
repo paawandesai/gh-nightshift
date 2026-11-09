@@ -16,8 +16,9 @@ First release, extracted from the hackathon night-shift kit (`legacy/hackathon-k
 - The review gate fetches the base branch with the job token for that one command, so it works on private
   repos (the checkouts keep no credentials).
 - `check-pat` (run at the start of every lane) probes the repo, contents, issues, pull requests, Actions, checks and commit
-  statuses with the PAT and names the missing fine-grained permission, instead of `pick` failing later on a bare 404. The PAT (and the App) now also
-  need Checks: Read and Commit statuses: Read, which the picker uses to read a PR's CI before merging.
+  statuses with the PAT and names the missing fine-grained permission, instead of `pick` failing later on a bare 404. The PAT now also needs
+  Commit statuses: Read. Fine-grained PATs cannot have Checks, so the picker reads a PR's CI from its Actions jobs
+  when the check-runs endpoint answers 403 (App mode keeps Checks: read).
   Every command that writes to GitHub supports `--dry-run`, which prints the exact `gh api` calls.
 - `.night-shift/config.yml`, validated against `nightshift/schema/config.schema.json`, with an annotated
   example in `examples/config.yml`.
