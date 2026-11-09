@@ -490,7 +490,7 @@ def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str) -> int:
         marker = ns.marker("plan", lane=lane or "*", complete=result.coverage_complete,
                            docs_sha=docs_sha(gh, cfg.planner_docs), created=len(result.created) + len(result.human))
         gh.comment(log, marker + "\n" + summary)
-    ctx.say(roadmap.safe_update(gh, cfg))
+    ctx.say(roadmap.safe_update(gh, cfg, extra=result.issues))
     return 0
 
 

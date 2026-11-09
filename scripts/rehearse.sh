@@ -422,9 +422,14 @@ EOF
 A=""; B=""; C=""
 
 lookup_issues() {
-  A="$(issue_by_title api 'Add greet() to the api package' '<A>')"
-  B="$(issue_by_title web 'Render a greeting page from api greet()' '<B>')"
-  C="$(issue_by_title web 'Show the account balance on the web page' '<C>')"
+  # GitHub's issue list (filtered by label) can take a few seconds to show issues that were just created.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    A="$(issue_by_title api 'Add greet() to the api package' '<A>')"
+    B="$(issue_by_title web 'Render a greeting page from api greet()' '<B>')"
+    C="$(issue_by_title web 'Show the account balance on the web page' '<C>')"
+    if [ "$LIVE" = 0 ] || { [ -n "$A" ] && [ -n "$B" ] && [ -n "$C" ]; }; then break; fi
+    sleep 5
+  done
   if [ "$LIVE" = 1 ] && { [ -z "$A" ] || [ -z "$B" ] || [ -z "$C" ]; }; then
     say "could not find the three planned issues (A=$A B=$B C=$C); did step c run?"; exit 1
   fi

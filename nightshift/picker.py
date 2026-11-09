@@ -206,7 +206,9 @@ class Picker:
                         + (", ".join(f"#{n}" for n in posted) or "no waiting issues") + ".")
         from . import roadmap
 
-        roadmap.safe_update(self.gh, self.cfg)
+        # The merge closes the issue a moment later; count it as done now rather than wait for the next refresh.
+        extra = [{**merged, "state": "closed"}] if m and merged.get("number") else []
+        roadmap.safe_update(self.gh, self.cfg, extra=extra)
         return f"PR #{num} handed off to {posted or 'nobody'}"
 
     # --- 3. lane busy ------------------------------------------------------------------

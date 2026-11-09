@@ -236,6 +236,7 @@ class PlanResult:
     coverage_complete: bool = False
     uncovered: list[str] = field(default_factory=list)
     notes: str = ""
+    issues: list[dict] = field(default_factory=list)  # the issues just created (the list API can lag behind)
 
     def lines(self) -> list[str]:
         out = self.created + self.human + self.rejected
@@ -386,6 +387,8 @@ def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tick
             t.title = f"{new_id} {t.title}"
         labels = [f"lane:{t.lane}", f"wave:{t.wave}", cfg.label("human") if human else cfg.ready_label]
         created = gh.create_issue(t.title, render(t, numbers), labels)
+        if isinstance(created, dict) and created.get("number"):
+            result.issues.append(created)
         numbers[t.key] = created.get("number", 0)
         line = f"created #{numbers[t.key]} [{t.lane}] w{t.wave} {t.title}"
         (result.human if human else result.created).append(line + (" (human: touches protected/contract paths)" if human else ""))

@@ -47,11 +47,15 @@ def _mermaid_label(value: str) -> str:
     return re.sub(r'["<>`\[\]{}()|#;≈]', lambda m: f"#{ord(m.group(0))};", flat)
 
 
-def tickets(gh: GH, cfg: Config) -> list[dict]:
+def tickets(gh: GH, cfg: Config, extra: list[dict] | tuple = ()) -> list[dict]:
+    """Lane tickets. `extra` are issues the caller just created or closed: GitHub's issue list can take a few
+    seconds to show them, so they are merged in by number (and win over the listed copy)."""
     lane_names = {lane.name for lane in cfg.lanes}
     skip = {cfg.label("night_log"), LABEL}
-    return [i for i in gh.issues(state="all")
-            if set(lanes_of(i)) & lane_names and not label_names(i) & skip]
+    by_number = {i["number"]: i for i in gh.issues(state="all")}
+    by_number.update({i["number"]: i for i in extra if i.get("number")})
+    return [i for _, i in sorted(by_number.items())
+            if set(lanes_of(i)) & lane_names and not label_names(i) & skip and "pull_request" not in i]
 
 
 def render(cfg: Config, issues: list[dict]) -> str:
@@ -118,8 +122,8 @@ def find(gh: GH) -> dict | None:
     return None
 
 
-def update(gh: GH, cfg: Config, create: bool = True) -> str:
-    body = render(cfg, tickets(gh, cfg))
+def update(gh: GH, cfg: Config, create: bool = True, extra: list[dict] | tuple = ()) -> str:
+    body = render(cfg, tickets(gh, cfg, extra))
     current = find(gh)
     if current is None:
         if not create:
@@ -132,9 +136,9 @@ def update(gh: GH, cfg: Config, create: bool = True) -> str:
     return f"roadmap #{current['number']} updated"
 
 
-def safe_update(gh: GH, cfg: Config, create: bool = False) -> str:
+def safe_update(gh: GH, cfg: Config, create: bool = False, extra: list[dict] | tuple = ()) -> str:
     """Refreshing the roadmap must never break a merge or a plan run."""
     try:
-        return update(gh, cfg, create=create)
+        return update(gh, cfg, create=create, extra=extra)
     except Exception as err:  # noqa: BLE001
         return f"roadmap not updated ({type(err).__name__})"

@@ -1162,6 +1162,31 @@ class Batch4Fixes(CodeOwners):
         self.assertIn("review / verdict", cfg.required_checks)
         self.assertEqual(cfg.planner_human_paths, ["contracts/", "db/"])
 
+    def test_roadmap_counts_issues_the_list_api_does_not_show_yet(self):
+        from nightshift import roadmap
+
+        f = FakeGitHub()
+        gh = f.gh(out=io.StringIO())
+        gh.login = BOT
+        roadmap.update(gh, loads(TEAM))
+        num = max(f.issues)
+        fresh = {"number": 99, "title": "[A9] New", "state": "open", "body": "",
+                 "labels": [{"name": "lane:api"}, {"name": "wave:1"}]}
+        self.assertIn("updated", roadmap.update(gh, loads(TEAM), extra=[fresh]))
+        self.assertIn("[A9] New", f.issues[num]["body"])
+
+    def test_plan_result_keeps_the_created_issues(self):
+        from nightshift import planner
+
+        f = FakeGitHub()
+        gh = f.gh(out=io.StringIO())
+        gh.login = BOT
+        plan = {"tickets": [{"key": "a", "title": "Do a", "lane": "api", "wave": 1, "goal": "g", "do": ["d"],
+                             "acceptance": ["pytest passes"], "files": ["api/x.py"], "interface": "", "blocked_by": []}],
+                "coverage": [{"requirement": "R1", "status": "ticketed", "tickets": ["a"]}]}
+        result = planner.publish_plan(gh, loads(TEAM), json.dumps(plan))
+        self.assertEqual([i["title"] for i in result.issues], ["[A1] Do a"])
+
     def test_hackathon_protects_contracts(self):
         from nightshift import scaffold
 
