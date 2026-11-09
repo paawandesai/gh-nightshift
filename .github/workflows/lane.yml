@@ -207,6 +207,11 @@ jobs:
           OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Build and test caches never belong in an agent PR, even when the repo has no .gitignore for them
+          # (seen live: committed __pycache__/*.pyc failed the review's scope question). Untracked files only.
+          printf '%s\n' '__pycache__/' '*.py[cod]' '.pytest_cache/' '.mypy_cache/' '.ruff_cache/' '.venv/' \
+            'node_modules/' '.DS_Store' > "$RUNNER_TEMP/agent-excludes"
+          git config core.excludesFile "$RUNNER_TEMP/agent-excludes"
           git switch -c "$BRANCH"
           PROMPT="$(sed "s|__TASK_FILE__|$RUNNER_TEMP/task/task.md|g" "$RUNNER_TEMP/task/prompt.md")"
           # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split

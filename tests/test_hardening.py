@@ -57,6 +57,14 @@ class Workflows(unittest.TestCase):
         # A gate that breaks before answering is labelled review-error, so the attempt is refunded.
         self.assertIn("if: failure() && steps.review.outputs.verdict == ''", text)
 
+    def test_agent_job_ignores_build_caches(self):
+        # Seen live: an agent PR committed __pycache__/*.pyc and the review failed it for scope.
+        text = workflow("lane.yml")
+        agent = text[text.index("\n  agent:"):text.index("\n  publish:")]
+        self.assertIn("git config core.excludesFile", agent)
+        self.assertIn("'__pycache__/' '*.py[cod]'", agent)
+        self.assertLess(agent.index("core.excludesFile"), agent.index("claude -p"))
+
     def test_safe_path_only_in_pat_jobs_not_the_agent_job(self):
         text = workflow("lane.yml")
         agent = text[text.index("\n  agent:"):text.index("\n  publish:")]

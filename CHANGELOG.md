@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `init --lane-pats` (with `--owners` and `--bot-login`) pairs every lane with its owner's own PAT and Claude
+  token (`AGENT_PAT_<OWNER>`, `CLAUDE_TOKEN_<OWNER>`) and trusts the owners' logins, so each lane's PRs are
+  opened as its owner.
+
+### Fixed
+
+- Agent runs ignore build and test caches (`__pycache__/`, `*.pyc`, `.pytest_cache/`, `node_modules/`, ...) even
+  when the repo has no `.gitignore` for them, so they never end up in an agent PR.
+
 ## [0.1.0] - 2026-11-09
 
 First release, extracted from the hackathon night-shift kit (`legacy/hackathon-kit/`, see `docs/EXTRACTION.md`).

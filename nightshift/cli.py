@@ -142,6 +142,10 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
                    "")
     co_rules = codeowners.parse(co_text)
     names = [n.strip() for n in q("Lanes (comma-separated)", suggested).split(",") if n.strip()]
+    lane_pats = bool(getattr(o, "lane_pats", False))
+    if lane_pats and getattr(o, "app_id", None):
+        raise ConfigError("--lane-pats and --app-id do not mix: in App mode the App replaces every PAT")
+    owner_logins: list[str] = []
     lanes = []
     for name in names:
         lane_paths = paths.get(name) or paths.get("*") or f"{name}/"
@@ -154,8 +158,10 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
         # CODEOWNERS-aware: the lane's folder owner (a user, not a team) is the suggested lane owner.
         co_users = codeowners.user_owners(codeowners.owners_for(co_rules, lane_paths.split(";")[0].rstrip("/") + "/x"))
         suggested_owner = sorted(co_users)[0] if co_users else name
-        owner = owners.get(name) or q(f"Lane {name}: owner's name (for their Claude token secret)", suggested_owner)
-        owner = owner.upper()
+        who = "owner's GitHub login (their PAT posts this lane's PRs)" if lane_pats else \
+            "owner's name (for their Claude token secret)"
+        login = owners.get(name) or q(f"Lane {name}: {who}", suggested_owner)
+        owner = login.upper()
         lane = {"name": name,
                 "paths": [p.strip() for p in q(f"Lane {name}: folders it owns", lane_paths).replace(";", ",").split(",")
                           if p.strip()],
@@ -167,6 +173,11 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
             lane["setup"] = {"commands": setup + "\n"}
         if test:
             lane["test_command"] = test
+        if lane_pats:
+            # The lane's PRs, comments and markers are posted as its owner, with the owner's own PAT.
+            lane["agent_pat_secret"] = f"AGENT_PAT_{re.sub(r'[^A-Z0-9]', '_', owner)}"
+            if login not in owner_logins:
+                owner_logins.append(login)
         budget = getattr(o, "budget", None)
         if budget:
             lane["budget_usd_per_night"] = float(budget)
@@ -182,6 +193,13 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
             "planner": {"docs": ["docs/PRD.md"], "max_tickets_per_run": 8, "refill_below": 0}}
     if auth:
         data["auth"] = auth
+    if owner_logins:
+        # Every lane posts as its owner, so each owner's markers must be trusted by the other lanes. The planner,
+        # digest and commands still post with the shared AGENT_PAT, so its login must be trusted too.
+        data["trusted_logins"] = owner_logins
+        bot = getattr(o, "bot_login", None) or q("AGENT_PAT owner's GitHub login (the planner posts as it)", "")
+        if bot:
+            data["bot_login"] = bot
     if co_rules:
         data["risk"] = {"codeowners": True}  # agent PRs touching owned files wait for an owner's approval
     return data
@@ -775,7 +793,11 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--tool-ref", help="gh-nightshift ref the workflows use (tag or SHA; default main)")
     s.add_argument("--preset", help="stack preset for setup/test commands: python, node or go; per lane: api=python,web=node")
     s.add_argument("--paths", help="folders per lane, e.g. api=api/,web=web/;shared/ (default <lane>/)")
-    s.add_argument("--owners", help="lane owners, which name the Claude token secrets, e.g. api=alice,web=bob")
+    s.add_argument("--owners", help="lane owners' GitHub logins, which name their secrets, e.g. api=alice,web=bob")
+    s.add_argument("--lane-pats", action="store_true",
+                   help="each lane uses its owner's own PAT (AGENT_PAT_<OWNER>), so its PRs are opened as that owner; "
+                        "the owners become trusted_logins")
+    s.add_argument("--bot-login", help="GitHub login that owns AGENT_PAT (trusted by every lane; asked with --lane-pats)")
     s.add_argument("--ci-workflow", help="CI workflow file (default ci.yml); with --preset, written if missing")
     s.add_argument("--merge-mode", choices=["strict", "queue"], help="default strict")
     s.add_argument("--budget", type=float, help="optional nightly budget per lane in USD (API-equivalent); off by default")
