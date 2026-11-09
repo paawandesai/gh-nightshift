@@ -34,7 +34,8 @@ PR_REASONS = ("verdict_passed", "verdict_failed", "checks_failed", "conflict", "
 
 # Markers written by the original hackathon kit; still counted so a repo can migrate mid-flight.
 LEGACY = {"attempt": "<!-- agent-attempt -->", "infra": "<!-- agent-infra -->", "blocked": "<!-- agent-blocked -->"}
-LEGACY_BLOCK_TEXT = "marking blocked for a human"
+# The kit's block notice, recognised only as the start of a bot comment (agent text is never at the start).
+LEGACY_BLOCK_RE = re.compile(r"\A(?:<!-- agent-blocked -->\s*)?Night shift: [^\n]*marking blocked for a human")
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,7 @@ def defang(value: Any) -> Any:
     if isinstance(value, list):
         return [defang(x) for x in value]
     if isinstance(value, dict):
-        return {k: defang(v) for k, v in value.items()}
+        return {defang(str(k)): defang(v) for k, v in value.items()}
     return value
 
 
@@ -131,7 +132,8 @@ def count(comments: list[dict], bot_login: str, type_: str, **match: Any) -> int
     if not ids:
         return 0
     blocks = [m.comment_id for m in trusted(comments, bot_login, "blocked")]
-    blocks += _legacy_ids(comments, bot_login, LEGACY["blocked"]) + _legacy_ids(comments, bot_login, LEGACY_BLOCK_TEXT)
+    blocks += _legacy_ids(comments, bot_login, LEGACY["blocked"])
+    blocks += [c["id"] for c in comments if is_trusted(c, bot_login) and LEGACY_BLOCK_RE.match(c.get("body") or "")]
     last_block = max(blocks, default=0)
     return sum(1 for i in set(ids) if i > last_block)
 

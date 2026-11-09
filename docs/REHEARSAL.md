@@ -244,7 +244,6 @@ The script then prints `issues: A=#2 (api)  B=#3 (web, Blocked by A)  C=#4 (web,
 ✓ .night-shift/config.yml is valid (2 lanes: api, web)
 ! workflows follow gh-nightshift@main, a moving branch
     fix: pin tool_ref to a release tag or commit SHA in .night-shift/config.yml
-✓ agent commits are authored as github-actions[bot] by the reusable lane workflow
 ✓ gh authenticated as paawandesai
 ! PAT permissions not checked
     fix: re-run with --pat-env VAR (VAR holds the PAT); the lane workflow also checks it on every run
@@ -253,6 +252,8 @@ The script then prints `issues: A=#2 (api)  B=#3 (web, Blocked by A)  C=#4 (web,
 ✓ branch protection is strict (PRs are tested against current main)
 ! AGENTS_ENABLED=false
     fix: `gh nightshift start` when main is green
+
+✓ paawandesai/gh-nightshift@main is reachable
 
 No problems found.
 ```
@@ -283,7 +284,7 @@ Then `gh workflow run night-shift.yml -R OWNER/NAME -f lane=api` (prints
    **Interface as built (functions, endpoints):**
    - api/greeting.py: greet(name: str) -> str
    ...
-   Differences from the ticket: none reported.
+   Differences from the ticket: none reported by the agent (not verified mechanically; compare the two interfaces above).
    ```
 
    The marker's keys are sorted, so it starts `<!-- ns:{"from":` and ends `"type":"handoff"} -->`. It is

@@ -75,8 +75,8 @@ class DoctorBase(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
         if self.strip_header:
-            # Workaround for the doctor bug exposed by test_freshly_generated_workflow_passes_doctor: the generated
-            # header comment mentions `secrets[...]` and `secrets: inherit`, which doctor matches as if it were YAML.
+            # Some tests drop the header comment lines that mention `secrets[...]` / `secrets: inherit`, so their
+            # own fixtures are the only source of those strings (doctor ignores comments; see the regression test).
             wf = self.root / ".github/workflows/night-shift.yml"
             wf.write_text("".join(ln for ln in wf.read_text().splitlines(True)
                                   if not (ln.startswith("#") and ("secrets[" in ln or "secrets: inherit" in ln))))

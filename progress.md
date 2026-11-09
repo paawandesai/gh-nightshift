@@ -10,9 +10,9 @@ per step, then the step is marked blocked.
 - Step 3 (comment protocol, hand-offs, needs, notes, trust): built; verify 1 FAIL (agent text could forge trusted markers); fix round 1 pushed in 0a8ab12; re-verify pending.
   - C hand-off (interface as built vs ticket): verify 1 PASS (differences self-reported; now labelled as such).
   - D (reason codes incl. manual, verdict_passed): verify 1 PASS with caveat (manual inferred only); fix round 1 records manual; re-verify pending.
-- Step 4 (planner workflow, validator, coverage rule, follow-ups): built; verify 1 PARTIAL (path and text injection bypasses); fix round 1 pushed in 0a8ab12; re-verify pending.
+- Step 4 (planner workflow, validator, coverage rule, follow-ups): built; verify 1 PARTIAL (path and text injection bypasses); fix round 1 in 0a8ab12; verify 2 FAIL (inline Blocked-by, request fence, code comments rejected, quoted paths, non-list crash); fix round 2 in 13fb285; verify 3 pending.
   - C (required ## Interface): verify 1 PASS.
-- Step 5 (CLI, every command against a mocked gh): built; 138 CLI tests found 5 bugs, fixed in f2eca14; verify 1 FAIL (PAT in git argv; bot login assumption); fix round 1 pushed in 0a8ab12; re-verify pending.
+- Step 5 (CLI, every command against a mocked gh): built; 138 CLI tests found 5 bugs, fixed in f2eca14; verify 1 FAIL (PAT in git argv; bot login assumption); fix round 1 in 0a8ab12; verify 2 PASS (C1-C7) with one low doctor defect (403 hid the report), fixed in 13fb285.
   - A (doctor flags strict=false with fix): verify 1 PASS.
   - E (stats reasons + catch rate with Wilson CI; audit sample/evidence/mechanical check/CSV/kappa): verify 1 PASS (label-llm folder bug fixed in round 1).
 - Step 6 (kit CI, rehearsal script and doc): CI green on e8943eb (after an actionlint/shellcheck fix); rehearse.sh + REHEARSAL.md built; verify pending.

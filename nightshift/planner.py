@@ -178,12 +178,12 @@ def check_ticket(t: Ticket, cfg: Config, depended_on: bool, existing: dict[int, 
         if not value:
             problems.append(f"missing a {name} section")
     text_fields = (("Goal", [t.goal]), ("Do", t.do), ("Acceptance", t.acceptance), ("Files", t.files),
-                   ("Interface", [t.interface]))
+                   ("Interface", [t.interface]), ("Requirements", t.requirements))
     for name, value in text_fields if model_text else ():
         if any(CONTROL_LINE_RE.search(x) or parse_deps(x) for x in value):
             problems.append(f"{name} contains a heading, HTML comment or Blocked-by/Depends-on line; "
                             "dependencies go in blocked_by only")
-    for item in t.do + t.acceptance + t.files if model_text else []:
+    for item in t.do + t.acceptance + t.files + t.requirements if model_text else []:
         if "\n" in item:
             problems.append("list items must be single lines")
             break

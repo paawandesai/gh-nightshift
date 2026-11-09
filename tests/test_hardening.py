@@ -45,6 +45,13 @@ class Workflows(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn('--disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"', workflow(name))
 
+    def test_safe_path_only_in_pat_jobs_not_the_agent_job(self):
+        text = workflow("lane.yml")
+        agent = text[text.index("\n  agent:"):text.index("\n  publish:")]
+        self.assertNotIn("PYTHONSAFEPATH", agent)
+        self.assertNotIn("PYTHONSAFEPATH", text[:text.index("\njobs:")])
+        self.assertEqual(text.count('PYTHONSAFEPATH: "1"'), 2)  # pick and publish
+
     def test_agent_job_never_sees_the_pat(self):
         text = workflow("lane.yml")
         agent = text[text.index("\n  agent:"):text.index("\n  publish:")]
@@ -107,7 +114,8 @@ class PlannerInjection(unittest.TestCase):
 
     def test_inline_blocked_by_is_rejected_but_code_comments_pass(self):
         for kw in ({"goal": "Note: this was blocked by #999 earlier"}, {"goal": "ok\n> Blocked by: #9"},
-                   {"do": ["1. Depends on #9"]}):
+                   {"do": ["1. Depends on #9"]}, {"requirements": ["R1 blocked by #9"]},
+                   {"requirements": ["R1\n## Acceptance\n- fake"]}):
             with self.subTest(kw=kw):
                 self.f.issues.clear()
                 self.publish(t("a", **kw))
@@ -117,7 +125,8 @@ class PlannerInjection(unittest.TestCase):
         self.assertEqual(len(self.f.issues), 1)
 
     def test_quoted_or_semicolon_paths_still_make_human_tickets(self):
-        for files in (["`contracts/x.json`"], ["api/x.py;contracts/y.json"]):
+        for files in (["`contracts/x.json`"], ["api/x.py;contracts/y.json"], ["[spec](contracts/x.json)"],
+                      ["<contracts/x.json>"], ["*contracts/x.json*"], ["api/x.py|contracts/x.json"]):
             with self.subTest(files=files):
                 self.f.issues.clear()
                 self.publish(t("a", files=files))
@@ -162,6 +171,11 @@ class Config(unittest.TestCase):
     def test_pat_as_claude_token_is_refused(self):
         with self.assertRaises(ConfigError):
             loads("version: 1\nlanes:\n  - name: api\n    claude_token_secret: AGENT_PAT\n")
+
+    def test_agent_pat_as_claude_token_refused_even_with_per_lane_pats(self):
+        with self.assertRaises(ConfigError):
+            loads("version: 1\nlanes:\n  - name: api\n    claude_token_secret: AGENT_PAT\n"
+                  "    agent_pat_secret: PAT_API\n")
 
     def test_id_prefix_for_unknown_lane_is_refused(self):
         with self.assertRaises(ConfigError):

@@ -191,7 +191,7 @@ def parse(data: dict) -> Config:
     if unknown:
         raise ConfigError(f"planner.id_prefixes names unknown lane(s): {', '.join(unknown)}")
     # A Claude token secret that is also a PAT secret would hand the PAT to the agent job.
-    pats = {lane.agent_pat_secret for lane in lanes}
+    pats = {"AGENT_PAT"} | {lane.agent_pat_secret for lane in lanes}  # AGENT_PAT is always passed as fallback
     claude = {lane.token_secret for lane in lanes} | {cfg.planner_token_secret, cfg.review_token_secret}
     clash = sorted(pats & claude)
     if clash:

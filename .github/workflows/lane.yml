@@ -43,14 +43,16 @@ env:
   LANE: ${{ inputs.lane }}
   REPO: ${{ github.repository }}
   MAIN_BRANCH: ${{ inputs.main_branch || github.event.repository.default_branch || 'main' }}
-  PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
-  # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
-  PYTHONSAFEPATH: "1"
 
 jobs:
   pick:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+      # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
+      # Set per PAT job only, so the agent job and your setup/test commands keep normal Python behaviour.
+      PYTHONSAFEPATH: "1"
     outputs:
       mode: ${{ steps.pick.outputs.mode }}
       issue: ${{ steps.pick.outputs.issue }}
@@ -226,6 +228,9 @@ jobs:
     if: always() && needs.pick.result == 'success' && needs.pick.outputs.mode != 'skip'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+      PYTHONSAFEPATH: "1"
     steps:
       - uses: actions/checkout@v4
         with:

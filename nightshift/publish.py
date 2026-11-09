@@ -39,8 +39,8 @@ def _git_env() -> dict[str, str]:
     env = dict(os.environ)
     if env.get("GH_TOKEN"):
         env.update({"GIT_CONFIG_COUNT": "2",
-                    "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
-                    "GIT_CONFIG_KEY_1": "credential.helper",
+                    "GIT_CONFIG_KEY_0": "credential.https://github.com.helper", "GIT_CONFIG_VALUE_0": "",
+                    "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
                     "GIT_CONFIG_VALUE_1": '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f',
                     "GIT_TERMINAL_PROMPT": "0"})
     return env
@@ -90,8 +90,10 @@ def classify(result_path: str | None) -> Result:
     out = data.get("structured_output")
     if isinstance(out, dict) and out.get("status") in {"done", "stuck", "waiting"}:
         out = ns.defang(out)  # everything below is re-posted under the bot's trusted login
-        return Result(out["status"], str(out.get("summary") or ""),
-                      [str(a) for a in out.get("assumptions") or []],
+        assumptions = out.get("assumptions") if isinstance(out.get("assumptions"), list) else []
+        # Convert to text, then defang again: a dict or list rendered as text could carry raw markers in keys.
+        return Result(out["status"], ns.defang(str(out.get("summary") or "")),
+                      [ns.defang(str(a)) for a in assumptions],
                       _dicts(out.get("needs")), _dicts(out.get("notes")), _dicts(out.get("follow_ups")),
                       out.get("handoff") if isinstance(out.get("handoff"), dict) else {}, cost, turns)
     if turns < 2:
@@ -162,7 +164,7 @@ def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
 
     if issue is not None:
         if not outcome.startswith("PR") and res.status != "waiting":
-            gh.comment(int(job.issue), f"Night shift lane `{job.lane}`: **{outcome}**\n\n{res.summary}")
+            gh.comment(int(job.issue), f"Night shift lane `{job.lane}`: **{ns.defang(outcome)}**\n\n{res.summary}")
         gh.remove_label(int(job.issue), cfg.label("in_progress"))
 
     log = gh.night_log(cfg.label("night_log"))
@@ -173,8 +175,8 @@ def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
         except Exception:  # unknown timezone name: fall back to UTC rather than fail the publish
             now = dt.datetime.now(dt.timezone.utc)
         cost = f" (≈${res.cost})" if res.cost else ""
-        gh.comment(log, f"{now:%H:%M} `{job.lane}` {what} [{job.model}] → {outcome}{cost}")
-    return outcome
+        gh.comment(log, f"{now:%H:%M} `{job.lane}` {what} [{job.model}] → {ns.defang(outcome)}{cost}")
+    return ns.defang(outcome)
 
 
 def push_and_open_pr(gh: GH, cfg: Config, job: Job, res: Result, git: GitRunner) -> str:

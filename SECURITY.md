@@ -69,7 +69,7 @@ push and the PR come from the PAT's account.
   under the PAT's login, so it is defanged first (`protocol.defang` turns `<!--` into `&lt;!--`); an agent
   cannot plant a trusted marker. Repo writers can still edit bot comments (see Known gaps).
 - **What the agent reads** (`nightshift/task.py`):
-  1. The issue title and body. If the issue's author has no write access, the body is fenced and labelled
+  1. The issue title and body. If the issue's author is not an owner, member or collaborator of the repo, the body is fenced and labelled
      as a request from an outsider, because they can edit it after a maintainer labels it.
   2. A "Coordination" section with marker-carrying comments from the PAT login, marked trusted.
   3. A "Discussion" section with comments from the repo's owners, members and collaborators, the PAT

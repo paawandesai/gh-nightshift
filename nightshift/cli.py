@@ -163,6 +163,9 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
         cfg = ctx.cfg
         text = cfg_path.read_text(encoding="utf-8")
         ctx.say(f"{CONFIG_PATH} exists; using it (pass --force to start over)")
+        if a.tool_ref and a.tool_ref != cfg.tool_ref:
+            ctx.say(f"note: --tool-ref ignored; the config pins {cfg.tool_ref}. Edit tool_ref in {CONFIG_PATH}, "
+                    "then run `gh nightshift init --regenerate`.")
     else:
         text = scaffold.config_yaml(build_config(ctx.root, ask, a.lanes, a.yes, ctx.out,
                                                  a.tool_ref or "main"))

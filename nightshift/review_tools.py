@@ -27,8 +27,12 @@ def drift_report(git: GitRunner, base_ref: str) -> tuple[str, str, list[str]]:
     merge base: `git diff <merge-base>..<base_ref> --stat` plus the main-side diffs of files the PR touches."""
     mb = git(["merge-base", base_ref, "HEAD"]).strip()
     pr_diff = git(["diff", f"{mb}..HEAD"])
-    pr_files = set(git(["diff", "--name-only", f"{mb}..HEAD"]).split())
-    main_files = set(git(["diff", "--name-only", f"{mb}..{base_ref}"]).split())
+    def names(rng: str) -> set[str]:
+        out = git(["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", "-z", rng])
+        return {p for p in out.replace("\n", "\0").split("\0") if p}
+
+    pr_files = names(f"{mb}..HEAD")
+    main_files = names(f"{mb}..{base_ref}")
     stat = git(["diff", "--stat", f"{mb}..{base_ref}"]).strip()
     overlap = sorted(pr_files & main_files)
     lines = [f"# What changed on main since this PR's base ({mb[:12]})", "",

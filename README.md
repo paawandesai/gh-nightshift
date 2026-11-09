@@ -166,7 +166,7 @@ Repo variables override some settings at run time without a commit: `AGENTS_ENAB
 Every fact that lanes share is a hidden marker inside an ordinary comment:
 
 ```html
-<!-- ns:{"type":"handoff","from":12,"to":15,"pr":40} -->
+<!-- ns:{"from":12,"lane":"api","pr":40,"to":15,"type":"handoff"} -->
 ```
 
 **Trust rule.** A marker counts only if the comment was posted by the PAT's own login, the account the lanes
@@ -252,7 +252,7 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 
 | Command | What it does |
 |---|---|
-| `init` | Write config and workflows, set up labels, settings, variables, branch protection, night log, secrets. `--yes`, `--lanes`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets` |
+| `init` | Write config and workflows, set up labels, settings, variables, night log, secrets (branch protection: run `setup` after pushing). `--yes`, `--lanes`, `--tool-ref`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets`, `--dry-run` |
 | `setup` | Re-apply labels, settings, variables, branch protection and the night log |
 | `join --lane X` | A teammate stores their Claude token for a lane (`--pat` also sets the lane's own PAT) |
 | `doctor` | Read-only checks with a fix for each problem (`--pat-env VAR` checks the PAT) |

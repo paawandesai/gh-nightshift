@@ -116,7 +116,8 @@ def normalize_path(path: str) -> str | None:
 
 def split_paths(entry: str) -> list[str]:
     """`"api/x.py, contracts/y.json"` -> two paths (planner Files entries are free text)."""
-    return [p.strip("`'\"") for p in re.split(r"[,;\s]+", str(entry)) if p.strip("`'\"")]
+    # Every path-like run counts, so markup around a path (`x`, (x), [t](x), <x>, *x*, a|b) cannot hide it.
+    return [t.strip("_") for t in re.findall(r"[\w.\-/\\]+", str(entry)) if t.strip("_")]
 
 
 def path_is_protected(path: str, protected: list[str]) -> bool:
