@@ -263,6 +263,11 @@
       "type": "string",
       "description": "The `name:` of the CI workflow (for workflow_run triggers; default read from the file, else CI)."
     },
+    "bot_login": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9-]+(\\[bot\\])?$",
+      "description": "Login of the account that owns the PAT. stats and audit trust only its markers; default: whoever runs them."
+    },
     "tool_ref": {
       "type": "string",
       "description": "gh-nightshift ref the caller workflows pin (default main; pin a tag or SHA)."

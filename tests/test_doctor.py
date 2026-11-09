@@ -358,5 +358,27 @@ class CheckPatTests(unittest.TestCase):
         self.assertIn("fine-grained PAT", text)
 
 
+
+
+class DoctorToolRepoTests(unittest.TestCase):
+    def checks(self, fake, ref="main"):
+        from nightshift.config import loads
+        from nightshift.doctor import tool_checks
+
+        cfg = loads(f"version: 1\ntool_ref: {ref}\nlanes:\n  - name: api\n    claude_token_secret: CLAUDE_TOKEN_A\n")
+        gh = fake.gh()
+        return [str(c) for c in tool_checks(gh, cfg)]
+
+    def test_reachable(self):
+        self.assertIn("reachable", self.checks(FakeGitHub())[0])
+
+    def test_private_tool_repo_fails(self):
+        f = FakeGitHub()
+        f.tool_repo["private"] = True
+        self.assertIn("is private", self.checks(f)[0])
+
+    def test_missing_ref_fails(self):
+        self.assertIn("does not exist", self.checks(FakeGitHub(), ref="v9.9.9")[0])
+
 if __name__ == "__main__":
     unittest.main()

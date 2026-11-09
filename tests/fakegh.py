@@ -38,6 +38,9 @@ class FakeGitHub:
         self.variables: dict[str, str] = {}
         self.secrets: set[str] = set()
         self.protection: dict | None = None
+        # The public gh-nightshift tool repo and its refs, as `doctor` sees them.
+        self.tool_repo = {"full_name": "paawandesai/gh-nightshift", "private": False}
+        self.tool_refs = {"main", "v0.1.0", "v1.0.0"}
         self.rulesets: list[dict] = []
         self.repo_settings: dict = {"delete_branch_on_merge": True, "allow_squash_merge": True,
                                     "default_branch": "main"}
@@ -109,6 +112,13 @@ class FakeGitHub:
         prefix = f"repos/{self.repo}"
         if p == "user":
             return {"login": self.login}
+        if p.startswith("repos/paawandesai/gh-nightshift") and method == "GET":
+            tail = p[len("repos/paawandesai/gh-nightshift"):]
+            if not tail and self.tool_repo:
+                return self.tool_repo
+            if tail.startswith("/commits/") and tail[len("/commits/"):] in self.tool_refs:
+                return {"sha": "0" * 40}
+            raise GHError(f"not found: {path}", 404)
         if not p.startswith(prefix):
             raise GHError(f"unexpected path {path}", 404)
         rest = p[len(prefix):].lstrip("/")

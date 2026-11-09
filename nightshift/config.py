@@ -83,6 +83,7 @@ class Config:
     review_token_secret: str = "CLAUDE_TOKEN_REVIEW"
     ci_workflow_name: str = ""
     tool_ref: str = "main"
+    bot_login: str = ""           # the PAT's login; read-only commands (stats, audit) trust markers from it
 
     # --- derived -----------------------------------------------------------------------
     @property
@@ -182,9 +183,20 @@ def parse(data: dict) -> Config:
         review_token_secret=data.get("review_token_secret", "CLAUDE_TOKEN_REVIEW"),
         ci_workflow_name=data.get("ci_workflow_name", ""),
         tool_ref=data.get("tool_ref", "main"),
+        bot_login=data.get("bot_login", ""),
     )
     if cfg.fix_lane and cfg.fix_lane not in names:
         raise ConfigError(f"fix_lane {cfg.fix_lane!r} is not a lane")
+    unknown = sorted(set(cfg.planner_id_prefixes) - set(names))
+    if unknown:
+        raise ConfigError(f"planner.id_prefixes names unknown lane(s): {', '.join(unknown)}")
+    # A Claude token secret that is also a PAT secret would hand the PAT to the agent job.
+    pats = {lane.agent_pat_secret for lane in lanes}
+    claude = {lane.token_secret for lane in lanes} | {cfg.planner_token_secret, cfg.review_token_secret}
+    clash = sorted(pats & claude)
+    if clash:
+        raise ConfigError(f"secret(s) {', '.join(clash)} used both as a Claude token and as a PAT: the agent job "
+                          "would receive the PAT")
     return cfg
 
 

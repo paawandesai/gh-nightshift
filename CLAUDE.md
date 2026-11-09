@@ -40,3 +40,4 @@ parallel lanes. It was extracted from the hackathon kit in `legacy/hackathon-kit
 - Never commit `__pycache__/` or `*.pyc` (`.gitignore` covers them; check `git ls-files | grep pycache` before pushing).
 - Strip a leading `./` with `removeprefix("./")`, never `lstrip("./")`, which eats the dot in `.github/`.
 - Never name a unittest method `run`; it overrides `TestCase.run`.
+- Run `ruff check nightshift tests` before every commit, not after: long lines (limit 130) slipped into two commits.

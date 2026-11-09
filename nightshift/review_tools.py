@@ -65,8 +65,10 @@ def write_inputs(gh: GH, git: GitRunner, base_ref: str, head_ref: str, out_dir: 
     return {"issue": issue, "overlap": str(len(overlap))}
 
 
-def render_report(result_path: str) -> tuple[str, str]:
-    """(verdict, comment markdown). verdict is pass, fail or error (the reviewer itself broke)."""
+def render_report(result_path: str, overlap: int = 0) -> tuple[str, str]:
+    """(verdict, comment markdown). verdict is pass, fail or error (the reviewer itself broke).
+    `overlap` is the mechanical count of files both this PR and main changed since the merge base: when it is
+    above 0, a pass needs the reviewer to state that the PR is still correct against current main (add-on B)."""
     try:
         data = json.loads(Path(result_path).read_text(encoding="utf-8"))
         out = data.get("structured_output") or {}
@@ -84,9 +86,16 @@ def render_report(result_path: str) -> tuple[str, str]:
         else:
             mark = "✅" if yes else "❌"
         lines.append(f"- {mark} **{q}**: {a.get('evidence', '')}")
-    if out.get("main_changed_overlap"):
-        lines += ["", f"**Main changed under this PR.** Still correct against current main: "
-                      f"{out.get('still_correct_against_main') or '(not stated)'}"]
+    still = str(out.get("still_correct_against_main") or "").strip()
+    if out.get("main_changed_overlap") or overlap:
+        count = f" ({overlap} overlapping file(s) since the merge base)" if overlap else ""
+        lines += ["", f"**Main changed under this PR.**{count} Still correct against current main: "
+                      f"{still or '(not stated)'}"]
+        if verdict == "pass" and not still:
+            verdict = "fail"
+            lines += ["", "Verdict changed to **fail**: main changed files this PR touches and the reviewer did not "
+                          "confirm the PR is still correct against current main."]
+        lines[0] = f"### Night-shift review: **{verdict}**"
     if out.get("fixes"):
         lines += ["", f"**Fixes needed:** {out['fixes']}"]
     return verdict, "\n".join(lines) + "\n"

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import posixpath
 import re
 
 UNRESOLVED = -1  # a dependency we can't resolve to an issue number counts as unmet
@@ -101,14 +102,40 @@ def age_minutes(created_at: str | None, now: dt.datetime | None = None) -> float
     return (now - created).total_seconds() / 60
 
 
+# Files Claude Code (and similar agents) read as instructions wherever they sit in the tree.
+AGENT_FILES = ("CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/")
+
+
+def normalize_path(path: str) -> str | None:
+    """A repo-relative POSIX path, or None when it escapes the repo (`..`) or is empty."""
+    p = posixpath.normpath(str(path).strip().replace("\\", "/")).lstrip("/")
+    if p in ("", ".") or p == ".." or p.startswith("../"):
+        return None
+    return p
+
+
+def split_paths(entry: str) -> list[str]:
+    """`"api/x.py, contracts/y.json"` -> two paths (planner Files entries are free text)."""
+    return [p for p in re.split(r"[,\s]+", str(entry)) if p]
+
+
 def path_is_protected(path: str, protected: list[str]) -> bool:
+    """`dir/` protects everything under it, `file` protects that exact path; a path that cannot be
+    normalised (e.g. escapes with `..`) counts as protected. Agent instruction files (CLAUDE.md,
+    AGENTS.md, .mcp.json, .claude/) are protected at any depth when they are in the protected list."""
+    norm = normalize_path(path)
+    if norm is None:
+        return True
     for p in protected:
-        p = p.strip()
+        p = p.strip().lstrip("/")
         if not p:
             continue
-        if p.endswith("/") and path.startswith(p):
-            return True
-        if path == p:
+        if p.endswith("/"):
+            if norm.startswith(p) or norm == p.rstrip("/"):
+                return True
+            if p in AGENT_FILES and f"/{p}" in f"/{norm}":
+                return True
+        elif norm == p or (p in AGENT_FILES and norm.endswith("/" + p)):
             return True
     return False
 

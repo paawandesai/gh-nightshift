@@ -161,6 +161,19 @@ class PlumbingTests(CliTestCase):
 
 # --- init -----------------------------------------------------------------------------
 
+class InitToolRef(unittest.TestCase):
+    def test_tool_ref_flag_pins_the_workflows(self):
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        rc = cli.main(["init", "--root", root, "--repo", "o/r", "--lanes", "api", "--yes", "--files-only",
+                       "--tool-ref", "v0.1.0"], transport=FakeGitHub(), out=io.StringIO())
+        self.assertEqual(rc, 0)
+        text = Path(root, ".github/workflows/night-shift.yml").read_text()
+        self.assertIn("lane.yml@v0.1.0", text)
+        self.assertEqual(load(root).tool_ref, "v0.1.0")
+
+
 class InitTests(CliTestCase):
     def test_init_yes_lanes_with_git_remote(self):
         subprocess.run(["git", *GIT_ID, "init", "-q", self.root], check=True)
@@ -186,7 +199,9 @@ class InitTests(CliTestCase):
         self.assertIn("lane:api", fake.labels)
         self.assertIn("night-safe", fake.labels)
         self.assertEqual(fake.variables, {"AGENTS_ENABLED": "false", "FIX_LANE": "api"})
-        self.assertTrue(fake.protection["required_status_checks"]["strict"])
+        # Protection waits for `setup`, so pushing the generated files to main is not refused.
+        self.assertIsNone(fake.protection)
+        self.assertIn("gh nightshift setup", text)
         self.assertTrue(fake.repo_settings["allow_auto_merge"])
         self.assertEqual([i["title"] for i in fake.issues.values()], ["Night-shift log"])
         self.assertIn("night-log issue #1 created", text)

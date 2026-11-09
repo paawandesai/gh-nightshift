@@ -42,6 +42,8 @@ jobs:
       HEAD_REF: ${{ github.head_ref }}
       BASE_REF: ${{ github.base_ref }}
       PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+      # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
+      PYTHONSAFEPATH: "1"
     steps:
       - name: Check out base (trusted)
         uses: actions/checkout@v4
@@ -96,9 +98,11 @@ jobs:
           SCHEMA="$(python3 -m nightshift schema review)"
           # Read-only: in -p runs, any tool not allowed here is denied.
           claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" --max-turns 30 --model "$REVIEW_MODEL" \
-            --add-dir "$WORK" "$PR_DIR" --allowedTools "Read,Grep,Glob" > "$WORK/review.json" 2> "$WORK/review.stderr"
+            --add-dir "$WORK" "$PR_DIR" --allowedTools "Read,Grep,Glob" \
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$WORK/review.json" 2> "$WORK/review.stderr"
           echo "claude exit code: $?"
           python3 -m nightshift review-report --result "$WORK/review.json" --out "$WORK/comment.md" \
+            --overlap "${{ steps.gather.outputs.overlap || 0 }}" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Post review and set verdict

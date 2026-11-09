@@ -64,18 +64,22 @@ def status(gh: GH, cfg: Config, enabled: bool = True, log_lines: int = 10) -> st
 
 
 def stats(gh: GH, cfg: Config, audit_csv: str | None = None) -> str:
+    bot = cfg.bot_login or gh.login
     pulls = [p for p in gh.paginate(gh.r("pulls"), {"state": "all"})
-             if BRANCH_RE.match((p.get("head") or {}).get("ref", "")) or
-             (p.get("head") or {}).get("ref", "").startswith("agent/")]
+             if (BRANCH_RE.match((p.get("head") or {}).get("ref", "")) or
+                 (p.get("head") or {}).get("ref", "").startswith("agent/"))
+             and (p.get("user") or {}).get("login") == bot]
     merged = [p for p in pulls if p.get("merged_at")]
     closed = [p for p in pulls if p.get("state") == "closed" and not p.get("merged_at")]
     open_ = [p for p in pulls if p.get("state") == "open"]
     decided = len(merged) + len(closed)
-    out = [f"Agent PRs: {len(pulls)} ({len(merged)} merged, {len(closed)} closed unmerged, {len(open_)} open)",
+    out = [f"Bot login: {bot}" + ("" if cfg.bot_login else " (you; set bot_login in the config if the PAT is "
+                                                         "another account)"),
+           f"Agent PRs: {len(pulls)} ({len(merged)} merged, {len(closed)} closed unmerged, {len(open_)} open)",
            f"Merge rate: {fmt_rate(len(merged), decided)}"]
     reasons: Counter = Counter()
     for p in closed:
-        reasons[ns.pr_reason(gh.comments(p["number"]), gh.login) or "manual"] += 1
+        reasons[ns.pr_reason(gh.comments(p["number"]), bot) or "manual"] += 1
     if closed:
         out.append("Unmerged by reason (from ns markers; no marker = manual):")
         for reason, n in reasons.most_common():
@@ -89,7 +93,7 @@ def stats(gh: GH, cfg: Config, audit_csv: str | None = None) -> str:
         # Only writers' comments count, so an outsider cannot inflate the cost figure.
         writers = {"OWNER", "MEMBER", "COLLABORATOR"}
         costs = [float(m.group(1)) for c in gh.comments(log)
-                 if (c.get("author_association") in writers or (c.get("user") or {}).get("login") == gh.login)
+                 if (c.get("author_association") in writers or (c.get("user") or {}).get("login") == bot)
                  and (m := COST_RE.search(c.get("body") or ""))]
     if merged and costs:
         out.append(f"Est. cost per merged PR: ${sum(costs) / len(merged):.2f} API-equivalent "

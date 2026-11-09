@@ -66,12 +66,25 @@ def _clean(value: Any) -> Any:
     return value
 
 
+def defang(value: Any) -> Any:
+    """Neutralise HTML comments (and so ns markers) in text an agent or outsider wrote, recursively, before
+    the bot re-posts it under its own trusted login. Without this, an agent could forge trusted markers."""
+    if isinstance(value, str):
+        return value.replace("<!--", "&lt;!--")
+    if isinstance(value, list):
+        return [defang(x) for x in value]
+    if isinstance(value, dict):
+        return {k: defang(v) for k, v in value.items()}
+    return value
+
+
 def author(comment: dict) -> str:
     return (comment.get("user") or {}).get("login", "")
 
 
 def is_trusted(comment: dict, bot_login: str) -> bool:
-    """Trusted means posted by the PAT's own login. Nothing else, not even repo admins."""
+    """Trusted means posted by the PAT's own login. Other people's comments are never trusted, but anyone with
+    write access can edit a bot comment, so trust here is "the bot or a repo writer", never an outsider."""
     return bool(bot_login) and author(comment) == bot_login
 
 
@@ -204,7 +217,7 @@ def add_blocked_by(body: str | None, number: int) -> str:
 def handoff_comment(merged_issue: int, merged_title: str, lane: str, pr: int, to: int,
                     handoff: dict | None, ticket_interface: str) -> str:
     """Posted on every open issue blocked by `merged_issue` once its PR merges (step 3a)."""
-    h = handoff or {}
+    h = defang(handoff or {})
     lines = [marker("handoff", **{"from": merged_issue, "to": to, "pr": pr, "lane": lane}),
              f"**Night shift hand-off:** #{merged_issue} ({_clean(merged_title)}) merged in PR #{pr}"
              f"{f' (lane `{lane}`)' if lane else ''}. This issue no longer waits on it."]
@@ -226,12 +239,13 @@ def handoff_comment(merged_issue: int, merged_title: str, lane: str, pr: int, to
         lines += ["", "**Interface as built:** not reported (the PR carried no hand-off); read the code on main "
                       "before relying on the ticket."]
     if ticket_interface:
-        lines += ["", "**Interface the ticket specified:**", ticket_interface]
+        lines += ["", "**Interface the ticket specified:**", defang(ticket_interface)]
     diff = str(h.get("interface_differences") or "").strip()
     if diff and diff.lower().rstrip(".") not in {"none", "n/a", "no differences"}:
-        lines += ["", f"⚠️ **Differs from the ticket:** {diff}"]
+        lines += ["", f"⚠️ **Differs from the ticket (reported by the agent):** {defang(diff)}"]
     elif h:
-        lines += ["", "Differences from the ticket: none reported."]
+        lines += ["", "Differences from the ticket: none reported by the agent (not verified mechanically; "
+                      "compare the two interfaces above)."]
     return "\n".join(lines)
 
 
@@ -251,4 +265,4 @@ def note_comment(sender: int, to: int, sender_lane: str, text: str) -> str:
 
 
 def _quote(text: str) -> str:
-    return "\n".join("> " + ln for ln in str(text)[:1500].splitlines()) or "> (empty)"
+    return "\n".join("> " + ln for ln in defang(str(text)[:1500]).splitlines()) or "> (empty)"

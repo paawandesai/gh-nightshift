@@ -45,6 +45,8 @@ permissions:
 env:
   REPO: ${{ github.repository }}
   PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+  # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
+  PYTHONSAFEPATH: "1"
 
 jobs:
   context:
@@ -111,8 +113,10 @@ jobs:
           if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::planner Claude token is empty"; exit 1; fi
           P="$RUNNER_TEMP/plan"
           claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
-            --model "$MODEL" --max-turns 60 --add-dir "$P" --allowedTools "Read,Grep,Glob" > "$P/plan.json" 2> "$P/claude.stderr"
-          echo "claude exit code: $?"; tail -n 20 "$P/claude.stderr" || true
+            --model "$MODEL" --max-turns 60 --add-dir "$P" --allowedTools "Read,Grep,Glob" \
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$P/plan.json" 2> "$P/claude.stderr"
+          rc=$?; echo "claude exit code: $rc"; tail -n 20 "$P/claude.stderr" || true
+          exit "$rc"
       - uses: actions/upload-artifact@v4
         with:
           name: plan-draft

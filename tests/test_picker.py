@@ -423,10 +423,35 @@ class HandOffs(unittest.TestCase):
             self.assertIn('"type":"handoff"', text)
             self.assertIn("GET /users -> [{id, name, email}]", text)  # interface as built
             self.assertIn("GET /users -> [{id, name}]", text)         # interface the ticket specified
-            self.assertIn("Differs from the ticket:** added email field", text)
+            self.assertIn("Differs from the ticket (reported by the agent):** added email field", text)
             self.assertIn("USERS_PAGE_SIZE", text)
         self.assertEqual(self.f.bodies(4), [])
         self.assertTrue(ns.trusted(self.f.comments[10], BOT, "handoff-done"))
+
+    def test_dependent_waits_briefly_for_a_just_merged_dependency_hand_off(self):
+        import datetime as dt
+
+        just = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.f.issues[1].update({"state": "closed", "closed_at": just})
+        self.f.pulls.clear()
+        self.assertEqual(decide(self.f, lane="web")["issue"], "")       # no hand-off yet: wait
+        self.f.add_comment(2, ns.handoff_comment(1, "x", "api", 10, 2, {}, ""))
+        self.assertEqual(decide(self.f, lane="web")["issue"], "2")      # hand-off landed: go
+
+    def test_dependency_closed_long_ago_without_hand_off_does_not_block(self):
+        self.f.issues[1].update({"state": "closed", "closed_at": "2020-01-01T00:00:00Z"})
+        self.f.pulls.clear()
+        self.assertEqual(decide(self.f, lane="web")["issue"], "2")
+
+    def test_pr_closed_by_a_person_is_recorded_as_manual_once(self):
+        import datetime as dt
+
+        now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.f.pulls[10].update({"state": "closed", "closed_at": now})
+        decide(self.f)
+        decide(self.f)
+        self.assertEqual(ns.pr_reason(self.f.comments[10], BOT), "manual")
+        self.assertEqual(len(ns.trusted(self.f.comments[10], BOT, "pr")), 1)
 
     def test_auto_merged_pr_hands_off_on_next_run_once(self):
         self.f.pulls[10].update({"state": "closed", "merged_at": "2099-01-01T00:30:00Z"})

@@ -23,13 +23,14 @@ complete when every requirement is done, ticketed or deferred with a reason.
 from __future__ import annotations
 
 import json
+from typing import Any
 import re
 from dataclasses import dataclass, field
 
 from . import protocol as ns
 from .config import Config
 from .gh import GH
-from .rules import label_names, lanes_of, parse_deps, path_is_protected, wave_of
+from .rules import label_names, lanes_of, parse_deps, path_is_protected, split_paths, wave_of
 
 PLANNED_MARKER = "<!-- night-shift:planned -->"
 TITLE_MAX = 100
@@ -115,9 +116,9 @@ class Ticket:
             wave = -1
         return cls(key=str(raw.get("key") or "").strip(), title=" ".join(str(raw.get("title") or "").split()),
                    lane=str(raw.get("lane") or "").strip(), wave=wave, goal=str(raw.get("goal") or "").strip(),
-                   do=[str(x) for x in raw.get("do") or []], acceptance=[str(x) for x in raw.get("acceptance") or []],
-                   files=[str(x) for x in raw.get("files") or []], interface=str(raw.get("interface") or "").strip(),
-                   blocked_by=deps, requirements=[str(x) for x in raw.get("requirements") or []])
+                   do=_items(raw.get("do")), acceptance=_items(raw.get("acceptance")),
+                   files=_items(raw.get("files")), interface=str(raw.get("interface") or "").strip(),
+                   blocked_by=deps, requirements=_items(raw.get("requirements")))
 
     @classmethod
     def from_need(cls, need: dict, lane: str, wave: int) -> Ticket:
@@ -125,12 +126,27 @@ class Ticket:
         goal = str(need.get("goal") or need.get("detail") or "").strip()
         return cls(key="need", title=" ".join(str(need.get("title") or "").split())[:TITLE_MAX], lane=lane,
                    wave=max(wave, 0), goal=goal,
-                   do=[str(x) for x in need.get("do") or []] or ([goal] if goal else []),
-                   acceptance=[str(x) for x in need.get("acceptance") or []],
-                   files=[str(x) for x in need.get("files") or []], interface=str(need.get("interface") or "").strip())
+                   do=_items(need.get("do")) or ([goal] if goal else []),
+                   acceptance=_items(need.get("acceptance")),
+                   files=_items(need.get("files")), interface=str(need.get("interface") or "").strip())
+
+
+def _items(value: Any) -> list[str]:
+    """A list field from model output: a bare string is one item (never one item per character); blanks dropped."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [str(x).strip() for x in value if str(x).strip()]
+
+
+# Lines that would change how the night shift reads the issue if they appeared inside ticket text.
+CONTROL_LINE_RE = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?(?:blocked\s+by|depends\s+on)\b|^\s*#{1,6}\s|<!--", re.I | re.M)
 
 
 def render(t: Ticket, numbers: dict[str, int]) -> str:
+    t = Ticket(**{**t.__dict__, **ns.defang({k: getattr(t, k) for k in ("goal", "do", "acceptance", "files",
+                                                                         "interface", "requirements")})})
     deps = [f"#{numbers.get(x, 0)}" if isinstance(x, str) else f"#{x}" for x in t.blocked_by]
     parts = [PLANNED_MARKER, "## Goal", t.goal, "", "## Do", *[f"- {x}" for x in t.do], "",
              "## Acceptance", *[f"- {x}" for x in t.acceptance], "", "## Files", ", ".join(t.files) or "(none listed)"]
@@ -144,7 +160,7 @@ def render(t: Ticket, numbers: dict[str, int]) -> str:
 
 
 def check_ticket(t: Ticket, cfg: Config, depended_on: bool, existing: dict[int, dict],
-                 keys: set[str] | None = None) -> tuple[list[str], bool]:
+                 keys: set[str] | None = None, model_text: bool = True) -> tuple[list[str], bool]:
     """(problems, is_human). Problems mean the ticket is not created (or, for a builder's need, filed as
     `proposed`). is_human means it is valid but a person must own it."""
     problems: list[str] = []
@@ -159,6 +175,16 @@ def check_ticket(t: Ticket, cfg: Config, depended_on: bool, existing: dict[int, 
     for name, value in (("Goal", t.goal), ("Do", t.do), ("Acceptance", t.acceptance), ("Files", t.files)):
         if not value:
             problems.append(f"missing a {name} section")
+    text_fields = (("Goal", [t.goal]), ("Do", t.do), ("Acceptance", t.acceptance), ("Files", t.files),
+                   ("Interface", [t.interface]))
+    for name, value in text_fields if model_text else ():
+        if any(CONTROL_LINE_RE.search(x) for x in value):
+            problems.append(f"{name} contains a heading, HTML comment or Blocked-by/Depends-on line; "
+                            "dependencies go in blocked_by only")
+    for item in t.do + t.acceptance + t.files if model_text else []:
+        if "\n" in item:
+            problems.append("list items must be single lines")
+            break
     if (t.blocked_by or depended_on) and not t.interface:
         problems.append("has dependencies but no Interface section (function signatures, endpoints with "
                         "request/response shapes, env vars, file paths, data formats)")
@@ -167,7 +193,8 @@ def check_ticket(t: Ticket, cfg: Config, depended_on: bool, existing: dict[int, 
             problems.append(f"Blocked by {dep!r} is not another ticket in this plan")
         if isinstance(dep, int) and dep not in existing:
             problems.append(f"Blocked by #{dep} is not an existing issue")
-    human = any(path_is_protected(f.removeprefix("./"), cfg.protected_paths + cfg.planner_human_paths) for f in t.files)
+    guarded = cfg.protected_paths + cfg.planner_human_paths
+    human = any(path_is_protected(p, guarded) for f in t.files for p in split_paths(f))
     return problems, human
 
 
@@ -183,7 +210,8 @@ def lint_issue(issue: dict, cfg: Config, depended_on: bool = False) -> list[str]
                acceptance=[section(body, "Acceptance")] if section(body, "Acceptance") else [],
                files=[section(body, "Files")] if section(body, "Files") else [],
                interface=section(body, "Interface"), blocked_by=[d for d in parse_deps(body)])
-    problems, _ = check_ticket(t, cfg, depended_on, existing={d: {} for d in t.blocked_by if d > 0})
+    problems, _ = check_ticket(t, cfg, depended_on, existing={d: {} for d in t.blocked_by if d > 0},
+                               model_text=False)
     if len(lanes) != 1:
         problems.append(f"needs exactly one lane label (has {len(lanes)})")
     if -1 in t.blocked_by:
@@ -217,16 +245,32 @@ class PlanResult:
 
 
 def parse_plan(data: dict | str) -> tuple[list[Ticket], list[dict], str]:
+    """Tickets, coverage and notes; a malformed plan yields nothing (and so an incomplete coverage)."""
     if isinstance(data, str):
-        data = json.loads(data)
+        try:
+            data = json.loads(data) if data.strip() else {}
+        except json.JSONDecodeError:
+            return [], [], "invalid plan: not JSON"
     if isinstance(data, dict) and "structured_output" in data:  # straight from `claude -p --output-format json`
         data = data["structured_output"] or {}
+    if not isinstance(data, dict):
+        return [], [], "invalid plan: expected a JSON object"
     tickets = [Ticket.from_dict(t) for t in data.get("tickets") or [] if isinstance(t, dict)]
     coverage = [c for c in data.get("coverage") or [] if isinstance(c, dict)]
     return tickets, coverage, str(data.get("notes") or "")
 
 
-def coverage_status(coverage: list[dict], created_keys: set[str]) -> tuple[bool, list[str]]:
+def _covers(ref: Any, created_keys: set[str], existing: set[int] | None) -> bool:
+    text = str(ref).strip()
+    if text in created_keys:
+        return True
+    if text.lstrip("#").isdigit():  # an existing issue: only counts when it really exists (when we know)
+        return existing is None or int(text.lstrip("#")) in existing
+    return False
+
+
+def coverage_status(coverage: list[dict], created_keys: set[str],
+                    existing: set[int] | None = None) -> tuple[bool, list[str]]:
     """Stopping rule: complete when every requirement is done, ticketed (by a created ticket or an
     existing issue) or deferred with a reason."""
     uncovered = []
@@ -236,8 +280,7 @@ def coverage_status(coverage: list[dict], created_keys: set[str]) -> tuple[bool,
             continue
         if status == "deferred" and str(c.get("reason") or "").strip():
             continue
-        if status == "ticketed" and any(isinstance(t, int) or str(t).lstrip("#").isdigit() or str(t) in created_keys
-                                        for t in c.get("tickets") or []):
+        if status == "ticketed" and any(_covers(t, created_keys, existing) for t in c.get("tickets") or []):
             continue
         uncovered.append(req)
     return bool(coverage) and not uncovered, uncovered
@@ -278,14 +321,19 @@ def validate_plan(tickets: list[Ticket], cfg: Config, all_issues: list[dict],
         if not t.key or keys.count(t.key) > 1:
             why.append("missing or duplicate key")
         m = ANY_ID_RE.match(t.title)
+        prefix = cfg.id_prefix(t.lane) if t.lane in cfg.lane_names else "X"
         if m:
             if m.group(1) + m.group(2) in taken_ids:
                 why.append(f"ID {m.group(1)}{m.group(2)} is already used")
+            if t.lane in cfg.lane_names and m.group(1) != prefix:
+                why.append(f"ID {m.group(1)}{m.group(2)} does not use lane {t.lane}'s prefix {prefix}")
+            if len(m.group(2)) > 5:
+                why.append("ID number is implausibly large")
             taken_ids.add(m.group(1) + m.group(2))
             probe = t
-        else:  # the ID is assigned when the issue is created, so rejected drafts never use one up
-            probe = Ticket(**{**t.__dict__, "title": f"[{cfg.id_prefix(t.lane) if t.lane in cfg.lane_names else 'X'}0] "
-                                                      f"{t.title}"})
+        else:  # the ID is assigned when the issue is created, so rejected drafts never use one up;
+            # probe with a 4-digit ID so the length check holds once the real ID is added
+            probe = Ticket(**{**t.__dict__, "title": f"[{prefix}9999] {t.title}"})
         problems, human = check_ticket(probe, cfg, t.key in depended, existing, set(keys))
         why += problems
         if find_duplicate(t.title, open_issues) or norm_title(t.title) in seen_titles:
@@ -338,7 +386,8 @@ def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tick
         numbers[t.key] = created.get("number", 0)
         line = f"created #{numbers[t.key]} [{t.lane}] w{t.wave} {t.title}"
         (result.human if human else result.created).append(line + (" (human: touches protected/contract paths)" if human else ""))
-    result.coverage_complete, result.uncovered = coverage_status(coverage, set(numbers))
+    existing_numbers = {i["number"] for i in all_issues} | set(numbers.values())
+    result.coverage_complete, result.uncovered = coverage_status(coverage, set(numbers), existing_numbers)
     return result
 
 

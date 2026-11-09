@@ -42,6 +42,7 @@ from .rules import (
 )
 
 HANDOFF_WINDOW_HOURS = 72
+HANDOFF_GRACE_MINUTES = 30  # wait this long for a just-merged dependency's hand-off before starting without it
 
 
 @dataclass
@@ -74,6 +75,7 @@ class Picker:
         self.escalate_model = rt.escalate_model or self.lane.escalate_model or cfg.escalate_model
         self.now = now or dt.datetime.now(dt.timezone.utc)
         self._states: dict[int, str] = {}
+        self._closed_at: dict[int, str] = {}
 
     # --- small helpers -----------------------------------------------------------------
     def issue_state(self, number: int) -> str:
@@ -85,7 +87,15 @@ class Picker:
             except GHError:
                 data = None
             self._states[number] = (data or {}).get("state", "unknown")  # unknown deps count as unmet
+            self._closed_at[number] = (data or {}).get("closed_at") or ""
         return self._states[number]
+
+    def awaiting_handoff(self, deps: list[int], comments: list[dict]) -> list[int]:
+        """Dependencies that closed moments ago and have not handed off to this issue yet. The merge that closes a
+        dependency also wakes the other lanes, so without this the dependent could start before the hand-off lands."""
+        got = {x.get("from") for x in ns.trusted(comments, self.gh.login, "handoff")}
+        return [d for d in deps if d not in got and self._closed_at.get(d)
+                and age_minutes(self._closed_at[d], self.now) < HANDOFF_GRACE_MINUTES]
 
     def refund_last_attempt(self, number: int, why: str) -> None:
         """Turn the latest attempt marker into an infra marker: the failure wasn't the agent's."""
@@ -111,9 +121,20 @@ class Picker:
         """Hand off every recently merged PR of this lane that has not handed off yet."""
         done: list[str] = []
         closed = self.gh.get(self.gh.r("pulls"), {"state": "closed", "sort": "updated", "direction": "desc",
-                                                  "per_page": 30}) or []
+                                                  "per_page": 100}) or []
         for pr in closed:
-            if not pr.get("merged_at") or not self.is_lane_pr(pr):
+            if not self.is_lane_pr(pr):
+                continue
+            if not pr.get("merged_at"):
+                # Closed unmerged by a person (the night shift always records why it closes): record `manual`.
+                if pr.get("closed_at") and age_minutes(pr["closed_at"], self.now) <= HANDOFF_WINDOW_HOURS * 60:
+                    comments = self.gh.comments(pr["number"])
+                    if not ns.pr_reason(comments, self.gh.login):
+                        m = BRANCH_RE.match(pr["head"]["ref"])
+                        self.gh.comment(pr["number"], ns.marker("pr", reason="manual", pr=pr["number"],
+                                                                issue=int(m.group(2)) if m else None)
+                                        + "\nNight shift: closed by a person without merging (recorded as manual).")
+                        done.append(f"PR #{pr['number']} recorded as closed manually")
                 continue
             if age_minutes(pr["merged_at"], self.now) > HANDOFF_WINDOW_HOURS * 60:
                 continue
@@ -132,7 +153,8 @@ class Picker:
             merged = self.gh.issue(issue_no) or {}
             data = ns.trusted([{"id": 0, "user": pr.get("user"), "body": pr.get("body") or ""}],
                               self.gh.login, "handoff-data")
-            handoff = data[0].data.get("data") if data else None
+            # The real marker is the last one: publish writes it after the (defanged) agent text.
+            handoff = data[-1].data.get("data") if data else None
             for dep in self.gh.issues():
                 if issue_no not in parse_deps(dep.get("body")):
                     continue
@@ -284,6 +306,9 @@ class Picker:
                 waiting += 1
                 continue
             comments = self.gh.comments(num) if issue.get("comments", 1) else []
+            if self.awaiting_handoff(parse_deps(issue.get("body")), comments):
+                waiting += 1
+                continue
             tried = ns.count(comments, self.gh.login, "attempt")
             infra = ns.count(comments, self.gh.login, "infra")
             if tried >= self.cfg.max_attempts or infra >= self.cfg.infra_cap:

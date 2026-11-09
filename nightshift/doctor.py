@@ -115,7 +115,6 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
                              "create the composite action or remove setup.action"))
         if not lane.test_command:
             out.append(Check(WARN, f"lane {lane.name} has no test_command", "set lanes[].test_command"))
-    out.append(Check(OK, "agent commits are authored as github-actions[bot] by the reusable lane workflow"))
     return cfg, out
 
 
@@ -168,9 +167,30 @@ def remote_checks(gh: GH, cfg: Config) -> list[Check]:
     else:
         out.append(Check(OK if enabled == "true" else WARN, f"AGENTS_ENABLED={enabled}",
                          "" if enabled == "true" else "`gh nightshift start` when main is green"))
+    fix_lane = get_variable(gh, "FIX_LANE")
+    if cfg.effective_fix_lane and fix_lane != cfg.effective_fix_lane:
+        out.append(Check(WARN, f"variable FIX_LANE is {fix_lane!r}, config says {cfg.effective_fix_lane!r}",
+                         "run `gh nightshift setup`"))
     if not gh.night_log(cfg.label("night_log")):
         out.append(Check(FAIL, "no open night-log issue", "run `gh nightshift setup`"))
+    out += tool_checks(gh, cfg)
     return out
+
+
+def tool_checks(gh: GH, cfg: Config) -> list[Check]:
+    """The caller's `uses:` and the unauthenticated tool checkouts need TOOL_REPO public and tool_ref to exist."""
+    from .scaffold import TOOL_REPO
+
+    tool = gh.get_or_none(f"repos/{TOOL_REPO}")
+    if tool is None:
+        return [Check(FAIL, f"cannot read {TOOL_REPO}", "the workflows need it reachable; check the name")]
+    if tool.get("private"):
+        return [Check(FAIL, f"{TOOL_REPO} is private: other repos cannot use its workflows or check it out",
+                      "make it public, or fork it publicly and point the caller workflows at the fork")]
+    if gh.get_or_none(f"repos/{TOOL_REPO}/commits/{cfg.tool_ref}") is None:
+        return [Check(FAIL, f"{TOOL_REPO}@{cfg.tool_ref} does not exist",
+                      "set tool_ref in .night-shift/config.yml to a pushed tag or SHA, then `gh nightshift init --regenerate`")]
+    return [Check(OK, f"{TOOL_REPO}@{cfg.tool_ref} is reachable")]
 
 
 def own_token_checks(run: Callable = subprocess.run) -> list[Check]:

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,10 +33,27 @@ GitRunner = Callable[[list[str]], str]
 MAX_FOLLOW_UPS = 3
 
 
+def _git_env() -> dict[str, str]:
+    """Credentials for pushes come from $GH_TOKEN through a credential helper set in the environment, so the
+    PAT never appears in git's argv (visible in `ps`) or in error messages."""
+    env = dict(os.environ)
+    if env.get("GH_TOKEN"):
+        env.update({"GIT_CONFIG_COUNT": "2",
+                    "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
+                    "GIT_CONFIG_KEY_1": "credential.helper",
+                    "GIT_CONFIG_VALUE_1": '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f',
+                    "GIT_TERMINAL_PROMPT": "0"})
+    return env
+
+
+def _redact(text: str) -> str:
+    return re.sub(r"(https://)[^@/\s]+@", r"\1***@", text)
+
+
 def real_git(args: list[str]) -> str:
-    result = subprocess.run(["git", *args], capture_output=True, text=True)
+    result = subprocess.run(["git", *args], capture_output=True, text=True, env=_git_env())
     if result.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)}: {result.stderr.strip()}")
+        raise RuntimeError(_redact(f"git {' '.join(args)}: {result.stderr.strip()}"))
     return result.stdout
 
 
@@ -70,12 +89,14 @@ def classify(result_path: str | None) -> Result:
     turns = int(data.get("num_turns") or 0)
     out = data.get("structured_output")
     if isinstance(out, dict) and out.get("status") in {"done", "stuck", "waiting"}:
+        out = ns.defang(out)  # everything below is re-posted under the bot's trusted login
         return Result(out["status"], str(out.get("summary") or ""),
                       [str(a) for a in out.get("assumptions") or []],
                       _dicts(out.get("needs")), _dicts(out.get("notes")), _dicts(out.get("follow_ups")),
                       out.get("handoff") if isinstance(out.get("handoff"), dict) else {}, cost, turns)
     if turns < 2:
-        return Result("infra-error", str(data.get("result") or "no result")[:500], cost=cost, num_turns=turns)
+        return Result("infra-error", ns.defang(str(data.get("result") or "no result")[:500]), cost=cost,
+                      num_turns=turns)
     return Result("stuck", "Run ended without a structured result (likely hit the turn limit).", cost=cost,
                   num_turns=turns)
 
@@ -113,7 +134,7 @@ class Job:
     fail_sha: str = ""
     result_path: str = ""
     bundle_path: str = ""
-    push_url: str = ""          # https://x-access-token:...@github.com/o/r.git (never printed)
+    push_url: str = ""          # https://github.com/o/r.git; the PAT comes from $GH_TOKEN (see _git_env)
 
 
 def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
@@ -164,7 +185,10 @@ def push_and_open_pr(gh: GH, cfg: Config, job: Job, res: Result, git: GitRunner)
         git(["fetch", "-q", job.bundle_path, f"{ref}:{ref}"])
     except RuntimeError:
         return "rejected: unreadable bundle"
-    changed = [p for p in git(["diff", "--name-only", f"origin/{cfg.main_branch}...{ref}"]).splitlines() if p]
+    # --no-renames: a rename lists both paths, so moving CLAUDE.md away is caught; -z and quotePath=false:
+    # unusual file names are listed verbatim instead of quoted (a quoted name would dodge the match).
+    changed = [p for p in git(["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", "-z",
+                               f"origin/{cfg.main_branch}...{ref}"]).replace("\n", "\0").split("\0") if p]
     blocked = [p for p in changed if path_is_protected(p, cfg.protected_paths)]
     if blocked:
         return f"rejected: touches protected paths ({', '.join(blocked[:5])})"

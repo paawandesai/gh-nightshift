@@ -97,7 +97,8 @@ def _ask(ask: Ask, prompt: str, default: str) -> str:
     return answer or default
 
 
-def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, out=None) -> dict:
+def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, out=None,
+                 tool_ref: str = "main") -> dict:
     """Interactive (or --yes) config: lanes from the detected stack, one Claude token secret per owner."""
     stacks = scaffold.detect_stack(root)
     folders = [s for s in stacks if s["path"] != "./"]
@@ -127,7 +128,7 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
     mode = q("Merge mode: strict (PRs must be up to date) or queue (GitHub merge queue)", "strict")
     return {"version": 1, "main_branch": "main", "ci_workflow": ci,
             "required_checks": ["test", "review / verdict"], "fix_lane": lanes[0]["name"] if lanes else "",
-            "merge": {"mode": mode}, "tool_ref": "main", "lanes": lanes,
+            "merge": {"mode": mode}, "tool_ref": tool_ref, "lanes": lanes,
             "limits": {"max_attempts": 3, "infra_cap": 6, "max_needs_per_issue": 2, "max_notes_per_issue": 2},
             "planner": {"docs": ["docs/PRD.md"], "max_tickets_per_run": 8, "refill_below": 0}}
 
@@ -163,12 +164,14 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
         text = cfg_path.read_text(encoding="utf-8")
         ctx.say(f"{CONFIG_PATH} exists; using it (pass --force to start over)")
     else:
-        text = scaffold.config_yaml(build_config(ctx.root, ask, a.lanes, a.yes, ctx.out))
+        text = scaffold.config_yaml(build_config(ctx.root, ask, a.lanes, a.yes, ctx.out,
+                                                 a.tool_ref or "main"))
         cfg = loads(text)  # validates what we are about to write
     ctx.say(*write_files(ctx, scaffold.files(cfg, text, ctx.root), overwrite=a.force))
     if a.files_only:
         return 0
-    ctx.say(*repo_setup.setup(ctx.gh, cfg))
+    # Branch protection waits for `setup`: protecting main now would refuse the push of these very files.
+    ctx.say(*repo_setup.setup(ctx.gh, cfg, protection=False))
     if not a.skip_secrets:
         kwargs = {}
         if secret_ask:
@@ -176,8 +179,9 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
         if secret_setter:
             kwargs["setter"] = secret_setter
         ctx.say(*repo_setup.prompt_missing_secrets(ctx.gh, cfg, **kwargs))
-    ctx.say("", "Next: commit and push the new files (your gh token needs the `workflow` scope), run "
-                "`gh nightshift doctor`, label a few issues night-safe, then `gh nightshift start`.")
+    ctx.say("", "Next: commit and push the new files to main (your gh token needs the `workflow` scope), then run "
+                "`gh nightshift setup` (branch protection), `gh nightshift doctor`, label a few issues night-safe, "
+                "and `gh nightshift start`.")
     return 0
 
 
@@ -269,7 +273,8 @@ def run_claude(prompt: str, schema: str, model: str, add_dir: str, run=subproces
         raise SystemExit("the `claude` CLI is not installed here; run the night-shift-planner workflow instead, "
                          "or pass --plan-file")
     r = run(["claude", "-p", prompt, "--output-format", "json", "--json-schema", schema, "--model", model,
-             "--max-turns", "60", "--add-dir", add_dir, "--allowedTools", "Read,Grep,Glob"],
+             "--max-turns", "60", "--add-dir", add_dir, "--allowedTools", "Read,Grep,Glob",
+             "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"],
             capture_output=True, text=True)
     try:
         return json.loads(r.stdout)
@@ -440,10 +445,9 @@ def cmd_publish(ctx: Ctx) -> int:
     from .publish import Job, publish
 
     a = ctx.args
-    token = os.environ.get("GH_TOKEN", "")
     job = Job(lane=a.lane, mode=a.mode, issue=a.issue, branch=a.branch, title=a.title, model=a.model,
               attempt_comment=a.attempt_comment, fail_sha=a.fail_sha, result_path=a.result, bundle_path=a.bundle,
-              push_url=f"https://x-access-token:{token}@github.com/{ctx.repo}.git")
+              push_url=f"https://github.com/{ctx.repo}.git")  # credentials via GH_TOKEN, never in argv
     ctx.say(publish(ctx.gh, ctx.cfg, job))
     return 0
 
@@ -472,7 +476,7 @@ def cmd_review_inputs(ctx: Ctx) -> int:
 def cmd_review_report(ctx: Ctx) -> int:
     from .review_tools import render_report
 
-    verdict, comment = render_report(ctx.args.result)
+    verdict, comment = render_report(ctx.args.result, ctx.args.overlap)
     Path(ctx.args.out).write_text(comment, encoding="utf-8")
     write_outputs(ctx.args.github_output, {"verdict": verdict})
     ctx.say(f"verdict={verdict}")
@@ -489,10 +493,11 @@ def cmd_audit(ctx: Ctx) -> int:
         ctx.say(audit.report(a.report))
         return 0
     if a.label_llm:
-        ctx.say(audit.label_with_llm(a.label_llm, a.out_dir or "audit"))
+        # Evidence folders (pr-N/) sit next to the CSV unless --out-dir says otherwise.
+        ctx.say(audit.label_with_llm(a.label_llm, a.out_dir or os.path.dirname(os.path.abspath(a.label_llm))))
         return 0
     out_dir = Path(a.out_dir or f"audit-seed{a.seed}")
-    prs = audit.sample(ctx.gh, a.sample, a.seed, [a.lane] if a.lane else None)
+    prs = audit.sample(ctx.gh, a.sample, a.seed, [a.lane] if a.lane else None, ctx.cfg.bot_login)
     rows = audit.collect_evidence(ctx.gh, prs, str(out_dir))
     for row in rows:
         if a.test_cmd:
@@ -535,6 +540,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--regenerate", action="store_true", help="only rewrite the caller workflows from the config")
     s.add_argument("--files-only", action="store_true", help="write files; skip labels, settings and secrets")
     s.add_argument("--skip-secrets", action="store_true", help="do not prompt for secrets")
+    s.add_argument("--tool-ref", help="gh-nightshift ref the workflows use (tag or SHA; default main)")
     sub.add_parser("setup", parents=[common], help="labels, settings, variables, branch protection, night log")
     s = sub.add_parser("join", parents=[common], help="a teammate adds their Claude token for a lane")
     s.add_argument("--lane", required=True)
@@ -607,6 +613,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("review-report", parents=[common])
     s.add_argument("--result", required=True)
     s.add_argument("--out", required=True)
+    s.add_argument("--overlap", type=int, default=0, help="files changed by both the PR and main (review-inputs)")
     s.add_argument("--github-output")
     return p
 

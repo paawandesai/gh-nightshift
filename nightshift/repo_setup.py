@@ -114,9 +114,10 @@ def ensure_night_log(gh: GH, cfg: Config) -> list[str]:
     return [f"night-log issue #{created.get('number', 0)} created (pin it)"]
 
 
-def setup(gh: GH, cfg: Config) -> list[str]:
-    return (ensure_labels(gh, cfg) + repo_settings(gh) + ensure_variables(gh, cfg) + ensure_protection(gh, cfg)
-            + ensure_night_log(gh, cfg))
+def setup(gh: GH, cfg: Config, protection: bool = True) -> list[str]:
+    prot = ensure_protection(gh, cfg) if protection else ["branch protection: skipped for now; run "
+                                                          "`gh nightshift setup` after pushing the new files"]
+    return ensure_labels(gh, cfg) + repo_settings(gh) + ensure_variables(gh, cfg) + prot + ensure_night_log(gh, cfg)
 
 
 # --- secrets --------------------------------------------------------------------------

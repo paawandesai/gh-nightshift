@@ -44,6 +44,8 @@ env:
   REPO: ${{ github.repository }}
   MAIN_BRANCH: ${{ inputs.main_branch || github.event.repository.default_branch || 'main' }}
   PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+  # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
+  PYTHONSAFEPATH: "1"
 
 jobs:
   pick:

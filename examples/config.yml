@@ -5,6 +5,7 @@ ci_workflow: ci.yml            # its runs on main gate every lane
 required_checks: [test, "review / verdict"]
 fix_lane: api                  # the only lane that works while main is red
 tool_ref: main                 # pin a tag or SHA once v0.1.0 is released
+bot_login: night-bot            # login of the account that owns AGENT_PAT (stats and audit trust its markers)
 merge:
   mode: strict                 # strict: PRs must be up to date with main; queue: GitHub merge queue
 protected_paths: [contracts/]  # added to .github/, .claude/, CLAUDE.md, AGENTS.md, .mcp.json, .night-shift/

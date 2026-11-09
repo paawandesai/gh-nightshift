@@ -226,5 +226,32 @@ class RenderReportTests(unittest.TestCase):
         self.assertEqual(Path(gh_out).read_text(), "verdict=error\n")
 
 
+
+
+class DriftEnforcement(unittest.TestCase):
+    def write(self, out):
+        import tempfile
+
+        fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump({"structured_output": out}, fh)
+        fh.close()
+        return fh.name
+
+    def test_pass_without_still_correct_fails_when_files_overlap(self):
+        from nightshift.review_tools import render_report
+
+        path = self.write({"verdict": "pass", "answers": [], "main_changed_overlap": False})
+        self.assertEqual(render_report(path, overlap=0)[0], "pass")
+        verdict, comment = render_report(path, overlap=2)
+        self.assertEqual(verdict, "fail")
+        self.assertIn("2 overlapping file(s)", comment)
+
+    def test_pass_with_still_correct_stays_pass(self):
+        from nightshift.review_tools import render_report
+
+        path = self.write({"verdict": "pass", "answers": [], "main_changed_overlap": True,
+                           "still_correct_against_main": "yes: main only renamed a helper this PR does not use"})
+        self.assertEqual(render_report(path, overlap=1)[0], "pass")
+
 if __name__ == "__main__":
     unittest.main()
