@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The `gh nightshift` launcher now finds Python on Windows: it also tries `python` and `py -3`, skips a `python3`
+  that is only the Microsoft Store stub, and passes a Windows-style `PYTHONPATH`.
 - Agent runs ignore build and test caches (`__pycache__/`, `*.pyc`, `.pytest_cache/`, `node_modules/`, ...) even
   when the repo has no `.gitignore` for them, so they never end up in an agent PR.
 
