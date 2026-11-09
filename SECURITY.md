@@ -22,7 +22,7 @@ runner:
 | Job | Secrets it sees | Runs Claude? |
 |---|---|---|
 | `pick` | The PAT. The lane's Claude token appears in one step, which only checks that it is not empty. | No |
-| `agent` | The lane's Claude token only (`CLAUDE_CODE_OAUTH_TOKEN`). Checkout uses `persist-credentials: false`, and the job's `GITHUB_TOKEN` is `contents: read` and never placed in the environment. | Yes |
+| `agent` | The lane's Claude token only, handed to Claude on a pipe (not in its environment). Checkout uses `persist-credentials: false`, and the job's `GITHUB_TOKEN` is `contents: read` and never placed in the environment. | Yes |
 | `publish` | The PAT | No |
 
 The agent's work crosses to the publish job only as two artifacts, `result.json` and a git bundle. Lane setup
@@ -192,10 +192,18 @@ These are not enforced by v0.1. They are listed so you can judge the risk yourse
    permissions, so `check-pat` and `doctor` reject only a classic PAT with the `workflow` scope. For
    fine-grained tokens, they warn and ask you to confirm by hand.
 2. **The agent has a full shell and network.** The default `CLAUDE_PERMISSION_FLAGS` is
-   `--dangerously-skip-permissions`. The agent can read its own lane's Claude token from the environment
-   and reach the internet. The runner holds no GitHub write credentials and is thrown away, but treat each
-   Claude token as exposed to its lane's agent. Set `CLAUDE_PERMISSION_FLAGS` to restrict tools if you
-   need to.
+   `--dangerously-skip-permissions`. Two things limit what that means for the lane's Claude token:
+   - Claude reads the token from a pipe, not from its environment, so the commands it runs (tests, package
+     scripts, `env`) do not inherit it. Set the repo variable `NIGHT_SHIFT_TOKEN_IN_ENV=true` only for a Claude
+     Code version that cannot read `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`.
+   - A token guard searches the commits, the result and the log for the token (and its base64 form) before
+     anything leaves the runner. On a hit nothing is uploaded or pushed, and the issue gets `needs-human`.
+
+   Neither stops an agent that sets out to find and send its token: it shares a user account with the step
+   that holds it and can reach the internet, and the guard only knows the token's plain and base64 forms.
+   Treat each Claude token as exposed to its lane's agent, keep untrusted people from filing night-safe
+   issues, and rotate a token you have doubts about. The runner holds no GitHub write credentials and is
+   thrown away. Set `CLAUDE_PERMISSION_FLAGS` to restrict tools if you need to.
 3. **Your CI runs agent-written code.** Agent PRs come from branches in the same repo, so your CI's
    `pull_request` jobs get your repository secrets. Keep secrets out of test jobs.
 4. **The reviewer reads untrusted code.** Text in the PR can try to talk the reviewer into a `pass`. It

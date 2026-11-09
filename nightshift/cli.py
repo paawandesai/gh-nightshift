@@ -15,7 +15,7 @@ from collections.abc import Callable
 
 from . import __version__, digest, planner, prompts, repo_setup, roadmap, scaffold
 from . import protocol as ns
-from .config import CONFIG_PATH, Config, ConfigError, load, loads
+from .config import BASE_PATH, CONFIG_PATH, Config, ConfigError, load, loads
 from .gh import GH, GHError
 
 Ask = Callable[[str], str]
@@ -52,6 +52,36 @@ def write_outputs(path: str | None, values: dict[str, str]) -> None:
                 fh.write(f"{key}={value}\n")
 
 
+SNAPSHOT_FILES = (CONFIG_PATH, BASE_PATH, ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+
+
+def remote_snapshot(gh: GH) -> Path:
+    """Copy the files the CLI reads (config, base config, workflows, CODEOWNERS) from the repo's default branch into a
+    temporary folder, so `--repo` works from any folder. Read-only: nothing is written to GitHub."""
+    import base64
+    import tempfile
+
+    root = Path(tempfile.mkdtemp(prefix="nightshift-"))
+
+    def fetch(rel: str) -> None:
+        data = gh.get_or_none(gh.r(f"contents/{rel}"))
+        if isinstance(data, dict) and data.get("content") is not None:
+            dest = root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(base64.b64decode(data["content"]).decode("utf-8"), encoding="utf-8")
+
+    for rel in SNAPSHOT_FILES:
+        fetch(rel)
+    listing = gh.get_or_none(gh.r("contents/.github/workflows"))
+    for item in listing if isinstance(listing, list) else []:
+        if item.get("type") == "file" and str(item.get("name", "")).endswith((".yml", ".yaml")):
+            fetch(f".github/workflows/{item['name']}")
+    if not (root / CONFIG_PATH).is_file():
+        raise ConfigError(f"{gh.repo} has no {CONFIG_PATH} on its default branch yet; merge the setup PR first "
+                          "(or run this inside a clone of the repo)")
+    return root
+
+
 class Ctx:
     def __init__(self, args, transport=None, out=None):
         self.args = args
@@ -60,6 +90,7 @@ class Ctx:
         self._transport = transport
         self._gh: GH | None = None
         self._cfg: Config | None = None
+        self._config_root: Path | None = None
 
     @property
     def repo(self) -> str:
@@ -82,9 +113,19 @@ class Ctx:
         return self._gh
 
     @property
+    def config_root(self) -> Path:
+        """Where the config and workflows are read from: the current folder, or, when it has no config and --repo
+        names a repo, a read-only snapshot of that repo's default branch (so `--repo` works from any folder)."""
+        if self._config_root is None:
+            self._config_root = self.root
+            if getattr(self.args, "repo", None) and not (self.root / CONFIG_PATH).is_file():
+                self._config_root = remote_snapshot(self.gh)
+        return self._config_root
+
+    @property
     def cfg(self) -> Config:
         if self._cfg is None:
-            self._cfg = load(self.root)
+            self._cfg = load(self.config_root)
         return self._cfg
 
     def say(self, *lines: str) -> None:
@@ -319,7 +360,7 @@ def cmd_doctor(ctx: Ctx, run=subprocess.run) -> int:
     from .doctor import FAIL, run_doctor
 
     tokens = [os.environ.get(name, "") for name in ctx.args.pat_env]
-    checks = run_doctor(ctx.gh, ctx.root, tokens or None, run)
+    checks = run_doctor(ctx.gh, ctx.config_root, tokens or None, run)
     for c in checks:
         ctx.say(c.line())
     bad = sum(1 for c in checks if c.level == FAIL)
@@ -353,6 +394,7 @@ def cmd_stats(ctx: Ctx) -> int:
 def cmd_switch(ctx: Ctx) -> int:
     name = ctx.args.command
     if name == "start":
+        _ = ctx.cfg  # refuse to switch on a repo whose night-shift config is not on main yet (ConfigError)
         lines = repo_setup.start(ctx.gh)
     elif name == "pause":
         lines = repo_setup.pause(ctx.gh, cancel=not ctx.args.no_cancel)

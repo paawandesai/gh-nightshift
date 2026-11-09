@@ -2,11 +2,23 @@
 # gh CLI extension entry point: `gh nightshift <command>`. Needs Python 3.10+ (stdlib only).
 set -euo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-PY="${NIGHTSHIFT_PYTHON:-}"
-if [ -z "$PY" ]; then
-  for c in python3.13 python3.12 python3.11 python3.10 python3; do
-    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(sys.version_info < (3, 10))'; then PY="$c"; break; fi
+SEP=":"
+# Windows (Git Bash): Python is usually `python` or the `py -3` launcher, and `python3` is often a Microsoft Store
+# stub that exists but does not run. Native Python wants a Windows path and `;` between PYTHONPATH entries.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*) SEP=";"; if command -v cygpath >/dev/null 2>&1; then HERE="$(cygpath -w "$HERE")"; fi ;;
+esac
+# NIGHTSHIFT_PYTHON may be a command with arguments, e.g. "py -3.12".
+read -r -a PY <<< "${NIGHTSHIFT_PYTHON:-}"
+if [ "${#PY[@]}" -eq 0 ]; then
+  for c in python3.13 python3.12 python3.11 python3.10 python3 python "py -3"; do
+    read -r -a try <<< "$c"
+    if command -v "${try[0]}" >/dev/null 2>&1 && \
+       "${try[@]}" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then PY=("${try[@]}"); break; fi
   done
 fi
-if [ -z "$PY" ]; then echo "gh-nightshift needs Python 3.10 or newer (set NIGHTSHIFT_PYTHON)" >&2; exit 1; fi
-PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m nightshift "$@"
+if [ "${#PY[@]}" -eq 0 ]; then
+  echo "gh-nightshift needs Python 3.10 or newer (tried python3.x, python3, python and py -3; set NIGHTSHIFT_PYTHON)" >&2
+  exit 1
+fi
+PYTHONPATH="$HERE${PYTHONPATH:+$SEP$PYTHONPATH}" exec "${PY[@]}" -m nightshift "$@"

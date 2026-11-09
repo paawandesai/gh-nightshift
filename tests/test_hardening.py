@@ -3,8 +3,12 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -64,6 +68,16 @@ class Workflows(unittest.TestCase):
         self.assertIn("git config core.excludesFile", agent)
         self.assertIn("'__pycache__/' '*.py[cod]'", agent)
         self.assertLess(agent.index("core.excludesFile"), agent.index("claude -p"))
+
+    def test_agent_gets_its_token_on_a_pipe_not_in_its_environment(self):
+        text = workflow("lane.yml")
+        agent = text[text.index("\n  agent:"):text.index("\n  publish:")]
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN: ${{", agent)
+        self.assertIn("export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3", agent)
+        self.assertIn("env -u LANE_CLAUDE_TOKEN claude -p", agent)
+        # The guard runs after the commits are packaged and before anything is uploaded.
+        self.assertLess(agent.index("- name: Package commits"), agent.index("- name: Token guard"))
+        self.assertLess(agent.index("- name: Token guard"), agent.rindex("actions/upload-artifact"))
 
     def test_safe_path_only_in_pat_jobs_not_the_agent_job(self):
         text = workflow("lane.yml")
@@ -251,3 +265,80 @@ class TaskFile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenGuardScript(unittest.TestCase):
+    """Runs the real guard step from lane.yml against a throwaway git repo."""
+    TOKEN = "sk-ant-oat01-" + "Zx9" * 20
+
+    def script(self):
+        text = workflow("lane.yml")
+        step = text[text.index("- name: Token guard"):]
+        body = step[step.index("run: |\n") + len("run: |\n"):step.index("\n      - uses: actions/upload-artifact")]
+        return textwrap.dedent(body)
+
+    def guard(self, commit_text="print(1)\n", message="work", result="{}", stderr="", token=None, branch=True):
+        tmp = tempfile.mkdtemp()
+        repo, out = os.path.join(tmp, "repo"), os.path.join(tmp, "out")
+        os.makedirs(repo), os.makedirs(out)
+        env = {"PATH": os.environ["PATH"], "HOME": tmp, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+        def git(*args):
+            subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=repo, check=True,
+                           capture_output=True, env=env)
+
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "base")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        if branch:
+            git("switch", "-q", "-c", "agent/api/issue-1")
+            Path(repo, "x.py").write_text(commit_text)
+            git("add", "-A")
+            git("commit", "-q", "-m", message)
+        Path(out, "result.json").write_text(result)
+        Path(out, "claude.stderr").write_text(stderr)
+        Path(out, "agent.bundle").write_bytes(b"\x00PACK")
+        run = subprocess.run(["bash", "-e", "-c", self.script()], cwd=repo, capture_output=True, text=True,
+                             env={**env, "RUNNER_TEMP": tmp, "MAIN_BRANCH": "main", "BRANCH": "agent/api/issue-1",
+                                  "LANE_CLAUDE_TOKEN": self.TOKEN if token is None else token})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotIn(self.TOKEN, run.stdout + run.stderr)
+        return sorted(os.listdir(out)), Path(out, "result.json").read_text(), run.stdout
+
+    def assert_withheld(self, got, where):
+        files, result, log = got
+        self.assertEqual(files, ["result.json"])  # the bundle and the log are gone
+        self.assertEqual(json.loads(result), {"night_shift_guard": "token-leak", "where": where})
+        self.assertIn("::error::", log)
+
+    def test_clean_run_is_untouched(self):
+        files, result, log = self.guard(result='{"structured_output": {"status": "done"}}')
+        self.assertEqual(files, ["agent.bundle", "claude.stderr", "result.json"])
+        self.assertIn('"done"', result)
+        self.assertIn("token guard: clean", log)
+
+    def test_token_in_a_committed_file(self):
+        self.assert_withheld(self.guard(commit_text=f"KEY = '{self.TOKEN}'\n"), "its commits")
+
+    def test_token_in_a_commit_message(self):
+        self.assert_withheld(self.guard(message=f"debug {self.TOKEN}"), "its commits")
+
+    def test_base64_token_in_the_result(self):
+        import base64
+
+        encoded = base64.b64encode(self.TOKEN.encode()).decode()
+        self.assert_withheld(self.guard(result=json.dumps({"result": f"env dump: {encoded}"})),
+                             "the run's result or log")
+
+    def test_token_in_stderr_and_commits(self):
+        self.assert_withheld(self.guard(stderr=f"auth {self.TOKEN}", commit_text=self.TOKEN),
+                             "the run's result or log and its commits")
+
+    def test_secret_with_a_trailing_newline_does_not_match_everything(self):
+        files, _, log = self.guard(token=self.TOKEN + "\n")
+        self.assertIn("token guard: clean", log)
+        self.assertEqual(len(files), 3)
+
+    def test_empty_secret_and_no_branch_are_fine(self):
+        self.assertIn("no token to guard", self.guard(token="")[2])
+        self.assertIn("token guard: clean", self.guard(branch=False)[2])

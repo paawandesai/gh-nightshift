@@ -197,7 +197,10 @@ jobs:
 
       - name: Run agent
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          LANE_CLAUDE_TOKEN: ${{ secrets.claude_token }}
+          # 'true' puts the token back in Claude's environment (for Claude Code versions without
+          # CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR). Tests and tools the agent runs can then read it.
+          TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
           MODEL: ${{ needs.pick.outputs.model || 'sonnet' }}
           MAX_TURNS: ${{ needs.pick.outputs.max_turns || '80' }}
           # This runner holds no GitHub write credentials and is discarded after the job.
@@ -214,11 +217,20 @@ jobs:
           git config core.excludesFile "$RUNNER_TEMP/agent-excludes"
           git switch -c "$BRANCH"
           PROMPT="$(sed "s|__TASK_FILE__|$RUNNER_TEMP/task/task.md|g" "$RUNNER_TEMP/task/prompt.md")"
+          # Claude reads the token from a pipe (file descriptor 3), not from its environment, so the commands it
+          # runs (tests, package scripts, `env`) do not inherit it. This stops accidental leaks; an agent that
+          # sets out to find its own token still can, which is what the token guard below is for.
+          if [ "$TOKEN_IN_ENV" = "true" ]; then
+            export CLAUDE_CODE_OAUTH_TOKEN="$LANE_CLAUDE_TOKEN"; exec 3< /dev/null
+          else
+            export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$LANE_CLAUDE_TOKEN")
+          fi
           # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
-          claude -p "$PROMPT" --output-format json \
+          env -u LANE_CLAUDE_TOKEN claude -p "$PROMPT" --output-format json \
             --json-schema "$(cat "$RUNNER_TEMP/task/schema.json")" \
             --model "$MODEL" --max-turns "$MAX_TURNS" $PERMISSION_FLAGS > "$OUT/result.json" 2> "$OUT/claude.stderr"
           echo "claude exit code: $? (model $MODEL)"
+          exec 3<&-
           tail -n 50 "$OUT/claude.stderr" || true
 
       - name: Package commits
@@ -235,6 +247,38 @@ jobs:
             git bundle create "$OUT/agent.bundle" "$BRANCH" "^origin/$MAIN_BRANCH"
           fi
           ls -la "$OUT"
+
+      # Everything that leaves this runner (the commits, the result and the log, all in the artifact) is searched
+      # for the lane's Claude token first. On a hit nothing is uploaded and the issue goes to a person.
+      - name: Token guard
+        if: always()
+        env:
+          LANE_CLAUDE_TOKEN: ${{ secrets.claude_token }}
+        run: |
+          set -uo pipefail
+          OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
+          TOKEN="$(printf '%s' "$LANE_CLAUDE_TOKEN" | tr -d '[:space:]')"
+          if [ "${#TOKEN}" -lt 20 ]; then echo "no token to guard"; exit 0; fi
+          PATTERNS="$(mktemp)"; chmod 600 "$PATTERNS"
+          # The token itself and its base64 form, read from a file so neither appears in a command line.
+          { printf '%s\n' "$TOKEN"; printf '%s' "$TOKEN" | base64 | tr -d '\n'; echo; } > "$PATTERNS"
+          WHERE=""
+          if grep -rqaF -f "$PATTERNS" "$OUT"; then WHERE="the run's result or log"; fi
+          if git rev-parse -q --verify "refs/heads/$BRANCH" > /dev/null; then
+            RANGE="origin/$MAIN_BRANCH..refs/heads/$BRANCH"
+            if git log --format=%B "$RANGE" | grep -qaF -f "$PATTERNS" || \
+               git rev-list "$RANGE" | xargs -r git grep -qaF -f "$PATTERNS"; then
+              WHERE="${WHERE:+$WHERE and }its commits"
+            fi
+          fi
+          rm -f "$PATTERNS"
+          if [ -n "$WHERE" ]; then
+            rm -rf "$OUT"; mkdir -p "$OUT"
+            jq -n --arg where "$WHERE" '{night_shift_guard: "token-leak", where: $where}' > "$OUT/result.json"
+            echo "::error::The lane's Claude token appeared in $WHERE. Nothing from this run was uploaded; rotate the token."
+          else
+            echo "token guard: clean"
+          fi
 
       - uses: actions/upload-artifact@v4
         if: always()
