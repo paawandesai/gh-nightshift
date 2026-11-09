@@ -23,6 +23,7 @@ limits:
   max_turns: 80
   max_needs_per_issue: 2
   max_notes_per_issue: 2
+  auto_ready_needs: true    # false: an agent's request to another lane waits as `proposed` until a person promotes it
 planner:
   docs: [docs/PRD.md]
   max_tickets_per_run: 8

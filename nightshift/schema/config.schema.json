@@ -140,6 +140,10 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 5
+        },
+        "auto_ready_needs": {
+          "type": "boolean",
+          "description": "true (default): a ticket an agent requests in another lane (`needs`) gets the ready label at once when it passes the ticket validator. false: it is filed as `proposed` and a person promotes it, so agents cannot queue work for each other with nobody in between."
         }
       }
     },

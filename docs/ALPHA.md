@@ -91,8 +91,8 @@ account and runs `gh nightshift join --lane <lane> --fallback`. Check that this 
 ## 4. Write the first tickets (repo admin)
 
 Agents pick issues labelled `night-safe` plus exactly one `lane:<name>`. Good first tickets are small and
-testable: one endpoint, one component, one bug with a reproduction. Use the issue template `init` added, or
-follow `docs/NIGHT_SHIFT_ISSUES.md` in your repo, then check them:
+testable: one endpoint, one component, one bug with a reproduction. Use the issue template `init` added (it files the ticket as `proposed`; swap that label for
+`night-safe` when the ticket is ready), or follow `docs/NIGHT_SHIFT_ISSUES.md` in your repo, then check them:
 
 ```sh
 gh nightshift lint

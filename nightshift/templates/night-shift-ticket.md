@@ -2,11 +2,13 @@
 name: Night-shift ticket
 about: A small, testable change for the night-shift agents to build. See docs/NIGHT_SHIFT_ISSUES.md.
 title: "[X0] <what changes>"
-labels: ["night-safe"]
+labels: ["proposed"]
 ---
 
 <!--
 Before posting:
+- This template files the ticket as "proposed". Someone with write access reads it, then swaps that label for
+  "night-safe" (that swap is the approval; the template never applies night-safe itself).
 - Add exactly one lane:<name> label and one wave:<n> label.
 - Replace X0 with the next free ID for the lane (e.g. A12).
 - Do not assign anyone and do not add the "human" label.

@@ -388,6 +388,47 @@ class SetupJoinTests(CliTestCase):
         self.assertEqual(self.fake.writes("POST", r"issues$"), [])
         self.assertNotIn("label created", text)
 
+    def test_setup_keeps_the_protection_a_repo_already_has(self):
+        # PUT replaces the whole protection: required reviews, restrictions and other checks must be carried over.
+        self.fake.protection = {
+            "required_status_checks": {"strict": False, "contexts": ["lint", "test"],
+                                       "checks": [{"context": "lint", "app_id": 15368}, {"context": "test", "app_id": None}]},
+            "enforce_admins": {"enabled": False},
+            "required_pull_request_reviews": {
+                "url": "https://api.github.com/x", "dismiss_stale_reviews": True, "require_code_owner_reviews": True,
+                "required_approving_review_count": 2, "require_last_push_approval": False,
+                "dismissal_restrictions": {"users": [{"login": "alice"}], "teams": [{"slug": "core"}], "apps": []}},
+            "restrictions": {"users": [{"login": "alice"}], "teams": [], "apps": [{"slug": "night-shift"}]},
+            "required_linear_history": {"enabled": True}, "allow_force_pushes": {"enabled": True},
+            "required_conversation_resolution": {"enabled": False},
+        }
+        rc, text = self.run_cli("setup")
+        self.assertEqual(rc, 0)
+        body = self.fake.writes("PUT", r"branches/main/protection$")[0][2]
+        self.assertEqual(body["required_status_checks"], {"strict": True, "checks": [
+            {"context": "lint", "app_id": 15368}, {"context": "test", "app_id": -1},
+            {"context": "review / verdict", "app_id": -1}]})
+        self.assertEqual(body["required_pull_request_reviews"], {
+            "dismiss_stale_reviews": True, "require_code_owner_reviews": True, "required_approving_review_count": 2,
+            "require_last_push_approval": False,
+            "dismissal_restrictions": {"users": ["alice"], "teams": ["core"], "apps": []}})
+        self.assertEqual(body["restrictions"], {"users": ["alice"], "teams": [], "apps": ["night-shift"]})
+        self.assertIs(body["required_linear_history"], True)
+        self.assertNotIn("required_conversation_resolution", body)
+        self.assertIs(body["allow_force_pushes"], False)
+        self.assertIs(body["enforce_admins"], True)
+        for said in ("kept the required checks already there: lint", "added required checks: review / verdict",
+                     "kept required pull request reviews (2 approval(s), code owners)", "kept the push restrictions",
+                     "kept required_linear_history", "turned on enforce_admins", "turned off allow_force_pushes"):
+            self.assertIn(said, text)
+
+    def test_setup_changes_nothing_when_the_protection_cannot_be_read(self):
+        self.fake.protection_error = 403
+        rc, text = self.run_cli("setup")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.fake.writes("PUT", r"branches/main/protection$"), [])
+        self.assertIn("could not read the current protection of main", text)
+
     def test_setup_dry_run_exact(self):
         self.assert_dry_run(["setup"], lambda f: None)
 

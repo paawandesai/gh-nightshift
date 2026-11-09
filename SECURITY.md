@@ -88,8 +88,20 @@ push and the PR come from the PAT's account.
 - **Trusted markers.** Only comments posted by the PAT's own login count as protocol markers
   (`nightshift/protocol.py`, `is_trusted`). Attempt counts, blocks, hand-offs, needs and notes cannot be
   forged by outsiders. Text the agent writes (summary, assumptions, notes, needs, hand-off) is re-posted
-  under the PAT's login, so it is defanged first (`protocol.defang` turns `<!--` into `&lt;!--`); an agent
-  cannot plant a trusted marker. Repo writers can still edit bot comments (see Known gaps).
+  under the PAT's login, so it is defanged first (`protocol.defang` turns `<!--` into `&lt;!--`), and the run's
+  cost and turn count are read as numbers (`publish._cost`), because the agent's runner writes the result file;
+  an agent cannot plant a trusted marker. Repo writers can still edit bot comments (see Known gaps).
+- **Agent text stays in its place.** Hand-off items and assumptions are single lines (`protocol.one_line`), so
+  an item cannot start a heading of its own inside a comment the next agent trusts. Closing keywords in agent
+  text ("closes #12") are broken with a zero-width space (`protocol.no_close`), the PR body's own `Closes #n`
+  is the only one that works, and the picker writes the squash commit's title and message itself
+  (`picker.merge_body`) instead of taking the agent's commit messages. So an agent cannot close other tickets
+  or the night log, or put `[skip ci]` on main. Without an open night-log issue, a lane with a budget and the
+  fix-main lane stop instead of running uncounted.
+- **Tickets an agent asks for.** A `needs` ticket in another lane is ready at once when it passes the ticket
+  validator, so by default one agent can queue work for another with nobody in between (see Known gaps 12).
+  Set `limits.auto_ready_needs: false` to file these as `proposed`; a person then swaps the label for
+  `night-safe`.
 - **Per-contributor PATs.** When lanes use their owners' own PATs, list those logins in `trusted_logins`;
   markers, PRs and night-log cost lines from them count too. The default is just the PAT's own login.
   `join` refuses a classic PAT with the `workflow` scope, and `doctor --pat-env` checks every PAT and warns
@@ -102,11 +114,12 @@ push and the PR come from the PAT's account.
      as a request from an outsider, because they can edit it after a maintainer labels it.
   2. A "Coordination" section with marker-carrying comments from the PAT login, marked trusted.
   3. A "Discussion" section with comments from the repo's owners, members and collaborators, the PAT
-     login and GitHub Actions bots. Each is fenced in a code block and labelled as data, never
-     instructions.
+     login and `github-actions[bot]` (that exact login, which no user can register). Each is fenced in a
+     code block and labelled as data, never instructions.
 
-  Comments from anyone else are dropped entirely. The worker prompt repeats that the task file describes
-  work and does not override the rules.
+  Comments from anyone else are dropped entirely. "Member" is GitHub's `author_association`: in an
+  organization it includes members who have no write access to this repo (see Known gaps). The worker prompt
+  repeats that the task file describes work and does not override the rules.
 - **The planner.** `/night-shift plan` runs only when the commenter has write, maintain or admin permission
   (`planner.can_request_plan`). The request is fenced as data in the planning context. The comment body
   reaches the script through an environment variable, never through `${{ }}` interpolation into shell.
@@ -121,14 +134,17 @@ push and the PR come from the PAT's account.
 - **Cross-repo hand-offs.** Text from another repository (title, `## Interface`) is defanged, fenced and
   labelled as data; its trust markers are never read, because that repo's PAT login is not this repo's.
 - **Org-wide base config.** `.night-shift/base.yml` cannot set lanes, labels, the merge mode, `tool_ref`,
-  `bot_login`, `trusted_logins`, `auth`, `extends` or any secret name, and its `risk` settings can only make
-  approval stricter (`planner.claude_token_secret` and `digest.webhook_secret` are dropped from
-  it), so whoever controls the org repo cannot widen trust or route a secret. It lives under `.night-shift/`,
-  which agents cannot change.
+  `bot_login`, `trusted_logins`, `auth`, `extends` or any secret name, and its
+  `risk` settings can only make approval stricter (`planner.claude_token_secret` and `digest.webhook_secret`
+  are dropped from it), so whoever controls the org repo cannot widen trust or route a secret. Its other
+  settings are not clamped: a base can raise `limits` (attempts, turns) or switch on planner refill. It lives
+  under `.night-shift/`, which agents cannot change.
 - **Audit log export.** CSV cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so a crafted model
   name cannot run as a spreadsheet formula. Only PRs and night-log lines from trusted logins are exported.
 - **What agents may pick.** Only issues with the ready label (`night-safe`) and exactly one lane label are
-  picked. Only people with triage or write access can add labels.
+  picked. Only people with triage or write access can add labels by hand. An issue template's `labels:` are
+  applied for whoever opens the issue, so the ticket template `init` installs files tickets as `proposed`,
+  never `night-safe`. The picker does not check who applied the label (see Known gaps).
 
 ## Protected paths
 
@@ -166,7 +182,10 @@ The picker merges a lane's PR itself (squash, via the PAT) when it is green. It 
 auto-merge. The risk is that a wrong but plausible change lands on main overnight. Mitigations:
 
 - **Required checks enforced by GitHub.** `setup` protects main with the required checks (`test` and
-  `review / verdict`) and `enforce_admins: true`. The PAT cannot merge past a failing or missing check even
+  `review / verdict`) and `enforce_admins: true`. It adds to a protection that is already there and never
+  removes from it: required reviews, push restrictions and other required checks are kept, and it prints what
+  it kept and changed (`repo_setup.merged_protection`). If the current protection cannot be read, it changes
+  nothing. The PAT cannot merge past a failing or missing check even
   if its owner is an admin. The picker also counts a PR as green only after every required check has
   reported.
 - **Strict mode.** PRs must be up to date with main (`strict: true`). A PR behind main is updated and
@@ -218,8 +237,9 @@ These are not enforced by v0.1. They are listed so you can judge the risk yourse
 4. **The reviewer reads untrusted code.** Text in the PR can try to talk the reviewer into a `pass`. It
    cannot write anything, and the `test` check is still required, but the gate is a model, not a proof.
 5. **Moving `tool_ref`.** By default, the workflows and scripts come from `paawandesai/gh-nightshift@main`
-   and run with your PAT. Pin `tool_ref` to a release tag or commit SHA. `doctor` warns while it follows a
-   branch.
+   and run with your PAT. `init` pins `tool_ref` to the release tag of the extension that ran it. A tag can be
+   moved by whoever can push to the tool repo; a 40-character commit SHA cannot. Pin a SHA (ideally of a fork
+   your organization owns) when the App key or PAT matters. `doctor` warns only while it follows a branch.
 6. **Commits are not signed.** The github-actions[bot] author is set with `git config` in a job the agent
     controls, so the author field is not proof of origin. The PR author (the PAT login) is.
 7. **Repo collaborators with write access are trusted.** They can label issues `night-safe`, edit
@@ -230,6 +250,35 @@ These are not enforced by v0.1. They are listed so you can judge the risk yourse
 9. **The digest webhook URL is a bearer secret.** Anyone holding a Slack or Discord webhook URL can post to
    that channel. It is passed by explicit name (`digest.webhook_secret`) only to the digest workflow, never
    to a lane, and the tool never prints it, but it lives in the same job as the PAT.
+10. **The PAT and the App key are repository secrets.** Any workflow on any branch can read a repository
+    secret, so everyone with write access can. An App private key can mint tokens for every repository the App
+    is installed on, with all of the App's permissions; the one-repo limit is chosen by the code that mints.
+    Use one App per repository, or store the key as an environment secret limited to the default branch.
+11. **Who labelled a ticket, and what it said then, is not checked.** The picker trusts the ready label
+    whoever applied it (a bot, an issue template of your own), and the author can edit the title and body
+    afterwards. Tickets from organization members without write access are read unfenced.
+12. **Agents talk to each other.** Hand-offs and notes written by one agent appear in another's task file in
+    the section marked trusted, and a note can go to any open issue. Their text is single-line and cannot
+    forge markers, but it is still an agent's text.
+13. **The agent job runs on the default branch's ref with sudo.** A process with root on the runner can read
+    the job's own credentials for the Actions cache and artifacts. Do not restore Actions caches in workflows
+    that hold secrets, and treat the cache of the default branch as writable by agents.
+14. **The reviewer and the planner hold their Claude token in the environment** and can read any file on
+    their runner. A reviewer talked into it could quote the token in its review comment.
+15. **Actions and Claude Code are not pinned to commits.** The workflows use `actions/checkout@v4`,
+    `upload-artifact@v4`, `download-artifact@v4` and `@anthropic-ai/claude-code@latest` (set the repo variable
+    `CLAUDE_CODE_VERSION` to pin the last one).
+16. **Protected paths cover the night shift's own files only.** `AGENT_RULES.md`, `progress/`, your docs,
+    dependency manifests and lockfiles, package-manager config, scripts your workflows call, and editor or
+    container config are not protected. Add what matters to `protected_paths` or `risk.approve_paths`.
+17. **Your repo's Actions settings are not checked.** If the default `GITHUB_TOKEN` is read/write, agent code
+    running in your CI can post commit statuses and comments. The required checks are registered by name and
+    are not tied to the GitHub Actions app. In `queue` merge mode GitHub writes the squash message, so closing
+    keywords in an agent's commit messages work there.
+18. **The planner's tickets are ready at once.** In review mode it reads the issue's title and body, which an
+    outsider may have written; with refill on it plans from docs that agents can edit.
+19. **Cross-repo `Blocked by`** makes the night shift copy the title and `## Interface` section of an issue
+    from any repository its token can read. Use a fine-grained PAT or the App, which reach one repository.
 
 ## Reporting a vulnerability
 

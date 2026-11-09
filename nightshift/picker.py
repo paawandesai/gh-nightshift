@@ -234,6 +234,15 @@ class Picker:
         self.gh.comment(issue, f"Night shift: PR #{num} was closed ({why}). "
                                "See the review comments on it before retrying.")
 
+    def merge_body(self, pr: dict, sha: str, m: re.Match | None) -> dict:
+        """The squash commit's title and message are written here. GitHub's default message is the list of the
+        agent's own commit messages, where "closes #n" would close other issues and "[skip ci]" would switch off
+        CI for the commit that lands on main."""
+        title = " ".join(ns.no_skip_ci(ns.no_close(str(pr.get("title") or f"PR {pr['number']}"))).split())
+        closes = f"Closes #{int(m.group(2))}\n\n" if m else ""
+        return {"merge_method": "squash", "sha": sha, "commit_title": f"{title} (#{pr['number']})"[:250],
+                "commit_message": f"{closes}Night-shift lane {self.lane.name}, PR #{pr['number']}."}
+
     def behind_main(self, sha: str) -> bool:
         data = self.gh.get(self.gh.r(f"compare/{self.cfg.main_branch}...{sha}")) or {}
         return int(data.get("behind_by") or 0) > 0
@@ -294,7 +303,7 @@ class Picker:
                         self.awaiting_approval.add(int(m.group(2)))  # never re-picked while its PR waits
                     continue  # waiting for a person does not hold up the lane
                 try:
-                    self.gh.put(self.gh.r(f"pulls/{num}/merge"), {"merge_method": "squash", "sha": sha})
+                    self.gh.put(self.gh.r(f"pulls/{num}/merge"), self.merge_body(pr, sha, m))
                 except GHError as err:
                     print(f"warning: could not merge green PR #{num}: {err}")
                 else:
@@ -407,10 +416,12 @@ class Picker:
             return "green", ""
         return "green", ""
 
-    def fix_main_attempts(self, sha: str) -> tuple[int, int]:
+    def fix_main_attempts(self, sha: str) -> tuple[int, int] | None:
+        """(attempts, runs that never started) for this failing commit; None when there is no night log to count
+        them on (then fix-main does not run: an uncounted retry loop would never stop)."""
         log = self.gh.night_log(self.cfg.label("night_log"))
         if log is None:
-            return 0, 0
+            return None
         comments = self.gh.comments(log)
         return (ns.count(comments, self.gh.trusted, "fix-attempt", sha=sha),
                 ns.count(comments, self.gh.trusted, "fix-infra", sha=sha))
@@ -466,7 +477,9 @@ class Picker:
             return ""
         log = self.gh.night_log(self.cfg.label("night_log"))
         if not log:
-            return ""
+            # The budget is counted on the night log. Without one the cap must hold, not vanish.
+            return (f"lane {self.lane.name} has a nightly budget but there is no open night-log issue to count it "
+                    "on; run `gh nightshift setup`")
         now = self.now or dt.datetime.now(dt.timezone.utc)
         since = night_start(now, self.cfg.timezone)
         comments = self.gh.comments(log)
@@ -498,7 +511,11 @@ class Picker:
         if health == "red":
             if self.fix_lane != self.lane.name:
                 return skip(f"{self.cfg.main_branch} is red; waiting for lane {self.fix_lane or '(none set)'}")
-            tried, infra = self.fix_main_attempts(sha)
+            counted = self.fix_main_attempts(sha)
+            if counted is None:
+                return skip(f"{self.cfg.main_branch} is red, but there is no open night-log issue to count fix-main "
+                            "attempts on; run `gh nightshift setup`")
+            tried, infra = counted
             if tried >= self.cfg.max_attempts or infra >= self.cfg.infra_cap:
                 return skip(f"fix-main gave up on {sha[:7]} ({tried} attempts, {infra} runs that never "
                             "started); needs a human")
