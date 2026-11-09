@@ -13,6 +13,8 @@ First release, extracted from the hackathon night-shift kit (`legacy/hackathon-k
 
 - `gh nightshift` CLI extension (Python 3.10+, standard library only) with the commands `init`, `setup`,
   `join`, `doctor`, `status`, `stats`, `plan`, `start`, `pause`, `freeze`, `resume`, `lint` and `audit`.
+- The review gate fetches the base branch with the job token for that one command, so it works on private
+  repos (the checkouts keep no credentials).
 - `check-pat` (run at the start of every lane) probes the repo, contents, issues, pull requests and Actions with
   the PAT and names the missing fine-grained permission, instead of `pick` failing later on a bare 404.
   Every command that writes to GitHub supports `--dry-run`, which prints the exact `gh api` calls.

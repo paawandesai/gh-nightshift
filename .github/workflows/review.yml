@@ -75,7 +75,11 @@ jobs:
         run: |
           set -euo pipefail
           WORK="$RUNNER_TEMP/review"; mkdir -p "$WORK"
-          git -C pr fetch -q origin "$BASE_REF"
+          # The checkouts keep no credentials (persist-credentials: false), so on a private repo this fetch must
+          # carry the job token itself. It is passed for this one command only and never written to disk.
+          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::${AUTH#AUTHORIZATION: basic }"
+          git -C pr -c "http.https://github.com/.extraheader=$AUTH" fetch -q origin "$BASE_REF"
           python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
             --out-dir "$WORK" --github-output "$GITHUB_OUTPUT"
 

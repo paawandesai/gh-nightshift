@@ -45,6 +45,16 @@ class Workflows(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn('--disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"', workflow(name))
 
+    def test_review_base_fetch_authenticates_without_persisting_the_token(self):
+        # Seen live: on a private repo the credential-less checkout made `git fetch origin main` die with exit 128.
+        text = workflow("review.yml")
+        gather = text[text.index("- name: Gather"):text.index("- name: Install Claude Code")]
+        self.assertIn('-c "http.https://github.com/.extraheader=$AUTH" fetch', gather)
+        self.assertIn("::add-mask::", gather)
+        review = text[text.index("- name: Review"):text.index("- name: Post review")]
+        self.assertNotIn("GH_TOKEN", review)
+        self.assertNotIn("persist-credentials: true", text)
+
     def test_safe_path_only_in_pat_jobs_not_the_agent_job(self):
         text = workflow("lane.yml")
         agent = text[text.index("\n  agent:"):text.index("\n  publish:")]
