@@ -167,8 +167,8 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `digest` | | `weekly_schedule` (`0 8 * * 1`, `""` = off), `enabled` (true), `schedule` (`0 7 * * *`, UTC), `webhook_secret` (optional secret holding a Slack or Discord webhook URL) |
 
 Repo variables override some settings at run time without a commit: `AGENTS_ENABLED`, `FIX_LANE`,
-`ESCALATE_MODEL`, `REVIEW_MODEL` (fallback), `PLANNER_MODEL`, `CLAUDE_CODE_VERSION` and
-`CLAUDE_PERMISSION_FLAGS`. A project can replace a prompt by committing `.night-shift/prompts/worker.md`,
+`ESCALATE_MODEL`, `REVIEW_MODEL` (fallback), `PLANNER_MODEL`, `CLAUDE_CODE_VERSION`,
+`CLAUDE_PERMISSION_FLAGS` and `NIGHT_SHIFT_TOKEN_IN_ENV` (see SECURITY.md, known gap 2). A project can replace a prompt by committing `.night-shift/prompts/worker.md`,
 `review.md` or `planner.md` on the default branch.
 
 ## The comment protocol

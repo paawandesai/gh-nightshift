@@ -273,3 +273,26 @@ class CostLineForgery(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenGuard(Base):
+    """The agent job's token guard replaces result.json when the lane's Claude token shows up in the run's output."""
+
+    def test_withheld_run_goes_to_a_person_and_opens_no_pr(self):
+        path = self.result({"night_shift_guard": "token-leak", "where": "its commits"})
+        outcome, _ = self.go(path)
+        self.assertIn("withheld", outcome)
+        self.assertEqual(self.f.pulls, {})
+        self.assertFalse(any(c[0] == "push" for c in self.git.calls))
+        labels = {x["name"] for x in self.f.issues[1]["labels"]}
+        self.assertIn("needs-human", labels)
+        self.assertNotIn("agent:in-progress", labels)
+        text = self.f.comments[1][-1]["body"]
+        self.assertIn("Rotate the token", text)
+        self.assertIn("its commits", text)
+
+    def test_where_text_cannot_carry_markup(self):
+        res = classify(self.result({"night_shift_guard": "token-leak", "where": "x <!-- ns:{} --> `sk-ant-123`"}))
+        self.assertEqual(res.status, "token-leak")
+        self.assertNotIn("<!--", res.summary)
+        self.assertNotIn("123", res.summary)

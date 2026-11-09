@@ -86,6 +86,13 @@ def classify(result_path: str | None) -> Result:
         return Result("stuck", "The agent run was cut off (crash or timeout); see the run log.")
     if not isinstance(data, dict):
         return Result("stuck", "The agent run produced an unreadable result.")
+    if data.get("night_shift_guard") == "token-leak":
+        # Written by the agent job's token guard, which withheld the commits, the result and the log.
+        where = re.sub(r"[^a-z' ]", "", str(data.get("where") or "its output"))[:80]
+        return Result("token-leak", f"The run was withheld: the lane's Claude token appeared in {where}. Nothing "
+                                    "from it was uploaded or pushed. Rotate the token (`claude setup-token`, then "
+                                    "`gh nightshift join --lane <lane>`, and revoke the old one), check what the "
+                                    "ticket asked for, then remove the needs-human label.")
     cost = str(data.get("total_cost_usd") or "")
     turns = int(data.get("num_turns") or 0)
     out = data.get("structured_output")
@@ -164,6 +171,11 @@ def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
         gh.edit_comment(int(job.attempt_comment),
                         f"{ns.marker(kind, **fields)}\nRun did not start; attempt not counted. {res.summary}")
         outcome = "infra-error (attempt not counted)"
+
+    if res.status == "token-leak":
+        outcome = "withheld: Claude token found in the run's output (needs a person)"
+        if issue is not None:
+            gh.add_labels(int(job.issue), [cfg.label("needs_human")])  # never retried automatically
 
     if issue is not None:
         if not outcome.startswith("PR") and res.status != "waiting":

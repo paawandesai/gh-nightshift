@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Security
+
+- The agent's Claude token is handed to Claude on a pipe instead of an environment variable, so tests and tools
+  the agent runs do not inherit it (`NIGHT_SHIFT_TOKEN_IN_ENV=true` restores the old behaviour).
+- A token guard in the agent job searches the commits, the result and the log for the lane's Claude token before
+  anything is uploaded or pushed. On a hit the run is withheld and the issue is labelled `needs-human`.
+
 ### Added
 
 - `init --lane-pats` (with `--owners` and `--bot-login`) pairs every lane with its owner's own PAT and Claude
