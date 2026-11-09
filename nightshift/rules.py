@@ -116,7 +116,7 @@ def normalize_path(path: str) -> str | None:
 
 def split_paths(entry: str) -> list[str]:
     """`"api/x.py, contracts/y.json"` -> two paths (planner Files entries are free text)."""
-    return [p for p in re.split(r"[,\s]+", str(entry)) if p]
+    return [p.strip("`'\"") for p in re.split(r"[,;\s]+", str(entry)) if p.strip("`'\"")]
 
 
 def path_is_protected(path: str, protected: list[str]) -> bool:

@@ -181,13 +181,17 @@ def tool_checks(gh: GH, cfg: Config) -> list[Check]:
     """The caller's `uses:` and the unauthenticated tool checkouts need TOOL_REPO public and tool_ref to exist."""
     from .scaffold import TOOL_REPO
 
-    tool = gh.get_or_none(f"repos/{TOOL_REPO}")
+    try:
+        tool = gh.get_or_none(f"repos/{TOOL_REPO}")
+        ref = gh.get_or_none(f"repos/{TOOL_REPO}/commits/{cfg.tool_ref}") if tool else None
+    except GHError as err:
+        return [Check(WARN, f"could not check {TOOL_REPO}@{cfg.tool_ref}: {err}", "re-run `gh nightshift doctor` later")]
     if tool is None:
         return [Check(FAIL, f"cannot read {TOOL_REPO}", "the workflows need it reachable; check the name")]
     if tool.get("private"):
         return [Check(FAIL, f"{TOOL_REPO} is private: other repos cannot use its workflows or check it out",
                       "make it public, or fork it publicly and point the caller workflows at the fork")]
-    if gh.get_or_none(f"repos/{TOOL_REPO}/commits/{cfg.tool_ref}") is None:
+    if ref is None:
         return [Check(FAIL, f"{TOOL_REPO}@{cfg.tool_ref} does not exist",
                       "set tool_ref in .night-shift/config.yml to a pushed tag or SHA, then `gh nightshift init --regenerate`")]
     return [Check(OK, f"{TOOL_REPO}@{cfg.tool_ref} is reachable")]
