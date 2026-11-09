@@ -54,7 +54,7 @@ def _regex(pattern: str) -> re.Pattern:
     last = p.rsplit("/", 1)[-1]
     if directory:
         suffix = r"/.*"
-    elif "*" in last and "**" not in last:
+    elif "/" in p and "*" in last and "**" not in last:
         suffix = ""  # `docs/*` matches files directly in docs/, not nested ones (GitHub)
     else:
         suffix = r"(?:/.*)?"

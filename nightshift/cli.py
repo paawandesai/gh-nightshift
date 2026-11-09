@@ -574,8 +574,9 @@ def cmd_config(ctx: Ctx) -> int:
         raise ConfigError(f"{cfg.extends} has no {CONFIG_PATH} (or this token cannot read it)")
     text = base64.b64decode(data["content"]).decode("utf-8")
     header = (f"# Copied from {cfg.extends}:{CONFIG_PATH} by `gh nightshift config pull`; do not edit here.\n"
-              f"# Only shared settings are used (models, limits, labels, protected_paths, required_checks, timezone,\n"
-              f"# risk, digest, planner, merge, tool_ref); lanes, logins, auth and secret names stay in config.yml.\n")
+              f"# Only shared settings are used (models, limits, protected_paths, required_checks, timezone, risk,\n"
+              f"# digest, planner), and only to add checks; lanes, labels, merge mode, tool_ref, logins, auth and\n"
+              f"# secret names stay in config.yml.\n")
     loads((ctx.root / CONFIG_PATH).read_text(encoding="utf-8"), text)  # the merged result must be valid
     target = ctx.root / BASE_PATH
     if ctx.gh.dry_run:

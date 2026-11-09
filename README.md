@@ -337,7 +337,8 @@ Put shared settings in `your-org/.github/.night-shift/config.yml`, add `extends:
 repo's config, and run `gh nightshift config pull`. It writes `.night-shift/base.yml`; commit it. The repo's
 own config wins key by key, `protected_paths` are added together, and only shared settings are taken from the
 base: `models`, `limits`, `protected_paths`, `required_checks`, `timezone`, `risk` (only stricter: approval
-rules add up, `default: approve` and `codeowners: true` win), `digest` and `planner`. Lanes, labels, merge mode,
+rules add up, `default: approve` and `codeowners: true` win), `digest` and `planner`. `required_checks` and
+`planner.human_paths` from the base are added to the repo's own, never replacing them. Lanes, labels, merge mode,
 `tool_ref`, `bot_login`, `trusted_logins`, `auth` and every secret name stay in the repo. Workflows read only the committed file, so they need no access to the org repo. `doctor` warns when
 `extends` is set and `base.yml` is missing.
 

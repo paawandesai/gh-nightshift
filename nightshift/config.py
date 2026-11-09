@@ -286,6 +286,16 @@ def merge_base(base: dict, local: dict) -> dict:
             value = {k: v for k, v in value.items() if k not in NOT_FROM_BASE.get(key, set())}
         if key == "protected_paths":
             out[key] = list(value or []) + [p for p in (local.get(key) or []) if p not in (value or [])]
+        elif key == "required_checks":
+            # Added to the repo's own (or default) checks, never replacing them: the review gate stays required.
+            own = local.get(key) or ["test", "review / verdict"]
+            out[key] = list(dict.fromkeys(list(own) + list(value or [])))
+        elif key == "planner" and isinstance(value, dict):
+            mine = dict(local.get("planner") or {})
+            merged = {**value, **mine}
+            merged["human_paths"] = list(dict.fromkeys(list(mine.get("human_paths") or ["contracts/"])
+                                                       + list(value.get("human_paths") or [])))
+            out[key] = merged
         elif key == "risk" and isinstance(value, dict):
             # Only stricter: approval rules add up, and `approve`/codeowners from either side win.
             mine = dict(local.get("risk") or {})

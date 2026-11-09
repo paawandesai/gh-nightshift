@@ -1152,6 +1152,16 @@ class Batch4Fixes(CodeOwners):
         self.assertEqual(row["prompt_version"], "")
         self.assertIn("'\tx", auditlog.render([{**row, "model": "\tx"}]))
 
+    def test_round2_low_findings(self):
+        from nightshift import auditlog, codeowners
+        from nightshift.config import loads as load_text
+
+        self.assertEqual(codeowners.owners_for(codeowners.parse("secret* @a"), "secrets/key"), ["@a"])
+        self.assertEqual(auditlog.render([{"pr": 1, "model": ""}]).splitlines()[1].count("'"), 0)
+        cfg = load_text(TEAM, "required_checks: [test]\nplanner:\n  human_paths: [db/]\n")
+        self.assertIn("review / verdict", cfg.required_checks)
+        self.assertEqual(cfg.planner_human_paths, ["contracts/", "db/"])
+
     def test_hackathon_protects_contracts(self):
         from nightshift import scaffold
 
