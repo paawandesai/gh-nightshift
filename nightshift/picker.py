@@ -326,20 +326,18 @@ class Picker:
         if not (cfg.risk_approve_labels or cfg.risk_approve_paths or cfg.risk_default == "approve"
                 or cfg.risk_codeowners):
             return ""
-        labels = label_names(pr) | (label_names(self.gh.issue(issue_no) or {}) if issue_no else set())
-        hit = sorted(labels & set(cfg.risk_approve_labels))
-        if hit:
-            return f"label {hit[0]}"
         if (cfg.risk_approve_paths or cfg.risk_codeowners) and self.pr_files(pr["number"]) is None:
             return "too many changed files to check the path rules"
-        if cfg.risk_approve_paths:
-            for f in self.pr_files(pr["number"]) or []:
-                if path_is_protected(f, cfg.risk_approve_paths):
-                    return f"changes {f}"
+        owned = ""
         if cfg.risk_codeowners:
+            # Owner groups first: whatever else asks for approval, owned files still need their owners.
             from . import codeowners
 
-            rules = codeowners.fetch(self.gh, self.cfg.main_branch)
+            try:
+                rules = codeowners.fetch(self.gh, self.cfg.main_branch)
+            except GHError:
+                self._owner_groups[pr["number"]] = [set()]  # unreadable CODEOWNERS: nobody's approval suffices
+                return "CODEOWNERS could not be read; fix access, then re-run"
             groups = {}
             for f in self.pr_files(pr["number"]) or []:
                 owners = codeowners.owners_for(rules, f)
@@ -348,7 +346,18 @@ class Picker:
             if groups:
                 self._owner_groups[pr["number"]] = list(groups.values())
                 first = sorted(groups)[0]
-                return f"code owners review: {first}" + (f" and {len(groups) - 1} more file(s)" if len(groups) > 1 else "")
+                owned = f"code owners review: {first}" + (f" and {len(groups) - 1} more file(s)" if len(groups) > 1
+                                                          else "")
+        labels = label_names(pr) | (label_names(self.gh.issue(issue_no) or {}) if issue_no else set())
+        hit = sorted(labels & set(cfg.risk_approve_labels))
+        if hit:
+            return f"label {hit[0]}"
+        if cfg.risk_approve_paths:
+            for f in self.pr_files(pr["number"]) or []:
+                if path_is_protected(f, cfg.risk_approve_paths):
+                    return f"changes {f}"
+        if owned:
+            return owned
         if cfg.risk_default == "approve" and not labels & set(cfg.risk_auto_labels):
             return "risk.default is approve"
         return ""

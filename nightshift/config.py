@@ -104,7 +104,8 @@ class Config:
     # --- derived -----------------------------------------------------------------------
     @property
     def protected_paths(self) -> list[str]:
-        return BUILTIN_PROTECTED + [p for p in self.extra_protected if p not in BUILTIN_PROTECTED]
+        extra = ["CODEOWNERS", "docs/CODEOWNERS"] if self.risk_codeowners else []  # .github/ is already built in
+        return BUILTIN_PROTECTED + [p for p in self.extra_protected + extra if p not in BUILTIN_PROTECTED]
 
     @property
     def ready_label(self) -> str:
@@ -223,7 +224,8 @@ def parse(data: dict) -> Config:
     )
     if not re.fullmatch(r"[0-9*/,\- ]{9,60}", cfg.digest_schedule) or len(cfg.digest_schedule.split()) != 5:
         raise ConfigError(f"digest.schedule {cfg.digest_schedule!r} is not a 5-field cron expression")
-    if cfg.extends and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", cfg.extends):
+    if cfg.extends and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", cfg.extends)
+                        or cfg.extends.split("/")[1] in (".", "..")):
         raise ConfigError(f"extends must be owner/repo, not {cfg.extends!r}")
     if cfg.auth_mode not in ("pat", "app"):
         raise ConfigError(f"auth.mode must be pat or app, not {cfg.auth_mode!r}")
@@ -268,8 +270,9 @@ def pats_or_claude(cfg: Config) -> set[str]:
 
 BASE_PATH = ".night-shift/base.yml"  # written by `gh nightshift config pull` from the `extends:` repo
 # What an org-wide base may set. Lanes, identities, auth and secret names always stay in the repo's own config.
-INHERITABLE = {"models", "limits", "labels", "protected_paths", "required_checks", "timezone", "risk", "digest",
-               "planner", "merge", "tool_ref"}
+# Labels, merge mode and tool_ref are left out: each could switch a safety check off (a renamed `human` label
+# makes taken tickets pickable, queue mode skips risk tiers, tool_ref picks the code that runs with the PAT).
+INHERITABLE = {"models", "limits", "protected_paths", "required_checks", "timezone", "risk", "digest", "planner"}
 NOT_FROM_BASE = {"planner": {"claude_token_secret"}, "digest": {"webhook_secret"}}
 
 
@@ -283,6 +286,18 @@ def merge_base(base: dict, local: dict) -> dict:
             value = {k: v for k, v in value.items() if k not in NOT_FROM_BASE.get(key, set())}
         if key == "protected_paths":
             out[key] = list(value or []) + [p for p in (local.get(key) or []) if p not in (value or [])]
+        elif key == "risk" and isinstance(value, dict):
+            # Only stricter: approval rules add up, and `approve`/codeowners from either side win.
+            mine = dict(local.get("risk") or {})
+            merged = {k: list(dict.fromkeys(list(value.get(k) or []) + list(mine.get(k) or [])))
+                      for k in ("approve_labels", "approve_paths") if value.get(k) or mine.get(k)}
+            if mine.get("auto_labels"):
+                merged["auto_labels"] = mine["auto_labels"]
+            if "approve" in (value.get("default"), mine.get("default")):
+                merged["default"] = "approve"
+            if value.get("codeowners") or mine.get("codeowners"):
+                merged["codeowners"] = True
+            out[key] = merged
         elif isinstance(value, dict) and isinstance(local.get(key), dict):
             out[key] = {**value, **local[key]}
         elif key not in local:

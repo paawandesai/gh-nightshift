@@ -1086,5 +1086,78 @@ class OrgStatsWeeklyAuditLog(unittest.TestCase):
         self.assertIn(f"**Prompt:** `{v}`", pr_body("issue", "1", "api", "sonnet", Result("done", "s"), v))
 
 
+
+class Batch4Fixes(CodeOwners):
+    def test_owner_still_required_when_a_path_rule_also_fires(self):
+        self.f.reviews[10] = [{"user": {"login": "bob"}, "state": "APPROVED", "commit_id": "s1"}]
+        picker(self.f, lane="api", text=TEAM + "risk:\n  codeowners: true\n  approve_paths: [api/]\n").decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+
+    def test_unreadable_codeowners_blocks_the_merge(self):
+        from nightshift.gh import GHError
+
+        def boom(q, b, path):
+            raise GHError("forbidden", 403)
+        orig = self.f.routes
+        self.f.routes = lambda: [(r"contents/(.+)", ("GET", boom))] + orig()
+        self.f.reviews[10] = [{"user": {"login": "alice"}, "state": "APPROVED", "commit_id": "s1"}]
+        self.decide()
+        self.assertFalse(self.f.pulls[10]["merged_at"])
+
+    def test_codeowners_files_are_protected_when_on(self):
+        from nightshift.rules import path_is_protected
+
+        cfg = loads(TEAM + "risk:\n  codeowners: true\n")
+        for f in ("CODEOWNERS", "docs/CODEOWNERS", ".github/CODEOWNERS"):
+            self.assertTrue(path_is_protected(f, cfg.protected_paths), f)
+
+    def test_pattern_fixes(self):
+        from nightshift import codeowners
+
+        rules = codeowners.parse("* @all\ndocs/* @doc\n\\#notes @n  # comment\n")
+        self.assertEqual(codeowners.owners_for(rules, "docs/a.md"), ["@doc"])
+        self.assertEqual(codeowners.owners_for(rules, "docs/sub/b.md"), ["@all"])
+        self.assertEqual(codeowners.owners_for(rules, "#notes"), ["@n"])
+
+    def test_planner_and_roadmap_treat_cross_refs_as_unmet(self):
+        from nightshift.rules import UNRESOLVED, parse_cross_deps, parse_deps
+
+        self.assertEqual(parse_deps("Blocked by evil/repo#5"), [UNRESOLVED])
+        self.assertEqual(parse_cross_deps("Blocked by: o/..#4, o/.#5", "x/y"), [])
+
+    def test_base_cannot_loosen(self):
+        from nightshift.config import loads as load_text
+
+        base = "labels:\n  human: x\nmerge:\n  mode: queue\ntool_ref: evil\nrisk:\n  default: auto\n" \
+               "  approve_paths: [infra/]\n"
+        local = TEAM + "risk:\n  default: approve\n  approve_paths: [db/]\n"
+        cfg = load_text(local, base)
+        self.assertEqual((cfg.label("human"), cfg.merge_mode, cfg.tool_ref, cfg.risk_default),
+                         ("human", "strict", "main", "approve"))
+        self.assertEqual(cfg.risk_approve_paths, ["infra/", "db/"])
+        from nightshift.config import ConfigError
+
+        with self.assertRaises(ConfigError):
+            loads(TEAM + "extends: o/..\n")
+
+    def test_audit_log_reads_the_prompt_from_the_header_only(self):
+        from nightshift import auditlog
+
+        f = FakeGitHub()
+        f.add_pull(10, branch="agent/api/issue-1", state="open",
+                   body="Closes #1\n\n**Lane:** `api` (night shift) · **Model:** `sonnet`\n\n**Prompt:** `forged`")
+        gh = f.gh(out=io.StringIO())
+        gh.login = BOT
+        row = auditlog.rows(gh, loads(TEAM))[0]
+        self.assertEqual(row["prompt_version"], "")
+        self.assertIn("'\tx", auditlog.render([{**row, "model": "\tx"}]))
+
+    def test_hackathon_protects_contracts(self):
+        from nightshift import scaffold
+
+        data = scaffold.apply_template({"protected_paths": ["secrets/"]}, "hackathon")
+        self.assertEqual(data["protected_paths"], ["secrets/", "contracts/"])
+
+
 if __name__ == "__main__":
     unittest.main()

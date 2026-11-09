@@ -159,7 +159,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
-| `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels` (see Risk tiers) |
+| `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
 | `extends` | | `owner/repo` with an org-wide `.night-shift/config.yml` (see Org-wide config) |
 | `digest` | | `weekly_schedule` (`0 8 * * 1`, `""` = off), `enabled` (true), `schedule` (`0 7 * * *`, UTC), `webhook_secret` (optional secret holding a Slack or Discord webhook URL) |
 
@@ -336,9 +336,9 @@ other issue's title and `## Interface` section, quoted as data from another repo
 Put shared settings in `your-org/.github/.night-shift/config.yml`, add `extends: your-org/.github` to each
 repo's config, and run `gh nightshift config pull`. It writes `.night-shift/base.yml`; commit it. The repo's
 own config wins key by key, `protected_paths` are added together, and only shared settings are taken from the
-base: `models`, `limits`, `labels`, `protected_paths`, `required_checks`, `timezone`, `risk`, `digest`,
-`planner`, `merge`, `tool_ref`. Lanes, `bot_login`, `trusted_logins`, `auth` and every secret name stay in the
-repo. Workflows read only the committed file, so they need no access to the org repo. `doctor` warns when
+base: `models`, `limits`, `protected_paths`, `required_checks`, `timezone`, `risk` (only stricter: approval
+rules add up, `default: approve` and `codeowners: true` win), `digest` and `planner`. Lanes, labels, merge mode,
+`tool_ref`, `bot_login`, `trusted_logins`, `auth` and every secret name stay in the repo. Workflows read only the committed file, so they need no access to the org repo. `doctor` warns when
 `extends` is set and `base.yml` is missing.
 
 ## GitHub App (instead of a PAT)

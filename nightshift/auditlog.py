@@ -45,7 +45,9 @@ def rows(gh: GH, cfg: Config, since: str = "") -> list[dict]:
             reason = ns.pr_reason(gh.comments(p["number"]), trusted) or ("verdict_passed" if p.get("merged_at")
                                                                          else "manual")
         model = MODEL_RE.search(body)
-        prompt = PROMPT_RE.search(body)
+        header = next((ln for ln in body.splitlines() if ln.startswith("**Lane:**")), "")
+        model = MODEL_RE.search(header) or model
+        prompt = PROMPT_RE.search(header)  # the header line only: the agent's summary follows it
         out.append({"pr": p["number"], "issue": int(m.group(2)), "lane": m.group(1), "outcome": outcome,
                     "reason": reason, "model": model.group(1) if model else "",
                     "prompt_version": prompt.group(1) if prompt else "",
@@ -63,5 +65,5 @@ def render(data: list[dict], fmt: str = "csv") -> str:
     w.writeheader()
     for r in data:
         # A leading = + - @ would run as a formula in a spreadsheet; model names come from PR bodies.
-        w.writerow({k: ("'" + str(v) if str(v)[:1] in "=+-@" else v) for k, v in r.items()})
+        w.writerow({k: ("'" + str(v) if str(v)[:1] in "=+-@\t\r" else v) for k, v in r.items()})
     return buf.getvalue()

@@ -31,7 +31,7 @@ def model_for(item: dict, failed_attempts: int, lane_model: str, escalate_model:
     return escalate_model if failed_attempts > 0 else lane_model
 
 
-CROSS_RE = re.compile(r"(?:https://github\.com/)?([A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100})"
+CROSS_RE = re.compile(r"(?:https://github\.com/)?([A-Za-z0-9][A-Za-z0-9-]{0,38}/(?!\.\.?(?:#|/|$))[A-Za-z0-9._-]{1,100})"
                       r"(?:#|/issues/)(\d+)")
 
 
@@ -62,8 +62,8 @@ def parse_deps(body: str | None, repo: str = "") -> list[int]:
             deps.add(int(num.group(1)))
         elif cross and repo and cross.group(1).lower() == repo.lower():
             deps.add(int(cross.group(2)))
-        elif not cross:
-            deps.add(UNRESOLVED)
+        elif not cross or not repo:
+            deps.add(UNRESOLVED)  # without a repo (planner, roadmap) a cross-repo ref is not checkable: unmet
     return sorted(deps)
 
 

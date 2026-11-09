@@ -15,10 +15,10 @@ LOCATIONS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 def parse(text: str) -> list[tuple[str, list[str]]]:
     rules = []
     for line in (text or "").splitlines():
-        line = line.split("#", 1)[0].strip() if not line.lstrip().startswith("\\#") else line.strip()
+        line = re.split(r"(?<!\\)#", line, maxsplit=1)[0].strip()  # `\#` is a literal #
         if not line:
             continue
-        parts = line.split()
+        parts = line.replace("\\#", "#").split()
         rules.append((parts[0], [o for o in parts[1:] if o.startswith("@") or "@" in o]))
     return rules
 
@@ -51,7 +51,13 @@ def _regex(pattern: str) -> re.Pattern:
             i += 1
     prefix = "" if anchored else r"(?:.*/)?"
     # A directory pattern matches everything below it; a plain name matches a file or a directory of that name.
-    suffix = r"/.*" if directory else r"(?:/.*)?"
+    last = p.rsplit("/", 1)[-1]
+    if directory:
+        suffix = r"/.*"
+    elif "*" in last and "**" not in last:
+        suffix = ""  # `docs/*` matches files directly in docs/, not nested ones (GitHub)
+    else:
+        suffix = r"(?:/.*)?"
     return re.compile(rf"\A{prefix}{out}{suffix}\Z")
 
 
@@ -68,7 +74,9 @@ def fetch(gh: GH, ref: str = "") -> list[tuple[str, list[str]]]:
     for loc in LOCATIONS:
         try:
             data = gh.get_or_none(gh.r(f"contents/{loc}"), {"ref": ref} if ref else None)
-        except GHError:
+        except GHError as err:
+            if err.status != 404:
+                raise  # fail closed: the caller requires approval when CODEOWNERS cannot be read
             data = None
         if data and data.get("content"):
             return parse(base64.b64decode(data["content"]).decode("utf-8", "replace"))

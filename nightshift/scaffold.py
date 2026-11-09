@@ -308,6 +308,7 @@ TEMPLATES = {
                        "max_notes_per_issue": 2},
             "merge": {"mode": "strict"},
             "digest": {"schedule": "0 */4 * * *"},
+            "protected_paths": ["contracts/"],
         },
         "files": {
             "docs/PRD.md": "# Product requirements\n\nWrite what you are building here: the problem, the users, and a "
@@ -323,7 +324,12 @@ TEMPLATES = {
 def apply_template(data: dict, name: str) -> dict:
     out = dict(data)
     for key, value in TEMPLATES[name]["overrides"].items():
-        out[key] = {**(out.get(key) or {}), **value} if isinstance(value, dict) else value
+        if isinstance(value, dict):
+            out[key] = {**(out.get(key) or {}), **value}
+        elif isinstance(value, list):
+            out[key] = list(dict.fromkeys(list(out.get(key) or []) + value))
+        else:
+            out[key] = value
     return out
 
 

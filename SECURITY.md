@@ -101,12 +101,16 @@ push and the PR come from the PAT's account.
 - **Comment commands.** `/night-shift take` and `/night-shift retry` act only for commenters with write,
   maintain or admin permission (checked over REST) and only on issues with a lane label. The comment reaches
   the script through an environment variable. `retry` unassigns only people named in trusted `take` markers.
+- **CODEOWNERS.** Read from the default branch, never the PR. With `risk.codeowners` on, root and `docs/`
+  CODEOWNERS are protected paths (`.github/` already is), and a CODEOWNERS that cannot be read (anything but
+  404) blocks the merge instead of skipping the owner review.
 - **Risk tiers.** An approval counts only from a person with write access who did not open the PR, on the
   PR's current head commit, and only if that person's latest review is an approval. Bots never count.
 - **Cross-repo hand-offs.** Text from another repository (title, `## Interface`) is defanged, fenced and
   labelled as data; its trust markers are never read, because that repo's PAT login is not this repo's.
-- **Org-wide base config.** `.night-shift/base.yml` cannot set lanes, `bot_login`, `trusted_logins`, `auth`,
-  `extends` or any secret name (`planner.claude_token_secret` and `digest.webhook_secret` are dropped from
+- **Org-wide base config.** `.night-shift/base.yml` cannot set lanes, labels, the merge mode, `tool_ref`,
+  `bot_login`, `trusted_logins`, `auth`, `extends` or any secret name, and its `risk` settings can only make
+  approval stricter (`planner.claude_token_secret` and `digest.webhook_secret` are dropped from
   it), so whoever controls the org repo cannot widen trust or route a secret. It lives under `.night-shift/`,
   which agents cannot change.
 - **Audit log export.** CSV cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so a crafted model
