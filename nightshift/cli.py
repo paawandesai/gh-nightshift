@@ -631,14 +631,17 @@ def cmd_lane_config(ctx: Ctx) -> int:
 
 
 def cmd_check_pat(ctx: Ctx, run=subprocess.run) -> int:
-    from .doctor import FAIL, pat_checks
+    from .doctor import FAIL, OK, access_checks, pat_checks
 
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
     checks = pat_checks(token, run)
+    if checks[0].level == OK:
+        checks += access_checks(ctx.gh)
     for c in checks:
         ctx.say(c.line())
     if any(c.level == FAIL for c in checks):
-        ctx.say("::error::the PAT must authenticate and must not have the Workflows permission")
+        ctx.say("::error::the PAT must authenticate, reach this repo with the permissions above, and must not have "
+                "the Workflows permission")
         return 1
     return 0
 

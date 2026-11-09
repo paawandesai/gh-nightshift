@@ -50,6 +50,7 @@ class FakeGitHub:
         self.refs: set[str] = set()
         self.permissions: dict[str, str] = {}
         self.commits_by_path: dict[str, list[dict]] = {}
+        self.denied: set[str] = set()  # repo-relative paths that answer 404 (a PAT missing a permission)
         self.jobs: dict[int, list[dict]] = {}
         self.job_logs: dict[int, str] = {}
         self.calls: list[tuple[str, str, object]] = []
@@ -140,6 +141,8 @@ class FakeGitHub:
                             "encoding": "base64"}
             raise GHError(f"unexpected path {path}", 404)
         rest = p[len(prefix):].lstrip("/")
+        if rest in self.denied or ("" in self.denied):
+            raise GHError("Not Found (HTTP 404)", 404)
         for pattern, handler in self.routes():
             m = re.fullmatch(pattern, rest)
             if m and handler[0] == method:
@@ -192,6 +195,8 @@ class FakeGitHub:
             (r"rulesets", ("GET", lambda q, b: self.rulesets)),
             (r"rulesets", ("POST", lambda q, b: self.rulesets.append(b))),
             (r"collaborators/([^/]+)/permission", ("GET", lambda q, b, u: {"permission": self.permissions.get(u, "read")})),
+            (r"", ("GET", lambda q, b: {"full_name": self.repo})),
+            (r"actions/runs", ("GET", lambda q, b: {"total_count": 0, "workflow_runs": []})),
             (r"contents/(.+)", ("GET", self._contents)),
             (r"commits", ("GET", lambda q, b: self.commits_by_path.get(q.get("path", ""), [])[: int(q.get("per_page", 30))])),
         ]

@@ -356,6 +356,30 @@ class CheckPatTests(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertIn("✓ PAT authenticates as bot", text)
         self.assertIn("fine-grained PAT", text)
+        self.assertIn("PAT can read the repo, contents, issues, pull requests and Actions", text)
+
+    def check_denied(self, *paths):
+        fake = FakeGitHub()
+        fake.denied.update(paths)
+        out = io.StringIO()
+        ctx = cli.Ctx(cli.parser().parse_args(["check-pat", "--repo", "o/r"]), transport=fake, out=out)
+        with mock.patch.dict(os.environ, {"GH_TOKEN": PAT}):
+            rc = cli.cmd_check_pat(ctx, run=FakeRun(pat=("bot", None)))
+        return rc, out.getvalue()
+
+    def test_missing_pull_requests_permission_fails(self):
+        # Seen live: a fine-grained PAT without Pull requests made `pick` die on a bare 404 listing closed PRs.
+        rc, text = self.check_denied("pulls")
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot read Pull requests on o/r (HTTP 404)", text)
+        self.assertIn("Pull requests: Read and write", text)
+        self.assertNotIn("cannot read Issues", text)
+
+    def test_repo_not_selected_fails_once(self):
+        rc, text = self.check_denied("")
+        self.assertEqual(rc, 1)
+        self.assertIn("the PAT cannot see o/r", text)
+        self.assertEqual(text.count("cannot read"), 0)
 
 
 
