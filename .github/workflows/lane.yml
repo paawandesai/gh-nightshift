@@ -189,8 +189,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
           PROMPT="$(sed "s|__TASK_FILE__|$RUNNER_TEMP/task/task.md|g" "$RUNNER_TEMP/task/prompt.md")"
+          # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
           claude -p "$PROMPT" --output-format json \
             --json-schema "$(cat "$RUNNER_TEMP/task/schema.json")" \
             --model "$MODEL" --max-turns "$MAX_TURNS" $PERMISSION_FLAGS > "$OUT/result.json" 2> "$OUT/claude.stderr"
