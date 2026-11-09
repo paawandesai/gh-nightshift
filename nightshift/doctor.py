@@ -78,7 +78,9 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
         out.append(Check(FAIL, f"{LANE_WORKFLOW} is missing", "run `gh nightshift init --regenerate`"))
     else:
         text = wf.read_text(encoding="utf-8")
-        if "secrets: inherit" in text or re.search(r"secrets\[", text):
+        fails_before = sum(c.level == FAIL for c in out)
+        code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+        if "secrets: inherit" in code or re.search(r"secrets\[", code):
             out.append(Check(FAIL, f"{LANE_WORKFLOW} uses dynamic secrets (secrets[...] or inherit): every repo secret "
                                    "would reach the lane runners", "run `gh nightshift init --regenerate`"))
         for lane in cfg.lanes:
@@ -95,7 +97,7 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
         elif not re.fullmatch(r"v\d+(\.\d+)*|[0-9a-f]{40}", cfg.tool_ref):
             out.append(Check(WARN, f"workflows follow gh-nightshift@{cfg.tool_ref}, a moving branch",
                              "pin tool_ref to a release tag or commit SHA in .night-shift/config.yml"))
-        else:
+        elif sum(c.level == FAIL for c in out) == fails_before:
             out.append(Check(OK, f"caller workflow has one job per lane with explicit secrets, pinned @{cfg.tool_ref}"))
     for name in ("night-shift-review.yml",):
         if not (root / ".github/workflows" / name).is_file():

@@ -86,7 +86,11 @@ def stats(gh: GH, cfg: Config, audit_csv: str | None = None) -> str:
     log = gh.night_log(cfg.label("night_log"))
     costs = []
     if log:
-        costs = [float(m.group(1)) for c in gh.comments(log) if (m := COST_RE.search(c.get("body") or ""))]
+        # Only writers' comments count, so an outsider cannot inflate the cost figure.
+        writers = {"OWNER", "MEMBER", "COLLABORATOR"}
+        costs = [float(m.group(1)) for c in gh.comments(log)
+                 if (c.get("author_association") in writers or (c.get("user") or {}).get("login") == gh.login)
+                 and (m := COST_RE.search(c.get("body") or ""))]
     if merged and costs:
         out.append(f"Est. cost per merged PR: ${sum(costs) / len(merged):.2f} API-equivalent "
                    f"(${sum(costs):.2f} over {len(costs)} logged runs)")

@@ -97,13 +97,13 @@ def _ask(ask: Ask, prompt: str, default: str) -> str:
     return answer or default
 
 
-def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool) -> dict:
+def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, out=None) -> dict:
     """Interactive (or --yes) config: lanes from the detected stack, one Claude token secret per owner."""
     stacks = scaffold.detect_stack(root)
     folders = [s for s in stacks if s["path"] != "./"]
     suggested = lanes_arg or ",".join(re.sub(r"[^a-z0-9_-]", "-", s["path"].rstrip("/").lower()) for s in folders) \
         or "app"
-    say = (lambda *_: None) if assume_yes else print
+    say = (lambda *_: None) if assume_yes else (lambda text: print(text, file=out or sys.stdout))
     if stacks:
         say("Detected: " + "; ".join(f"{s['path']} ({s['stack']})" for s in stacks))
     q = (lambda p, d: d) if assume_yes else (lambda p, d: _ask(ask, p, d))
@@ -163,7 +163,7 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
         text = cfg_path.read_text(encoding="utf-8")
         ctx.say(f"{CONFIG_PATH} exists; using it (pass --force to start over)")
     else:
-        text = scaffold.config_yaml(build_config(ctx.root, ask, a.lanes, a.yes))
+        text = scaffold.config_yaml(build_config(ctx.root, ask, a.lanes, a.yes, ctx.out))
         cfg = loads(text)  # validates what we are about to write
     ctx.say(*write_files(ctx, scaffold.files(cfg, text, ctx.root), overwrite=a.force))
     if a.files_only:
@@ -371,7 +371,9 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
 
 def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str) -> int:
     cfg, gh = ctx.cfg, ctx.gh
-    raw = Path(path).read_text(encoding="utf-8") if Path(path).is_file() else "{}"
+    if not Path(path).is_file():
+        raise ConfigError(f"plan file not found: {path}")
+    raw = Path(path).read_text(encoding="utf-8")
     result = planner.publish_plan(gh, cfg, raw, lane)
     lines = result.lines()
     ctx.say(*lines)
@@ -448,12 +450,12 @@ def cmd_publish(ctx: Ctx) -> int:
 
 def cmd_prompt(ctx: Ctx) -> int:
     values = dict(kv.split("=", 1) for kv in ctx.args.set or [])
-    sys.stdout.write(prompts.render(ctx.args.name, values, ctx.root))
+    ctx.out.write(prompts.render(ctx.args.name, values, ctx.root))
     return 0
 
 
 def cmd_schema(ctx: Ctx) -> int:
-    sys.stdout.write(prompts.schema_json(ctx.args.name))
+    ctx.out.write(prompts.schema_json(ctx.args.name))
     return 0
 
 
@@ -518,6 +520,12 @@ def parser() -> argparse.ArgumentParser:
     common.add_argument("--repo", help="OWNER/NAME (default: origin remote, or $GITHUB_REPOSITORY)")
     common.add_argument("--root", default=".", help="repository checkout (default: .)")
     common.add_argument("--dry-run", action="store_true", help="print the GitHub calls instead of making them")
+    # Same options for `plan context|publish`, but SUPPRESS keeps a value already parsed by `plan` (argparse would
+    # otherwise reset it to the default, turning `plan --dry-run publish` into a real run).
+    sub_common = argparse.ArgumentParser(add_help=False)
+    sub_common.add_argument("--repo", default=argparse.SUPPRESS)
+    sub_common.add_argument("--root", default=argparse.SUPPRESS)
+    sub_common.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("init", parents=[common], help="set up night shift in this repo (interactive)")
@@ -549,15 +557,15 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--plan-file", help="publish an existing plan.json instead of running claude")
     s.add_argument("--out-dir", help="where to keep the context and draft")
     psub = s.add_subparsers(dest="plan_action")
-    c = psub.add_parser("context", parents=[common], help="(workflow) write the planning context")
+    c = psub.add_parser("context", parents=[sub_common], help="(workflow) write the planning context")
     c.add_argument("--mode", required=True)
     c.add_argument("--docs", default="")
-    c.add_argument("--lane", default="")
+    c.add_argument("--lane", default=argparse.SUPPRESS)
     c.add_argument("--out-dir", required=True)
     c.add_argument("--github-output")
-    c = psub.add_parser("publish", parents=[common], help="(workflow) validate a plan.json and create issues")
+    c = psub.add_parser("publish", parents=[sub_common], help="(workflow) validate a plan.json and create issues")
     c.add_argument("file")
-    c.add_argument("--lane", default="")
+    c.add_argument("--lane", default=argparse.SUPPRESS)
     c.add_argument("--reply-to", default="")
 
     s = sub.add_parser("audit", parents=[common], help="sample merged agent PRs and measure quality")
