@@ -650,7 +650,7 @@ class FakeAppAPI:
     def __init__(self, perms=None, installed=True):
         self.calls = []
         self.perms = perms or {"contents": "write", "issues": "write", "pull_requests": "write",
-                               "actions": "read", "metadata": "read"}
+                               "actions": "read", "checks": "read", "statuses": "read", "metadata": "read"}
         self.installed = installed
 
     def __call__(self, method, path, token, body=None):

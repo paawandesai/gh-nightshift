@@ -54,6 +54,8 @@ class Workflows(unittest.TestCase):
         review = text[text.index("- name: Review"):text.index("- name: Post review")]
         self.assertNotIn("GH_TOKEN", review)
         self.assertNotIn("persist-credentials: true", text)
+        # A gate that breaks before answering is labelled review-error, so the attempt is refunded.
+        self.assertIn("if: failure() && steps.review.outputs.verdict == ''", text)
 
     def test_safe_path_only_in_pat_jobs_not_the_agent_job(self):
         text = workflow("lane.yml")

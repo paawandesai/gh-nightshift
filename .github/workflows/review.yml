@@ -128,3 +128,10 @@ jobs:
             jq -n --rawfile b "$WORK/comment.md" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$ISSUE/comments" --input - >/dev/null || true
           fi
           if [ "$VERDICT" != "pass" ]; then echo "::error::Review verdict: $VERDICT"; exit 1; fi
+
+      - name: Mark a review gate that broke before the reviewer answered
+        # e.g. the gather step failed: not a verdict on the code, so the picker refunds the attempt.
+        if: failure() && steps.review.outputs.verdict == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=review-error" >/dev/null || true

@@ -33,7 +33,7 @@ of the lane name, unless `planner.id_prefixes` says otherwise).
 
   | Secret | Used by | Value |
   |---|---|---|
-  | `AGENT_PAT` | `night-shift.yml` (`agent_pat`), `night-shift-planner.yml` | fine-grained PAT for the sandbox only: **Contents, Issues, Pull requests: Read and write; Actions: Read; Workflows: No access** (metadata read is automatic) |
+  | `AGENT_PAT` | `night-shift.yml` (`agent_pat`), `night-shift-planner.yml` | fine-grained PAT for the sandbox only: **Contents, Issues, Pull requests: Read and write; Actions, Checks, Commit statuses: Read; Workflows: No access** (metadata read is automatic) |
   | `CLAUDE_TOKEN_API` | `night-shift.yml` job `lane-api`; planner | `claude setup-token` of the api lane owner |
   | `CLAUDE_TOKEN_WEB` | `night-shift.yml` job `lane-web` | `claude setup-token` of the web lane owner (can be the same person for the rehearsal) |
   | `CLAUDE_TOKEN_REVIEW` | `night-shift-review.yml` | `claude setup-token`, ideally someone who does not own a lane |
@@ -187,7 +187,7 @@ variable AGENTS_ENABLED=false (turn on with `gh nightshift start`)
 variable FIX_LANE=api
 protected main: required test, review / verdict, strict=true, admins included
 night-log issue #0 created (pin it)
-[dry-run] gh secret set AGENT_PAT -R paawandesai/ns-sandbox   # value read from a hidden prompt (fine-grained PAT for this repo only: Contents, Issues, Pull requests read/write; Actions read; NO Workflows)
+[dry-run] gh secret set AGENT_PAT -R paawandesai/ns-sandbox   # value read from a hidden prompt (fine-grained PAT for this repo only: Contents, Issues, Pull requests read/write; Actions, Checks, Commit statuses read; NO Workflows)
 [dry-run] gh secret set CLAUDE_TOKEN_API -R paawandesai/ns-sandbox   # value read from a hidden prompt (`claude setup-token` from the owner of lane(s) api)
 [dry-run] gh secret set CLAUDE_TOKEN_REVIEW -R paawandesai/ns-sandbox   # value read from a hidden prompt (`claude setup-token` from someone who does not own a lane (review gate))
 [dry-run] gh secret set CLAUDE_TOKEN_WEB -R paawandesai/ns-sandbox   # value read from a hidden prompt (`claude setup-token` from the owner of lane(s) web)

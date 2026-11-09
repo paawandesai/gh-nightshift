@@ -39,3 +39,10 @@ per step, then the step is marked blocked.
   - Org config inheritance (`extends`, `config pull`, committed base.yml).
   - Cross-repo Blocked-by and pull-style hand-offs (the other repo must be readable by the PAT).
   - `stats --org`, weekly report, `audit-log` export with model, prompt version and cost.
+
+## Live rehearsal fixes (2026-11-09, paawandesai/ns-sandbox)
+
+- e8894b3: `check-pat` probes every endpoint a lane reads and names the missing PAT permission (pick had died on a bare 404).
+- Next commit: the PAT and the App also need Checks: Read and Commit statuses: Read (pick got 403 on a PR's check runs);
+  the review gate authenticates its base fetch on private repos (exit 128 before) and labels `review-error` when it
+  breaks before the reviewer answers, so the attempt is refunded.

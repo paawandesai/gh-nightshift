@@ -54,7 +54,7 @@ Python 3.10 or newer, and a CI workflow whose test job is called `test`. If it h
 
    | Secret | What it is |
    |---|---|
-   | `AGENT_PAT` | A fine-grained PAT for this repo only, owned by the account the night shift acts as. Permissions: Contents, Issues and Pull requests read/write; Actions read. **No Workflows permission.** |
+   | `AGENT_PAT` | A fine-grained PAT for this repo only, owned by the account the night shift acts as. Permissions: Contents, Issues and Pull requests read/write; Actions, Checks and Commit statuses read. **No Workflows permission.** |
    | `CLAUDE_TOKEN_<OWNER>` | One per lane owner, from `claude setup-token`. The secret name is `lanes[].claude_token_secret`. |
    | `CLAUDE_TOKEN_REVIEW` | For the review gate, ideally from someone who does not own a lane (`review_token_secret`). |
 
@@ -347,7 +347,7 @@ rules add up, `default: approve` and `codeowners: true` win), `digest` and `plan
 A GitHub App gives the night shift its own `<app>[bot]` identity and tokens that expire after an hour.
 
 1. `gh nightshift app manifest` prints the App to create: Contents, Issues and Pull requests read/write,
-   Actions read, no Workflows, no webhook. Create it, install it on this repository only, and generate a
+   Actions, Checks and Commit statuses read, no Workflows, no webhook. Create it, install it on this repository only, and generate a
    private key.
 2. `gh nightshift init --app-id <id> --app-key-file key.pem` (or add `auth: {mode: app, app_id: <id>}` to the
    config, run `init --regenerate` and `gh secret set NIGHT_SHIFT_APP_KEY < key.pem`).

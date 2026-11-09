@@ -22,7 +22,8 @@ from typing import Any
 
 API = "https://api.github.com"
 # Exactly what night shift uses. `workflows` is never requested, so the token cannot change .github/workflows/.
-PERMISSIONS = {"contents": "write", "issues": "write", "pull_requests": "write", "actions": "read", "metadata": "read"}
+PERMISSIONS = {"contents": "write", "issues": "write", "pull_requests": "write", "actions": "read",
+               "checks": "read", "statuses": "read", "metadata": "read"}
 FORBIDDEN = {"workflows", "administration", "secrets", "environments", "organization_administration"}
 
 

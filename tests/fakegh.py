@@ -195,7 +195,7 @@ class FakeGitHub:
             (r"rulesets", ("GET", lambda q, b: self.rulesets)),
             (r"rulesets", ("POST", lambda q, b: self.rulesets.append(b))),
             (r"collaborators/([^/]+)/permission", ("GET", lambda q, b, u: {"permission": self.permissions.get(u, "read")})),
-            (r"", ("GET", lambda q, b: {"full_name": self.repo})),
+            (r"", ("GET", lambda q, b: {"full_name": self.repo, "default_branch": "main"})),
             (r"actions/runs", ("GET", lambda q, b: {"total_count": 0, "workflow_runs": []})),
             (r"contents/(.+)", ("GET", self._contents)),
             (r"commits", ("GET", lambda q, b: self.commits_by_path.get(q.get("path", ""), [])[: int(q.get("per_page", 30))])),

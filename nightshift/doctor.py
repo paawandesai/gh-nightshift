@@ -71,23 +71,29 @@ ACCESS_PROBES = (("", "Metadata", "the PAT's Repository access list"),
                  ("commits?per_page=1", "Contents", "Contents: Read and write"),
                  ("issues?per_page=1", "Issues", "Issues: Read and write"),
                  ("pulls?per_page=1", "Pull requests", "Pull requests: Read and write"),
-                 ("actions/runs?per_page=1", "Actions", "Actions: Read"))
+                 ("actions/runs?per_page=1", "Actions", "Actions: Read"),
+                 ("commits/{main}/check-runs?per_page=1", "Checks", "Checks: Read"),
+                 ("commits/{main}/status", "Commit statuses", "Commit statuses: Read"))
 
 
 def access_checks(gh: GH) -> list[Check]:
     """Probe the endpoints a lane reads with this token. A fine-grained PAT that misses a permission, or does not
     list the repo, gets 404 (or 403) here instead of failing later inside `pick` with a bare Not Found."""
     out: list[Check] = []
+    main = "main"
     for suffix, what, fix in ACCESS_PROBES:
         try:
-            gh.get(gh.r(suffix))
+            data = gh.get(gh.r(suffix.format(main=main)))
+            if suffix == "" and isinstance(data, dict):
+                main = data.get("default_branch") or main
         except GHError as err:
             if suffix == "":
                 return [Check(FAIL, f"the PAT cannot see {gh.repo} (HTTP {err.status})",
                               f"edit the PAT: add {gh.repo} under {fix}")]
             out.append(Check(FAIL, f"the PAT cannot read {what} on {gh.repo} (HTTP {err.status})",
                              f"edit the PAT: set {fix}"))
-    return out or [Check(OK, f"PAT can read the repo, contents, issues, pull requests and Actions of {gh.repo}")]
+    return out or [Check(OK, "PAT can read the repo, contents, issues, pull requests, Actions, checks and statuses "
+                             f"of {gh.repo}")]
 
 
 def local_checks(root: Path) -> tuple[Config | None, list[Check]]:

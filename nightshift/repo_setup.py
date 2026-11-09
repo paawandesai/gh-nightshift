@@ -163,7 +163,8 @@ def prompt_secret(gh: GH, name: str, hint: str, setter: SecretSetter | None = No
 
 
 SECRET_HINTS = {
-    "AGENT_PAT": "fine-grained PAT for this repo only: Contents, Issues, Pull requests read/write; Actions read; NO Workflows",
+    "AGENT_PAT": "fine-grained PAT for this repo only: Contents, Issues, Pull requests read/write; "
+                 "Actions, Checks, Commit statuses read; NO Workflows",
 }
 
 
