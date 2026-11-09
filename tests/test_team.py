@@ -130,6 +130,34 @@ class InitFromFlags(unittest.TestCase):
         self.assertEqual(web.setup_commands.strip(), "cd web && npm ci")
         self.assertEqual((cfg.merge_mode, api.budget_usd_per_night), ("queue", 5.0))
 
+    def test_lane_pats_pair_each_lane_with_its_owners_pat_and_token(self):
+        rc, root, _ = self.init("--files-only", "--lanes", "api,web,docs", "--owners", "api=alice,web=bob-k,docs=alice",
+                                "--lane-pats", "--bot-login", "night-bot")
+        self.assertEqual(rc, 0)
+        from nightshift.config import load
+
+        cfg = load(root)
+        pairs = {lane.name: (lane.token_secret, lane.agent_pat_secret) for lane in cfg.lanes}
+        self.assertEqual(pairs, {"api": ("CLAUDE_TOKEN_ALICE", "AGENT_PAT_ALICE"),
+                                 "web": ("CLAUDE_TOKEN_BOB_K", "AGENT_PAT_BOB_K"),
+                                 "docs": ("CLAUDE_TOKEN_ALICE", "AGENT_PAT_ALICE")})
+        self.assertEqual((cfg.trusted_logins, cfg.bot_login), (["alice", "bob-k"], "night-bot"))
+        wf = Path(root, ".github/workflows/night-shift.yml").read_text()
+        self.assertIn("agent_pat: ${{ secrets.AGENT_PAT_BOB_K || secrets.AGENT_PAT }}", wf)
+        code = "\n".join(ln for ln in wf.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertNotIn("secrets[", code)
+
+    def test_without_lane_pats_every_lane_shares_agent_pat(self):
+        rc, root, _ = self.init("--files-only", "--lanes", "api", "--owners", "api=alice")
+        from nightshift.config import load
+
+        cfg = load(root)
+        self.assertEqual((cfg.lane("api").agent_pat_secret, cfg.trusted_logins), ("AGENT_PAT", []))
+
+    def test_lane_pats_and_app_mode_do_not_mix(self):
+        rc, _, _ = self.init("--files-only", "--lanes", "api", "--lane-pats", "--app-id", "123")
+        self.assertEqual(rc, 2)
+
     def test_starter_ci_is_written_when_missing_and_lints(self):
         rc, root, _ = self.init("--files-only", "--lanes", "svc", "--preset", "go")
         ci = Path(root, ".github/workflows/ci.yml").read_text()

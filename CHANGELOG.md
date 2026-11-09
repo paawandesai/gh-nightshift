@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `init --lane-pats` (with `--owners` and `--bot-login`) pairs every lane with its owner's own PAT and Claude
+  token (`AGENT_PAT_<OWNER>`, `CLAUDE_TOKEN_<OWNER>`) and trusts the owners' logins, so each lane's PRs are
+  opened as its owner.
+
 ### Fixed
 
 - Agent runs ignore build and test caches (`__pycache__/`, `*.pyc`, `.pytest_cache/`, `node_modules/`, ...) even

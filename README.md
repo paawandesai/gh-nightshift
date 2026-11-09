@@ -59,7 +59,10 @@ Python 3.10 or newer, and a CI workflow whose test job is called `test`. If it h
    | `CLAUDE_TOKEN_REVIEW` | For the review gate, ideally from someone who does not own a lane (`review_token_secret`). |
 
    A lane can name its own PAT with `agent_pat_secret`, so its PRs are credited to the lane owner. While that
-   secret is unset, the lane falls back to `AGENT_PAT`.
+   secret is unset, the lane falls back to `AGENT_PAT`. To pair every lane with its owner's PAT and Claude token
+   at once, run `init --owners api=alice,web=bob --lane-pats --bot-login <AGENT_PAT's login>`: each lane gets
+   `CLAUDE_TOKEN_<OWNER>` and `AGENT_PAT_<OWNER>`, the owners become `trusted_logins`, and each owner stores their
+   two secrets with `gh nightshift join --lane <lane>`. The planner, digest and commands still use `AGENT_PAT`.
 
 4. Commit and push the new files to main, then protect main and check the setup.
 
@@ -259,7 +262,7 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 
 | Command | What it does |
 |---|---|
-| `init` | `--template hackathon` starts from a weekend-build setup (planner refill below 3, 2 attempts, 30-minute stale limit, digest every 4 hours, a `docs/PRD.md` and `contracts/` stub). Write config and workflows, set up labels, settings, variables, night log, roadmap, secrets (branch protection: run `setup` after pushing). `--yes`, `--lanes`, `--tool-ref`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets`, `--dry-run`. Fully non-interactive with `--yes --lanes api,web --preset python --paths api=api/ --budget 5 --secrets-from-env` |
+| `init` | `--template hackathon` starts from a weekend-build setup (planner refill below 3, 2 attempts, 30-minute stale limit, digest every 4 hours, a `docs/PRD.md` and `contracts/` stub). Write config and workflows, set up labels, settings, variables, night log, roadmap, secrets (branch protection: run `setup` after pushing). `--yes`, `--lanes`, `--tool-ref`, `--force`, `--regenerate` (rewrite workflows only), `--files-only`, `--skip-secrets`, `--dry-run`. Fully non-interactive with `--yes --lanes api,web --preset python --paths api=api/ --budget 5 --secrets-from-env`. `--owners api=alice,web=bob --lane-pats --bot-login night-bot` gives each lane its owner's own PAT and Claude token |
 | `setup` | Re-apply labels, settings, variables, branch protection, the night log and the roadmap |
 | `join --lane X` | A teammate stores their Claude token and their own PAT for a lane (`--no-pat` to skip); prints the `trusted_logins` line to add |
 | `doctor` | Read-only checks with a fix for each problem (`--pat-env VAR` checks a PAT; repeat it for each) |
