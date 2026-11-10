@@ -119,8 +119,9 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
             if job not in text:
                 out.append(Check(FAIL, f"lane {lane.name} has no job in {LANE_WORKFLOW}",
                                  "run `gh nightshift init --regenerate`"))
-            elif f"secrets.{lane.token_secret} " not in text:
-                out.append(Check(FAIL, f"lane {lane.name}'s job does not pass secrets.{lane.token_secret}",
+            elif f"{lane.provider}_token: ${{{{ secrets.{lane.token_secret} }}}}" not in text:
+                out.append(Check(FAIL, f"lane {lane.name}'s job does not pass secrets.{lane.token_secret} as its "
+                                       f"{lane.provider}_token",
                                  "run `gh nightshift init --regenerate`"))
             elif lane.fallback_token_secret and f"secrets.{lane.fallback_token_secret} " not in text:
                 out.append(Check(FAIL, f"lane {lane.name}'s job does not pass its fallback secrets."

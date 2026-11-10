@@ -75,8 +75,14 @@ class Picker:
         self.gh, self.cfg, self.rt = gh, cfg, rt
         self.lane = cfg.lane(rt.lane)
         self.fix_lane = rt.fix_lane or cfg.effective_fix_lane
-        self.lane_model = rt.lane_model or self.lane.model or cfg.default_model
-        self.escalate_model = rt.escalate_model or self.lane.escalate_model or cfg.escalate_model
+        if self.lane.provider == "codex":
+            # models.* and the ESCALATE_MODEL variable name Claude models. A Codex lane uses its own model
+            # fields only; empty means the Codex CLI's default model.
+            self.lane_model = self.lane.model
+            self.escalate_model = self.lane.escalate_model or self.lane.model
+        else:
+            self.lane_model = rt.lane_model or self.lane.model or cfg.default_model
+            self.escalate_model = rt.escalate_model or self.lane.escalate_model or cfg.escalate_model
         self.now = now or dt.datetime.now(dt.timezone.utc)
         self._states: dict[int, str] = {}
         self._closed_at: dict[int, str] = {}
@@ -463,7 +469,7 @@ class Picker:
                 self.gh.comment(num, f"{ns.marker('blocked', issue=num)}\nNight shift: {why}; marking blocked "
                                      "for a human. Remove the `blocked` label to give it fresh attempts.")
                 continue
-            model = model_for(issue, tried, self.lane_model, self.escalate_model)
+            model = model_for(issue, tried, self.lane_model, self.escalate_model, self.lane.provider)
             return num, f"picked #{num}: {issue.get('title', '')} (model {model})", model
         if waiting:
             return None, f"{waiting} issue(s) in lane {self.lane.name} are waiting on dependencies", ""

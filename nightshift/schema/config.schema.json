@@ -200,8 +200,7 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "name",
-          "claude_token_secret"
+          "name"
         ],
         "properties": {
           "name": {
@@ -217,15 +216,25 @@
               "type": "string"
             }
           },
+          "provider": {
+            "type": "string",
+            "enum": ["claude", "codex"],
+            "description": "Which coding agent runs this lane: claude (default, Claude Code) or codex (OpenAI Codex CLI). The reviewer and planner always run Claude."
+          },
           "claude_token_secret": {
-            "$ref": "#/$defs/secret"
+            "$ref": "#/$defs/secret",
+            "description": "Secret holding the lane owner's Claude token (`claude setup-token`). Required for claude lanes."
+          },
+          "codex_token_secret": {
+            "$ref": "#/$defs/secret",
+            "description": "Secret holding an OpenAI API key for Codex. Required for codex lanes, and only allowed there."
           },
           "agent_pat_secret": {
             "$ref": "#/$defs/secret"
           },
           "fallback_token_secret": {
             "$ref": "#/$defs/secret",
-            "description": "Optional second Claude token (for example from the owner's second account). The agent job switches to it only when the first token cannot start a run (usage limit, expired or revoked token). The lane then receives three secrets."
+            "description": "Optional second token of the lane's provider (a second Claude account's token, or a second OpenAI API key for a codex lane). The agent job switches to it only when the first token cannot start a run (usage limit, expired or revoked token). The lane then receives three secrets."
           },
           "model": {
             "$ref": "#/$defs/model"

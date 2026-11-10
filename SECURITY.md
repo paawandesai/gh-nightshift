@@ -71,6 +71,20 @@ tokens. The pick job only checks that one of the two is set. Config refuses a fa
 the lane's own token, and `doctor` fails if the caller stops passing it. A fallback adds a second credential an agent
 could find (see known gap 2). Check that using a second account this way fits your Claude plan's terms.
 
+**Codex lanes.** A lane with `provider: codex` gets an OpenAI API key instead of a Claude token, under the same
+rules: the caller passes it by explicit name as `codex_token` (and `codex_token_fallback`), so the lane still receives
+exactly two secrets (three with a fallback), and the generated job never passes the other provider's input; the pick
+job fails if it does. Config refuses a Codex key secret that is also a PAT, the review token or the planner token (the
+reviewer and planner run Claude). In the agent job the key is exported as `CODEX_API_KEY` only inside the subshell
+that runs `codex exec`, so it never appears on a command line, and Codex is told to strip it (and, by its default
+policy, every `*KEY*`, `*SECRET*` and `*TOKEN*` variable) from the commands the agent runs. This matches what the
+pipe does for Claude: it prevents accidental leaks, and an agent that sets out to read its own process environment
+can still find the key (known gap 2). The token guard searches the run's output and commits for the key, its base64
+form and the key without its `sk-...-` prefix. The run's event stream and final message are reshaped into the usual
+result in the publish job (`nightshift/providers.py`), as untrusted as everything else from the agent runner. Use a
+key from its own OpenAI project with a spend limit: a Codex run reports no cost, so the nightly budget cap does not
+apply.
+
 **GitHub App mode.** With `auth.mode: app`, every caller passes the App's private key (`NIGHT_SHIFT_APP_KEY`)
 instead of `AGENT_PAT`, so a lane still receives exactly two secrets. Only the jobs that would hold the PAT
 receive the key. Each mints an installation token (`nightshift/app.py`): a JWT signed with `openssl`, then

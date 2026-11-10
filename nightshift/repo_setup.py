@@ -269,6 +269,11 @@ def secret_hint(cfg: Config, name: str) -> str:
         return SECRET_HINTS[name]
     if name == cfg.review_token_secret:
         return "`claude setup-token` from someone who does not own a lane (review gate)"
+    codex = [lane.name for lane in cfg.lanes if lane.provider == "codex"
+             and name in (lane.token_secret, lane.fallback_token_secret)]
+    if codex:
+        return (f"an OpenAI API key for Codex lane(s) {', '.join(codex)} (platform.openai.com, API keys; give it its "
+                "own project with a spend limit)")
     lanes = [lane.name for lane in cfg.lanes if lane.token_secret == name]
     if lanes:
         return f"`claude setup-token` from the owner of lane(s) {', '.join(lanes)}"

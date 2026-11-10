@@ -30,7 +30,7 @@ source repo's `CLAUDE.md`. All config keys are in `.night-shift/config.yml` (sch
 | Review gate token | `github/workflows/agent-review.yml:8,71,77`; `RUNBOOK.md:26` | `CLAUDE_TOKEN_REVIEW` | `review_token_secret` (default `CLAUDE_TOKEN_REVIEW`). Passed explicitly by the generated `night-shift-review.yml`. |
 | Publishing PAT | `github/workflows/night-shift.yml:5-6,73`; `github/night-shift/setup_repo.sh:65-66` | `AGENT_PAT` (Contents, Issues, PRs read/write; Actions read; no Workflows) | Still `AGENT_PAT` by default (fixed name, not a key). `lanes[].agent_pat_secret` overrides it per lane. The planner always uses `AGENT_PAT` (`scaffold.planner_workflow`). The lane's `check-pat` step now fails a PAT that has the Workflows scope. |
 | Per-lane PAT override | `github/workflows/night-shift.yml:8-10,73`; `RUNBOOK.md:27` | `matrix.lane == 'cloud' && secrets.AGENT_PAT_DEBU \|\| secrets.AGENT_PAT` | `lanes[].agent_pat_secret`. Like the kit, the generated caller falls back: `secrets.<agent_pat_secret> \|\| secrets.AGENT_PAT`, both names explicit. |
-| Planner token | (no planner in the kit) | n/a | `planner.claude_token_secret` (default: the first lane's token). |
+| Planner token | (no planner in the kit) | n/a | `planner.claude_token_secret` (default: the first Claude lane's token; required when every lane runs Codex). |
 
 ### Stack and runner setup
 

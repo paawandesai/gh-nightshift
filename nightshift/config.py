@@ -21,6 +21,11 @@ DEFAULT_LABELS = {
 }
 
 
+PROVIDERS = ("claude", "codex")
+PROVIDER_TOKEN_KIND = {"claude": "Claude token", "codex": "Codex API key"}
+PROVIDER_TOKEN_KEY = {"claude": "claude_token_secret", "codex": "codex_token_secret"}
+
+
 class ConfigError(ValueError):
     pass
 
@@ -28,11 +33,12 @@ class ConfigError(ValueError):
 @dataclass
 class Lane:
     name: str
-    token_secret: str
+    token_secret: str             # the lane's model token: claude_token_secret, or codex_token_secret for Codex
+    provider: str = "claude"      # claude | codex: which coding agent runs the lane
     model: str = ""
     escalate_model: str = ""
     pat_secret: str = ""          # optional per-lane PAT so PRs are credited to the lane owner
-    fallback_token_secret: str = ""  # optional second Claude token, used when the first one cannot start a run
+    fallback_token_secret: str = ""  # optional second token (same provider), used when the first cannot start a run
     paths: list[str] = field(default_factory=list)
     description: str = ""
     test_command: str = ""
@@ -47,7 +53,12 @@ class Lane:
 
     @property
     def claude_token_secret(self) -> str:
-        return self.token_secret
+        return self.token_secret if self.provider == "claude" else ""
+
+    @property
+    def token_kind(self) -> str:
+        """How messages name this lane's token: `Claude token` or `Codex API key`."""
+        return PROVIDER_TOKEN_KIND[self.provider]
 
     @property
     def agent_pat_secret(self) -> str:
@@ -149,7 +160,7 @@ class Config:
         return self.app_key_secret if self.auth_mode == "app" else "AGENT_PAT"
 
     def secret_names(self) -> list[str]:
-        names = {self.github_secret, self.review_token_secret, self.planner_token_secret or self.lanes[0].token_secret}
+        names = {self.github_secret, self.review_token_secret, self.planner_token_secret}
         for lane in self.lanes:
             names.add(lane.token_secret)
             if lane.pat_secret:
@@ -206,7 +217,16 @@ def parse(data: dict) -> Config:
         cmds = setup.get("commands") or ""
         if isinstance(cmds, list):
             cmds = "\n".join(cmds)
-        lanes.append(Lane(name=raw["name"], token_secret=raw["claude_token_secret"],
+        provider = raw.get("provider", "claude")
+        key = PROVIDER_TOKEN_KEY[provider]
+        other = [k for k in PROVIDER_TOKEN_KEY.values() if k != key and k in raw]
+        if other or key not in raw:
+            raise ConfigError(f"lane {raw['name']}: a {provider} lane names its token with {key}"
+                              + (f", not {', '.join(other)}" if other else ""))
+        if provider == "codex" and raw.get("budget_usd_per_night"):
+            raise ConfigError(f"lane {raw['name']}: budget_usd_per_night needs a cost per run, which Codex does not "
+                              "report; remove it (set a spend limit on the OpenAI project instead)")
+        lanes.append(Lane(name=raw["name"], token_secret=raw[key], provider=provider,
                           pat_secret=raw.get("agent_pat_secret", ""), model=raw.get("model", ""),
                           fallback_token_secret=raw.get("fallback_token_secret", ""),
                           escalate_model=raw.get("escalate_model", ""), paths=raw.get("paths", []),
@@ -219,7 +239,8 @@ def parse(data: dict) -> Config:
         raise ConfigError("lane names must be unique")
     for lane in lanes:
         if lane.fallback_token_secret and lane.fallback_token_secret == lane.token_secret:
-            raise ConfigError(f"lane {lane.name}: fallback_token_secret must differ from claude_token_secret")
+            raise ConfigError(f"lane {lane.name}: fallback_token_secret must differ from "
+                              f"{PROVIDER_TOKEN_KEY[lane.provider]}")
     models = data.get("models", {})
     limits = data.get("limits", {})
     planner = data.get("planner", {})
@@ -250,7 +271,7 @@ def parse(data: dict) -> Config:
         planner_refill_below=planner.get("refill_below", 0),
         planner_id_prefixes=planner.get("id_prefixes", {}),
         planner_human_paths=planner.get("human_paths", ["contracts/"]),
-        planner_token_secret=planner.get("claude_token_secret", lanes[0].token_secret),
+        planner_token_secret=planner.get("claude_token_secret", _first_claude_token(lanes)),
         planner_schedule=planner.get("schedule", "17 * * * *"),
         review_token_secret=data.get("review_token_secret", "CLAUDE_TOKEN_REVIEW"),
         ci_workflow_name=data.get("ci_workflow_name", ""),
@@ -279,6 +300,12 @@ def parse(data: dict) -> Config:
                         or cfg.extends.split("/")[1] in (".", "..")):
         raise ConfigError(f"extends must be owner/repo, not {cfg.extends!r}")
     _check_runner_split(cfg.runner_github, cfg.runner_agent)
+    if not cfg.planner_token_secret:
+        raise ConfigError("every lane runs Codex, so the planner has no Claude token to borrow: set "
+                          "planner.claude_token_secret (the reviewer and planner still run Claude)")
+    if cfg.planner_token_secret in codex_secrets(cfg) or cfg.review_token_secret in codex_secrets(cfg):
+        raise ConfigError("the planner and the review gate run Claude: their token secrets must not be a Codex "
+                          "lane's API key secret")
     if cfg.auth_mode not in ("pat", "app"):
         raise ConfigError(f"auth.mode must be pat or app, not {cfg.auth_mode!r}")
     if cfg.auth_mode == "app":
@@ -315,10 +342,20 @@ def parse(data: dict) -> Config:
     return cfg
 
 
+def _first_claude_token(lanes: list[Lane]) -> str:
+    return next((lane.token_secret for lane in lanes if lane.provider == "claude"), "")
+
+
 def claude_secrets(cfg: Config) -> set[str]:
-    """Every lane's Claude token secrets, fallbacks included."""
+    """Every lane's model token secrets (Claude tokens and Codex API keys), fallbacks included."""
     return {lane.token_secret for lane in cfg.lanes} | {lane.fallback_token_secret for lane in cfg.lanes
                                                         if lane.fallback_token_secret}
+
+
+def codex_secrets(cfg: Config) -> set[str]:
+    """The Codex lanes' API key secrets, fallbacks included."""
+    return {s for lane in cfg.lanes if lane.provider == "codex" for s in (lane.token_secret, lane.fallback_token_secret)
+            if s}
 
 
 def pats_or_claude(cfg: Config) -> set[str]:

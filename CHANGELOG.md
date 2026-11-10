@@ -9,6 +9,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Codex lanes: `provider: codex` with `codex_token_secret` (an OpenAI API key) runs a lane on OpenAI's Codex CLI
+  (`codex exec --json --output-schema`) instead of Claude Code. The caller passes the key as the new `codex_token`
+  (and `codex_token_fallback`) input of `lane.yml`, so a lane still receives exactly its own model token and its
+  PAT. The key reaches Codex only inside a subshell and is stripped from the commands the agent runs; the token
+  guard covers it. Publish reshapes Codex's event stream into the usual result (`nightshift/providers.py`), so the
+  never-started rule, the fallback token, stats and the night log work unchanged. Codex reports no cost, so a Codex
+  lane cannot set `budget_usd_per_night`; it uses its own `model`/`escalate_model` only. The reviewer and planner
+  still run Claude, and the planner never borrows a Codex key. New variables: `CODEX_VERSION`,
+  `CODEX_PERMISSION_FLAGS`.
+
 - `runners.github` and `runners.agent` in the config choose the runners the reusable workflows use (default
   `ubuntu-latest`), so lanes can run on self-hosted machines. The jobs that hold the PAT or the App key and the
   jobs that run Claude (agent, planner draft, review) get separate labels, and the config refuses label sets

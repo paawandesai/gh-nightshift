@@ -42,7 +42,7 @@ risk:                          # optional: green PRs merge unless a rule below a
   codeowners: true             # files with CODEOWNERS owners need one of those owners' approval
 runners:                       # optional; default ubuntu-latest (GitHub-hosted) for both
   github: [self-hosted, nightshift-github]   # jobs holding the PAT or App key
-  agent: [self-hosted, nightshift-agent]     # jobs that run Claude (agent, planner draft, review); another machine
+  agent: [self-hosted, nightshift-agent]     # jobs that run the agents (lane agent, planner draft, review); another machine
 digest:
   enabled: true
   schedule: "0 7 * * *"         # morning summary on the night-log issue (UTC)
@@ -69,3 +69,9 @@ lanes:
       commands: [cd web && npm ci]
       action: .night-shift/actions/web-setup
     test_command: cd web && npm test
+  - name: docs
+    paths: [docs/]
+    provider: codex                   # optional: run this lane on OpenAI Codex instead of Claude Code
+    codex_token_secret: OPENAI_KEY_DOCS   # an OpenAI API key (its own project, with a spend limit)
+    model: gpt-5-codex                # optional: a Codex model; empty uses the Codex CLI's default
+    test_command: make docs

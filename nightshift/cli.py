@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from collections.abc import Callable
 
-from . import __version__, digest, planner, prompts, repo_setup, roadmap, scaffold
+from . import __version__, digest, planner, prompts, providers, repo_setup, roadmap, scaffold
 from . import protocol as ns
 from .config import BASE_PATH, CONFIG_PATH, Config, ConfigError, load, loads
 from .gh import GH, GHError
@@ -334,12 +334,14 @@ def cmd_join(ctx: Ctx, secret_ask=None, secret_setter=None, run=subprocess.run) 
             raise ConfigError(f"lane {lane.name} has no fallback_token_secret in {CONFIG_PATH}; add e.g. "
                               f"`fallback_token_secret: {lane.token_secret}_FALLBACK` to the lane, commit it and run "
                               "`gh nightshift init --regenerate`")
-        ctx.say(f"Lane {lane.name}: sign in to the second Claude account, run `claude setup-token` and paste the token.")
+        ctx.say(f"Lane {lane.name}: paste the second OpenAI API key." if lane.provider == "codex" else
+                f"Lane {lane.name}: sign in to the second Claude account, run `claude setup-token` and paste the token.")
         ctx.say(repo_setup.prompt_secret(ctx.gh, lane.fallback_token_secret,
                                          repo_setup.secret_hint(cfg, lane.fallback_token_secret), **kwargs))
         return 0
-    ctx.say(f"Lane {lane.name}: run `claude setup-token` and paste the token.")
-    ctx.say(repo_setup.prompt_secret(ctx.gh, lane.token_secret, f"Claude token for lane {lane.name}", **kwargs))
+    ctx.say(f"Lane {lane.name}: paste an OpenAI API key for Codex (its own OpenAI project, with a spend limit)."
+            if lane.provider == "codex" else f"Lane {lane.name}: run `claude setup-token` and paste the token.")
+    ctx.say(repo_setup.prompt_secret(ctx.gh, lane.token_secret, f"{lane.token_kind} for lane {lane.name}", **kwargs))
     if not lane.pat_secret or ctx.args.no_pat:
         if ctx.args.pat and not lane.pat_secret:
             ctx.say(f"lane {lane.name} has no agent_pat_secret in {CONFIG_PATH}; it uses the shared AGENT_PAT. Add "
@@ -699,7 +701,7 @@ def cmd_digest(ctx: Ctx) -> int:
 
 def cmd_lane_config(ctx: Ctx) -> int:
     lane = ctx.cfg.lane(ctx.args.lane)
-    values = {"postgres_image": lane.postgres_image, "setup_action": lane.setup_action,
+    values = {"provider": lane.provider, "postgres_image": lane.postgres_image, "setup_action": lane.setup_action,
               "max_turns": str(ctx.cfg.max_turns), "test_command": lane.test_command}
     write_outputs(ctx.args.github_output, values)
     ctx.say(json.dumps(values))
@@ -740,6 +742,9 @@ def cmd_task(ctx: Ctx) -> int:
     values_prompt = prompts.worker_values(ctx.cfg, a.lane, "__TASK_FILE__")
     (out / "prompt.md").write_text(prompts.render("worker", values_prompt, ctx.root), encoding="utf-8")
     (out / "schema.json").write_text(prompts.schema_json("worker"), encoding="utf-8")
+    # Codex's --output-schema takes OpenAI's strict form; publish turns the nulls back into absent keys.
+    (out / "schema.codex.json").write_text(json.dumps(providers.strict_schema(prompts.SCHEMAS["worker"]),
+                                                      separators=(",", ":")), encoding="utf-8")
     (out / "setup.sh").write_text(ctx.cfg.lane(a.lane).setup_commands, encoding="utf-8")
     values["prompt_version"] = prompts.version("worker", ctx.root)
     write_outputs(a.github_output, values)
@@ -751,7 +756,10 @@ def cmd_publish(ctx: Ctx) -> int:
     from .publish import Job, publish
 
     a = ctx.args
-    job = Job(lane=a.lane, mode=a.mode, issue=a.issue, branch=a.branch, title=a.title, model=a.model,
+    model = a.model
+    if ctx.cfg.lane(a.lane).provider == "codex":  # name the provider: Codex model names say less on their own
+        model = f"codex:{model or 'default'}"
+    job = Job(lane=a.lane, mode=a.mode, issue=a.issue, branch=a.branch, title=a.title, model=model,
               attempt_comment=a.attempt_comment, fail_sha=a.fail_sha, result_path=a.result, bundle_path=a.bundle,
               prompt_version=a.prompt_version if re.fullmatch(r"[A-Za-z0-9._-]{1,60}", a.prompt_version) else "",
               push_url=f"https://github.com/{ctx.repo}.git")  # credentials via GH_TOKEN, never in argv
