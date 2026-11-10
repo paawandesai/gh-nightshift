@@ -25,6 +25,12 @@ runner:
 | `agent` | The lane's Claude token only, handed to Claude on a pipe (not in its environment). Checkout uses `persist-credentials: false`, and the job's `GITHUB_TOKEN` is `contents: read` and never placed in the environment. | Yes |
 | `publish` | The PAT | No |
 
+**Self-hosted runners.** `runners.github` and `runners.agent` choose where these jobs run. On GitHub-hosted
+runners every job gets a fresh machine. A self-hosted runner is not fresh: whatever one job leaves behind, the
+next job on that machine can find. So the two must be separate machines, and the config refuses the same labels
+for both. Keep the `github` machine for these jobs alone: no CI, no Docker group, no other org's work, since
+anything that runs there could read the token.
+
 The agent's work crosses to the publish job only as two artifacts, `result.json` and a git bundle. Lane setup
 (commands, composite action, Postgres service) runs only in the agent job. The planner uses the same split:
 `context` (read-only `GITHUB_TOKEN`), `draft` (Claude token only, tools limited to `Read,Grep,Glob` with Bash, Write, Edit and web tools explicitly disallowed), and

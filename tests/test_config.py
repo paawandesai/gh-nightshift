@@ -77,3 +77,25 @@ class Schema(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunnersTest(unittest.TestCase):
+    BASE = "version: 1\nlanes:\n  - name: api\n    claude_token_secret: CLAUDE_TOKEN_A\n"
+
+    def test_default_is_github_hosted(self):
+        cfg = loads(self.BASE)
+        self.assertEqual((cfg.runner_github, cfg.runner_agent), (["ubuntu-latest"], ["ubuntu-latest"]))
+
+    def test_a_label_or_a_list(self):
+        cfg = loads(self.BASE + "runners:\n  github: ns-github\n  agent: [self-hosted, ns-agent]\n")
+        self.assertEqual(cfg.runner_github, ["ns-github"])
+        self.assertEqual(cfg.runner_agent, ["self-hosted", "ns-agent"])
+
+    def test_the_agent_never_shares_the_token_machine(self):
+        with self.assertRaisesRegex(ConfigError, "must differ"):
+            loads(self.BASE + "runners:\n  github: [self-hosted, box]\n  agent: [self-hosted, box]\n")
+
+    def test_bad_labels_are_refused(self):
+        for bad in ("[]", "'a b'", "'x: y'", "[ok, 'bad label']", "{a: 1}"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ConfigError, "runner label"):
+                loads(self.BASE + f"runners:\n  github: {bad}\n")

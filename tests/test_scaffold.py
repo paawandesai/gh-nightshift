@@ -213,3 +213,38 @@ class ActionlintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunnerTests(unittest.TestCase):
+    def test_default_callers_name_no_runner(self):
+        cfg, _ = make_config()
+        for text in (scaffold.lane_workflow(cfg), scaffold.planner_workflow(cfg), scaffold.review_workflow(cfg),
+                     scaffold.commands_workflow(cfg), scaffold.digest_workflow(cfg)):
+            self.assertNotIn("runs_on", text)
+
+    def test_runners_reach_every_caller_by_job_class(self):
+        cfg, _ = make_config(runners={"github": ["self-hosted", "ns-github"], "agent": "ns-agent"})
+        github = """runs_on: '["self-hosted", "ns-github"]'"""
+        agent = """agent_runs_on: '["ns-agent"]'"""
+        for job in sum(lane_jobs(scaffold.lane_workflow(cfg)).values(), []):
+            self.assertIn(github, job)
+            self.assertIn(agent, job)
+        self.assertIn(agent, scaffold.planner_workflow(cfg))
+        for text in (scaffold.review_workflow(cfg), scaffold.commands_workflow(cfg), scaffold.digest_workflow(cfg)):
+            self.assertIn(github, text)
+            self.assertNotIn("agent_runs_on", text)  # these jobs hold a GitHub token
+
+
+class ReusableWorkflowRunnerTests(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    AGENT_JOBS = {"lane.yml": {"agent"}, "planner.yml": {"draft"}}
+
+    def test_every_job_takes_its_runner_from_an_input(self):
+        for name in ("lane.yml", "planner.yml", "review.yml", "commands.yml", "digest.yml"):
+            text = (self.ROOT / name).read_text()
+            self.assertNotIn("runs-on: ubuntu-latest", text, name)
+            jobs = re.split(r"^  ([a-z_-]+):\n", text.split("\njobs:\n", 1)[1], flags=re.M)[1:]
+            for job, body in zip(jobs[::2], jobs[1::2]):
+                want = "agent_runs_on" if job in self.AGENT_JOBS.get(name, set()) else "runs_on"
+                with self.subTest(workflow=name, job=job):
+                    self.assertIn(f"runs-on: ${{{{ fromJSON(inputs.{want}) }}}}", body)

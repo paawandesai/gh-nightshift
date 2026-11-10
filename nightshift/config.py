@@ -87,6 +87,11 @@ class Config:
     review_token_secret: str = "CLAUDE_TOKEN_REVIEW"
     ci_workflow_name: str = ""
     tool_ref: str = "main"
+    # Runner labels: `github` runs the jobs holding a GitHub token or the App key (pick, publish, planner
+    # context and create, review, commands, digest); `agent` runs the Claude-only jobs (lane agent, planner
+    # draft). Never give both the same self-hosted machine: the agent must not share a box with the token.
+    runner_github: list[str] = field(default_factory=lambda: ["ubuntu-latest"])
+    runner_agent: list[str] = field(default_factory=lambda: ["ubuntu-latest"])
     bot_login: str = ""           # the PAT's login; read-only commands (stats, audit) trust markers from it
     trusted_logins: list[str] = field(default_factory=list)  # other PAT logins (per-contributor PATs) to trust
     auth_mode: str = "pat"  # pat | app (GitHub App: an installation token minted in the PAT jobs)
@@ -154,6 +159,15 @@ class Config:
         return sorted(names)
 
 
+def _labels(value: object, key: str) -> list[str]:
+    """Runner labels: one label or a list of them, each a plain name (they go into workflow YAML)."""
+    labels = [value] if isinstance(value, str) else value
+    if (not isinstance(labels, list) or not labels
+            or not all(isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", x) for x in labels)):
+        raise ConfigError(f"{key} must be a runner label or a list of them (letters, digits, . _ -)")
+    return list(labels)
+
+
 def parse(data: dict) -> Config:
     if not isinstance(data, dict):
         raise ConfigError("config must be a mapping")
@@ -215,6 +229,8 @@ def parse(data: dict) -> Config:
         review_token_secret=data.get("review_token_secret", "CLAUDE_TOKEN_REVIEW"),
         ci_workflow_name=data.get("ci_workflow_name", ""),
         tool_ref=data.get("tool_ref", "main"),
+        runner_github=_labels((data.get("runners") or {}).get("github", "ubuntu-latest"), "runners.github"),
+        runner_agent=_labels((data.get("runners") or {}).get("agent", "ubuntu-latest"), "runners.agent"),
         bot_login=data.get("bot_login", ""),
         trusted_logins=data.get("trusted_logins", []),
         auth_mode=(data.get("auth") or {}).get("mode", "pat"),
@@ -236,6 +252,9 @@ def parse(data: dict) -> Config:
     if cfg.extends and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", cfg.extends)
                         or cfg.extends.split("/")[1] in (".", "..")):
         raise ConfigError(f"extends must be owner/repo, not {cfg.extends!r}")
+    if cfg.runner_agent == cfg.runner_github and cfg.runner_agent != ["ubuntu-latest"]:
+        raise ConfigError("runners.agent and runners.github must differ: on a self-hosted machine the agent "
+                          "would share a box with the GitHub token")
     if cfg.auth_mode not in ("pat", "app"):
         raise ConfigError(f"auth.mode must be pat or app, not {cfg.auth_mode!r}")
     if cfg.auth_mode == "app":

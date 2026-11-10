@@ -7,6 +7,16 @@ name: night-shift-planner
 on:
   workflow_call:
     inputs:
+      runs_on:
+        description: Runner labels (JSON) for the jobs that hold a GitHub token or the App key
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
+      agent_runs_on:
+        description: Runner labels (JSON) for the Claude-only agent jobs; never a box that runs the token jobs
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
       mode:
         description: prd | gap | review | refill
         type: string
@@ -57,7 +67,7 @@ env:
 
 jobs:
   context:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 10
     outputs:
       run: ${{ steps.ctx.outputs.run }}
@@ -99,7 +109,7 @@ jobs:
   draft:
     needs: context
     if: needs.context.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -109,6 +119,10 @@ jobs:
         with:
           name: plan-context
           path: ${{ runner.temp }}/plan
+      # Its own Node, so npm -g also works on a self-hosted runner without root.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Install Claude Code
         run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
       - name: Draft tickets (read-only)
@@ -132,7 +146,7 @@ jobs:
 
   create:
     needs: [context, draft]
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

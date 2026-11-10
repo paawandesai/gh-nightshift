@@ -10,6 +10,11 @@ name: night-shift-review
 on:
   workflow_call:
     inputs:
+      runs_on:
+        description: Runner labels (JSON) for the jobs that hold a GitHub token or the App key
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
       tool_repo:
         type: string
         required: false
@@ -34,7 +39,7 @@ permissions:
 jobs:
   verdict:
     if: startsWith(github.head_ref, 'agent/')
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 20
     env:
       REPO: ${{ github.repository }}
@@ -83,6 +88,10 @@ jobs:
           python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
             --out-dir "$WORK" --github-output "$GITHUB_OUTPUT"
 
+      # Its own Node, so npm -g also works on a self-hosted runner without root.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Install Claude Code
         run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
 

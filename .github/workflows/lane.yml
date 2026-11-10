@@ -9,6 +9,16 @@ name: night-shift-lane
 on:
   workflow_call:
     inputs:
+      runs_on:
+        description: Runner labels (JSON) for the jobs that hold a GitHub token or the App key
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
+      agent_runs_on:
+        description: Runner labels (JSON) for the Claude-only agent jobs; never a box that runs the token jobs
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
       lane:
         type: string
         required: true
@@ -55,7 +65,7 @@ env:
 
 jobs:
   pick:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 10
     env:
       PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
@@ -146,7 +156,7 @@ jobs:
   agent:
     needs: pick
     if: needs.pick.outputs.mode != 'skip'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
     timeout-minutes: 50
     permissions:
       contents: read
@@ -196,6 +206,10 @@ jobs:
         if: needs.pick.outputs.setup_action != ''
         uses: ./.ns-lane-setup
 
+      # Its own Node, so npm -g also works on a self-hosted runner without root.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Install Claude Code
         run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
 
@@ -334,7 +348,7 @@ jobs:
   publish:
     needs: [pick, agent]
     if: always() && needs.pick.result == 'success' && needs.pick.outputs.mode != 'skip'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 10
     env:
       PYTHONPATH: ${{ github.workspace }}/.nightshift-tool

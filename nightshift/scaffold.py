@@ -7,6 +7,7 @@ runner, so each lane job names exactly its own Claude token and its PAT. Re-run 
 """
 from __future__ import annotations
 
+import json
 import re
 from importlib import resources
 from pathlib import Path
@@ -61,6 +62,16 @@ def _github_auth(cfg: Config, pat: str = "secrets.AGENT_PAT") -> tuple[str, str]
     return "", f"agent_pat: ${{{{ {pat} }}}}"
 
 
+def _runners(cfg: Config, agent: bool = False) -> str:
+    """Extra `with:` lines choosing runners; nothing when they are the default GitHub-hosted ones."""
+    out = ""
+    if cfg.runner_github != ["ubuntu-latest"]:
+        out += f"\n      runs_on: {_q(json.dumps(cfg.runner_github))}"
+    if agent and cfg.runner_agent != ["ubuntu-latest"]:
+        out += f"\n      agent_runs_on: {_q(json.dumps(cfg.runner_agent))}"
+    return out
+
+
 def lane_workflow(cfg: Config, ci_name: str = "CI", tool_repo: str = TOOL_REPO) -> str:
     ref = cfg.tool_ref
     jobs = []
@@ -82,7 +93,7 @@ def lane_workflow(cfg: Config, ci_name: str = "CI", tool_repo: str = TOOL_REPO) 
       main_branch: {cfg.main_branch}
       only_lane: ${{{{ inputs.lane || '' }}}}
       tool_repo: {tool_repo}
-      tool_ref: {ref}{app_with}
+      tool_ref: {ref}{app_with}{_runners(cfg, agent=True)}
     secrets:
       claude_token: ${{{{ secrets.{lane.token_secret} }}}}{fallback}
       {github}
@@ -138,7 +149,7 @@ jobs:
     with:
       tool_repo: {tool_repo}
       tool_ref: {cfg.tool_ref}
-      model: {cfg.review_model}
+      model: {cfg.review_model}{_runners(cfg)}
     secrets:
       claude_token: ${{{{ secrets.{cfg.review_token_secret} }}}}
 """
@@ -189,7 +200,7 @@ jobs:
       lane: ${{{{ inputs.lane || '' }}}}
       model: {cfg.planner_model}
       tool_repo: {tool_repo}
-      tool_ref: {cfg.tool_ref}{app_with}
+      tool_ref: {cfg.tool_ref}{app_with}{_runners(cfg, agent=True)}
     secrets:
       claude_token: ${{{{ secrets.{token} }}}}
       {github}
@@ -221,7 +232,7 @@ jobs:
     uses: {tool_repo}/.github/workflows/commands.yml@{cfg.tool_ref}
     with:
       tool_repo: {tool_repo}
-      tool_ref: {cfg.tool_ref}{app_with}
+      tool_ref: {cfg.tool_ref}{app_with}{_runners(cfg)}
     secrets:
       {github}
 """
@@ -252,7 +263,7 @@ jobs:
     uses: {tool_repo}/.github/workflows/digest.yml@{cfg.tool_ref}
     with:{hours}
       tool_repo: {tool_repo}
-      tool_ref: {cfg.tool_ref}{app_with}
+      tool_ref: {cfg.tool_ref}{app_with}{_runners(cfg)}
     secrets:
       {github}{hook}
 """
