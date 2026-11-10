@@ -263,6 +263,14 @@ class ReusableWorkflowRunnerTests(unittest.TestCase):
                     if "Install Claude Code" in body:
                         self.assertIn("fromJSON(inputs.agent_runs_on)", body)
 
+    def test_claude_code_is_installed_fresh_into_the_job_temp_dir(self):
+        for name in ("lane.yml", "planner.yml", "review.yml"):
+            text = (self.ROOT / name).read_text()
+            with self.subTest(workflow=name):
+                self.assertIn('npm install -g --prefix "$RUNNER_TEMP/claude-code"', text)
+                self.assertIn('echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"', text)
+                self.assertNotRegex(text, r'npm install -g "@anthropic-ai')
+
 
 if __name__ == "__main__":
     unittest.main()

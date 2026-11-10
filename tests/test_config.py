@@ -101,7 +101,7 @@ class RunnersTest(unittest.TestCase):
                 loads(self.BASE + f"runners:\n  github: {github}\n  agent: {agent}\n")
 
     def test_a_self_hosted_set_needs_a_label_of_its_own(self):
-        for generic in ("self-hosted", "[self-hosted, linux, X64]", "[self-hosted, arm64]"):
+        for generic in ("self-hosted", "[self-hosted, linux, X64]", "[self-hosted, arm64]", "linux", "[linux, x64]"):
             for key, other in (("github", "agent"), ("agent", "github")):
                 with self.subTest(generic=generic, key=key), self.assertRaisesRegex(ConfigError, "label of its own"):
                     loads(self.BASE + f"runners:\n  {key}: {generic}\n  {other}: [self-hosted, ns-{other}]\n")

@@ -176,15 +176,16 @@ def _check_runner_split(github: list[str], agent: list[str]) -> None:
     """Keep the agent jobs off the machines that hold the GitHub token or App key.
 
     A job runs on any runner that has all of its labels, so the two label sets must not be equal, and neither
-    may be a subset of the other (that runner would take both kinds of job). A self-hosted set also needs a
-    label of its own. Labels match without regard to case. This cannot prove two sets name different
+    may be a subset of the other (that runner would take both kinds of job). Each set also needs a label of its
+    own: generic labels alone (self-hosted, linux, x64, ...) match every self-hosted runner. Labels match
+    without regard to case. This cannot prove two sets name different
     machines: register each class on its own machine, ideally in its own runner group.
     """
     sets = {key: {x.casefold() for x in labels} for key, labels in (("runners.github", github), ("runners.agent", agent))}
     if all(s == {"ubuntu-latest"} for s in sets.values()):
         return
     for key, s in sets.items():
-        if "self-hosted" in s and not s - GENERIC_RUNNER_LABELS:
+        if not s - GENERIC_RUNNER_LABELS:  # with or without self-hosted, these match every runner
             raise ConfigError(f"{key} needs a label of its own besides {', '.join(sorted(s))}: those match any "
                               "self-hosted runner, including the other class's")
     g, a = sets.values()
