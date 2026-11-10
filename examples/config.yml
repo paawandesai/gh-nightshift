@@ -4,7 +4,7 @@ main_branch: main
 ci_workflow: ci.yml            # its runs on main gate every lane
 required_checks: [test, "review / verdict"]
 fix_lane: api                  # the only lane that works while main is red
-tool_ref: v0.1.2               # a release tag or SHA; `doctor` warns about a moving branch
+tool_ref: v0.1.3               # a release tag or SHA; `doctor` warns about a moving branch
 # extends: your-org/.github     # optional org-wide base; `gh nightshift config pull` writes .night-shift/base.yml
 bot_login: night-bot            # login of the account that owns AGENT_PAT (stats and audit trust its markers)
 trusted_logins: [bob]          # other PAT logins to trust (here Bob's own PAT for the web lane)

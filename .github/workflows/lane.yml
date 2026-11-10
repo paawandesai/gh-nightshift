@@ -306,9 +306,13 @@ jobs:
           if grep -rqaF -f "$PATTERNS" "$OUT"; then WHERE="the run's result or log"; fi
           if git rev-parse -q --verify "refs/heads/$BRANCH" > /dev/null; then
             RANGE="origin/$MAIN_BRANCH..refs/heads/$BRANCH"
-            if git log --format=%B "$RANGE" | grep -qaF -f "$PATTERNS" || \
-               git rev-list "$RANGE" | xargs -r git grep -qaF -f "$PATTERNS"; then
-              WHERE="${WHERE:+$WHERE and }its commits"
+            # Only when the run made commits: with none, `xargs -r` runs nothing and exits 0, which would read
+            # as a match and withhold every run that ends blocked or waiting.
+            if [ "$(git rev-list --count "$RANGE")" -gt 0 ]; then
+              if git log --format=%B "$RANGE" | grep -qaF -f "$PATTERNS" || \
+                 git rev-list "$RANGE" | xargs git grep -qaF -f "$PATTERNS"; then
+                WHERE="${WHERE:+$WHERE and }its commits"
+              fi
             fi
           fi
           rm -f "$PATTERNS"

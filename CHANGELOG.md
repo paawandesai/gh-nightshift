@@ -5,7 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.2] - unreleased
+## [0.1.3] - unreleased
+
+### Fixed
+
+- The token guard withheld every run that ended without commits (a run that reports `blocked` or `waiting`,
+  for example) and labelled it "token found in its commits". With no commits to search, `xargs -r` ran nothing
+  and exited 0, which the guard read as a match. It now searches commits only when there are some. No token
+  was leaked in these runs and none needs rotating because of this message alone.
+
+## [0.1.2] - 2026-11-09
 
 ### Security
 
