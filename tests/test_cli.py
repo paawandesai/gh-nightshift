@@ -907,7 +907,8 @@ class WorkflowCommandTests(CliTestCase):
     def test_lane_config(self):
         rc, text = self.run_cli("lane-config", "--lane", "api", "--github-output", self.gh_out)
         self.assertEqual(rc, 0)
-        expected = {"postgres_image": "postgres:16", "setup_action": ".github/actions/api-setup", "max_turns": "120",
+        expected = {"provider": "claude", "postgres_image": "postgres:16", "setup_action": ".github/actions/api-setup",
+                    "max_turns": "120",
                     "test_command": "pytest"}
         self.assertEqual(self.outputs(), expected)
         self.assertEqual(json.loads(text), expected)

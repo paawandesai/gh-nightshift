@@ -1,7 +1,8 @@
 # gh-nightshift: one lane's run. Called once per lane by the caller workflow `gh nightshift init` writes.
 # Three jobs on three separate runners:
 #   pick     (PAT)                 hand-offs, close/merge/update PRs, choose the issue, write the task file
-#   agent    (Claude token only)   do the work; hands back result.json + a git bundle as artifacts
+#   agent    (model token only)    do the work (Claude Code, or Codex for a `provider: codex` lane); hands back
+#                                  the result + a git bundle as artifacts
 #   publish  (PAT)                 validate the bundle on a clean runner, push, open the PR, log
 # The agent never shares a machine with the GitHub token, and lane setup runs only in the agent job.
 name: night-shift-lane
@@ -15,7 +16,7 @@ on:
         required: false
         default: '"ubuntu-latest"'
       agent_runs_on:
-        description: Runner labels (JSON) for the Claude-only agent jobs; never a box that runs the token jobs
+        description: Runner labels (JSON) for the agent jobs (model token only); never a box that runs the token jobs
         type: string
         required: false
         default: '"ubuntu-latest"'
@@ -50,6 +51,10 @@ on:
         required: false   # checked in the pick job so a missing one gives a clear error
       claude_token_fallback:
         required: false   # optional second Claude token, used only when the first one cannot start a run
+      codex_token:
+        required: false   # a `provider: codex` lane's OpenAI API key, passed instead of claude_token
+      codex_token_fallback:
+        required: false   # optional second OpenAI API key, used only when the first one cannot start a run
       agent_pat:
         required: false   # one of agent_pat or app_id + app_private_key
       app_private_key:
@@ -84,6 +89,7 @@ jobs:
       postgres_image: ${{ steps.lane.outputs.postgres_image }}
       setup_action: ${{ steps.lane.outputs.setup_action }}
       max_turns: ${{ steps.lane.outputs.max_turns }}
+      provider: ${{ steps.lane.outputs.provider }}
     steps:
       - name: Check out the repository (default branch)
         uses: actions/checkout@v4
@@ -105,17 +111,29 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
         run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
 
-      - name: Check lane token exists
-        env:
-          LANE_TOKEN: ${{ secrets.claude_token }}
-          LANE_FALLBACK: ${{ secrets.claude_token_fallback }}
-        run: |
-          if [ -z "$LANE_TOKEN" ] && [ -z "$LANE_FALLBACK" ]; then echo "::error::The Claude token secret for lane $LANE is empty or missing (see .night-shift/config.yml)"; exit 1; fi
-          if [ -z "$LANE_TOKEN" ]; then echo "::warning::The Claude token secret for lane $LANE is empty; the lane runs on its fallback token"; fi
-
       - name: Read lane config
         id: lane
         run: python3 -m nightshift lane-config --lane "$LANE" --github-output "$GITHUB_OUTPUT"
+
+      # Only presence is checked here (`!= ''`): the token values never reach this job's environment.
+      - name: Check lane token exists
+        env:
+          PROVIDER: ${{ steps.lane.outputs.provider }}
+          HAS_CLAUDE: ${{ secrets.claude_token != '' }}
+          HAS_CLAUDE_FALLBACK: ${{ secrets.claude_token_fallback != '' }}
+          HAS_CODEX: ${{ secrets.codex_token != '' }}
+          HAS_CODEX_FALLBACK: ${{ secrets.codex_token_fallback != '' }}
+        run: |
+          if [ "$PROVIDER" = "codex" ]; then
+            KIND="Codex API key"; HAS="$HAS_CODEX"; HAS_FB="$HAS_CODEX_FALLBACK"; OTHER="$HAS_CLAUDE$HAS_CLAUDE_FALLBACK"
+          else
+            KIND="Claude token"; HAS="$HAS_CLAUDE"; HAS_FB="$HAS_CLAUDE_FALLBACK"; OTHER="$HAS_CODEX$HAS_CODEX_FALLBACK"
+          fi
+          if [ "$OTHER" != "falsefalse" ]; then
+            echo "::error::Lane $LANE runs $PROVIDER but its job also passes the other provider's token; run gh nightshift init --regenerate"; exit 1
+          fi
+          if [ "$HAS" != "true" ] && [ "$HAS_FB" != "true" ]; then echo "::error::The $KIND secret for lane $LANE is empty or missing (see .night-shift/config.yml)"; exit 1; fi
+          if [ "$HAS" != "true" ]; then echo "::warning::The $KIND secret for lane $LANE is empty; the lane runs on its fallback token"; fi
 
       - name: Check the PAT (account, no Workflows scope)
         if: inputs.app_id == ''
@@ -189,7 +207,7 @@ jobs:
           name: task-${{ inputs.lane }}
           path: ${{ runner.temp }}/task
 
-      # Node for Claude Code, set up before the lane's own setup so a Node version the lane picks wins.
+      # Node for Claude Code or Codex, set up before the lane's own setup so a Node version the lane picks wins.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -214,22 +232,38 @@ jobs:
       # Claude Code goes into this job's temp directory, which the runner empties before every job, so
       # nothing a run leaves behind on a self-hosted machine is what the next job executes as `claude`.
       - name: Install Claude Code
+        if: needs.pick.outputs.provider != 'codex'
         run: |
           npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
+      # Same rule for Codex: a fresh install in this job's temp directory.
+      - name: Install Codex
+        if: needs.pick.outputs.provider == 'codex'
+        run: |
+          npm install -g --prefix "$RUNNER_TEMP/codex" "@openai/codex@${{ vars.CODEX_VERSION || 'latest' }}"
+          echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
+
       - name: Run agent
         env:
+          PROVIDER: ${{ needs.pick.outputs.provider || 'claude' }}
+          # A lane's caller passes only its own provider's tokens, so two of these four are always empty.
           LANE_CLAUDE_TOKEN: ${{ secrets.claude_token }}
           LANE_CLAUDE_FALLBACK: ${{ secrets.claude_token_fallback }}
+          LANE_CODEX_TOKEN: ${{ secrets.codex_token }}
+          LANE_CODEX_FALLBACK: ${{ secrets.codex_token_fallback }}
           # 'true' puts the token back in Claude's environment (for Claude Code versions without
           # CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR). Tests and tools the agent runs can then read it.
           TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
-          MODEL: ${{ needs.pick.outputs.model || 'sonnet' }}
+          # Empty for a Codex lane without a model: Codex then uses its own default model.
+          MODEL: ${{ needs.pick.outputs.model || (needs.pick.outputs.provider != 'codex' && 'sonnet' || '') }}
           MAX_TURNS: ${{ needs.pick.outputs.max_turns || '80' }}
           # This runner holds no GitHub write credentials. A GitHub-hosted one is discarded after the job;
           # a self-hosted one is not, so register agent runners as ephemeral (see SECURITY.md).
           PERMISSION_FLAGS: ${{ vars.CLAUDE_PERMISSION_FLAGS || '--dangerously-skip-permissions' }}
+          # Codex's own sandbox blocks the network (package installs) and needs kernel features hosted runners
+          # may lack, so like Claude it runs unsandboxed on a runner that is itself the sandbox.
+          CODEX_PERMISSION_FLAGS: ${{ vars.CODEX_PERMISSION_FLAGS || '--dangerously-bypass-approvals-and-sandbox' }}
         run: |
           set -uo pipefail
           OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
@@ -245,9 +279,11 @@ jobs:
           # Claude reads the token from a pipe (file descriptor 3), not from its environment, so the commands it
           # runs (tests, package scripts, `env`) do not inherit it. This stops accidental leaks; an agent that
           # sets out to find its own token still can, which is what the token guard below is for.
-          # The step runs under `bash -e`: a failing claude must not end it before the fallback gets its turn, so
+          # The step runs under `bash -e`: a failing agent must not end it before the fallback gets its turn, so
           # its exit code is kept in RC and returned at the end.
           RC=0
+          PROVIDER="${PROVIDER:-claude}"
+          STDERR="$OUT/$PROVIDER.stderr"
           run_claude() {  # $1: the Claude token for this attempt
             if [ "$TOKEN_IN_ENV" = "true" ]; then
               export CLAUDE_CODE_OAUTH_TOKEN="$1"; exec 3< /dev/null
@@ -255,36 +291,77 @@ jobs:
               export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$1")
             fi
             # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
-            env -u LANE_CLAUDE_TOKEN -u LANE_CLAUDE_FALLBACK claude -p "$PROMPT" --output-format json \
+            env -u LANE_CLAUDE_TOKEN -u LANE_CLAUDE_FALLBACK -u LANE_CODEX_TOKEN -u LANE_CODEX_FALLBACK \
+              claude -p "$PROMPT" --output-format json \
               --json-schema "$(cat "$RUNNER_TEMP/task/schema.json")" \
-              --model "$MODEL" --max-turns "$MAX_TURNS" $PERMISSION_FLAGS > "$OUT/result.json" 2> "$OUT/claude.stderr" \
+              --model "$MODEL" --max-turns "$MAX_TURNS" $PERMISSION_FLAGS > "$OUT/result.json" 2> "$STDERR" \
               && RC=0 || RC=$?
             echo "claude exit code: $RC (model $MODEL)"
             exec 3<&-
             unset CLAUDE_CODE_OAUTH_TOKEN
           }
-          # Same rule as the publish job's infra-error: no structured output and fewer than 2 turns means the run
-          # never really started (usage limit, expired or revoked token, outage).
+          # Codex reads its key from CODEX_API_KEY. The key is exported inside a subshell (never on a command
+          # line, where `ps` would show it), and Codex's shell environment policy strips it, with every other
+          # *KEY*/*SECRET*/*TOKEN* variable, from the commands the agent runs. As with Claude, an agent that
+          # sets out to find its key still can; the token guard covers that. Codex has no turn limit: the job's
+          # timeout bounds the run. Its events and final message are reshaped for publish by providers.py.
+          run_codex() {  # $1: the OpenAI API key for this attempt
+            local model_flag=()
+            if [ -n "$MODEL" ]; then model_flag=(--model "$MODEL"); fi
+            rm -rf "$RUNNER_TEMP/codex-home"; mkdir -p "$RUNNER_TEMP/codex-home"
+            # shellcheck disable=SC2086  # CODEX_PERMISSION_FLAGS is intentionally word-split
+            (
+              export CODEX_HOME="$RUNNER_TEMP/codex-home" CODEX_API_KEY="$1"
+              unset LANE_CLAUDE_TOKEN LANE_CLAUDE_FALLBACK LANE_CODEX_TOKEN LANE_CODEX_FALLBACK
+              exec codex exec --json --ephemeral --output-schema "$RUNNER_TEMP/task/schema.codex.json" \
+                --output-last-message "$OUT/last-message.json" \
+                -c shell_environment_policy.ignore_default_excludes=false \
+                -c 'shell_environment_policy.exclude=["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_HOME"]' \
+                "${model_flag[@]}" $CODEX_PERMISSION_FLAGS "$PROMPT" < /dev/null
+            ) > "$OUT/codex.jsonl" 2> "$STDERR" && RC=0 || RC=$?
+            echo "codex exit code: $RC (model ${MODEL:-codex default})"
+          }
+          run_agent() {
+            if [ "$PROVIDER" = "codex" ]; then run_codex "$1"; else run_claude "$1"; fi
+          }
+          # Same rule as the publish job's infra-error: no structured output and fewer than 2 turns (Codex: 2
+          # completed work items) means the run never really started (usage limit, bad token, outage).
           never_started() {
             local turns
-            turns="$(jq -r 'if (.structured_output | type) == "object" then 99 else (.num_turns // 0) end' \
-              "$OUT/result.json" 2>/dev/null || echo 0)"
+            if [ "$PROVIDER" = "codex" ]; then
+              if jq -e 'type == "object" and (.status | type) == "string"' "$OUT/last-message.json" > /dev/null 2>&1; then
+                turns=99
+              else
+                turns="$(jq -s '[.[] | select(.type == "item.completed" and .item.type != "reasoning")] | length' \
+                  "$OUT/codex.jsonl" 2>/dev/null || echo 0)"
+              fi
+            else
+              turns="$(jq -r 'if (.structured_output | type) == "object" then 99 else (.num_turns // 0) end' \
+                "$OUT/result.json" 2>/dev/null || echo 0)"
+            fi
             [ "${turns:-0}" -lt 2 ] && [ "$(git rev-list --count "origin/$MAIN_BRANCH..HEAD")" -eq 0 ]
           }
-          if [ -n "$LANE_CLAUDE_TOKEN" ]; then
-            run_claude "$LANE_CLAUDE_TOKEN"
-            if [ -n "$LANE_CLAUDE_FALLBACK" ] && never_started; then
-              echo "::warning::The lane's Claude token did not start a run (usage limit or sign-in); retrying with its fallback token"
-              mv "$OUT/claude.stderr" "$OUT/claude.primary.stderr"
+          if [ "$PROVIDER" = "codex" ]; then
+            TOKEN="$LANE_CODEX_TOKEN"; FALLBACK="$LANE_CODEX_FALLBACK"
+          else
+            TOKEN="$LANE_CLAUDE_TOKEN"; FALLBACK="$LANE_CLAUDE_FALLBACK"
+          fi
+          if [ -n "$TOKEN" ]; then
+            run_agent "$TOKEN"
+            if [ -n "$FALLBACK" ] && never_started; then
+              echo "::warning::The lane's $PROVIDER token did not start a run (usage limit or sign-in); retrying with its fallback token"
+              mv "$STDERR" "$OUT/$PROVIDER.primary.stderr"
+              rm -f "$OUT/last-message.json"
               git checkout -q -- . 2>/dev/null || true
-              run_claude "$LANE_CLAUDE_FALLBACK"
-              echo "claude token: fallback"
+              run_agent "$FALLBACK"
+              echo "$PROVIDER token: fallback"
             fi
           else
-            run_claude "$LANE_CLAUDE_FALLBACK"
-            echo "claude token: fallback"
+            run_agent "$FALLBACK"
+            echo "$PROVIDER token: fallback"
           fi
-          tail -n 50 "$OUT/claude.stderr" || true
+          unset TOKEN FALLBACK
+          tail -n 50 "$STDERR" || true
           exit "$RC"
 
       - name: Package commits
@@ -293,6 +370,9 @@ jobs:
           set -uo pipefail
           OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
           STATUS="$(jq -r '.structured_output.status // empty' "$OUT/result.json" 2>/dev/null || true)"
+          if [ -z "$STATUS" ]; then  # a Codex run: its final message is the structured output
+            STATUS="$(jq -r '.status // empty' "$OUT/last-message.json" 2>/dev/null || true)"
+          fi
           if [ "$STATUS" = "done" ] && [ -n "$(git status --porcelain)" ]; then
             git add -A && git commit -m "night-shift($LANE): uncommitted changes from agent run"
           fi
@@ -302,23 +382,30 @@ jobs:
           fi
           ls -la "$OUT"
 
-      # Everything that leaves this runner (the commits, the result and the log, all in the artifact) is searched
-      # for the lane's Claude token first. On a hit nothing is uploaded and the issue goes to a person.
+      # Everything that leaves this runner (the commits, the result and the logs, all in the artifact) is searched
+      # for the lane's model token first (Claude token or OpenAI API key, and the fallback). On a hit nothing is
+      # uploaded and the issue goes to a person.
       - name: Token guard
         if: always()
         env:
+          PROVIDER: ${{ needs.pick.outputs.provider || 'claude' }}
           LANE_CLAUDE_TOKEN: ${{ secrets.claude_token }}
           LANE_CLAUDE_FALLBACK: ${{ secrets.claude_token_fallback }}
+          LANE_CODEX_TOKEN: ${{ secrets.codex_token }}
+          LANE_CODEX_FALLBACK: ${{ secrets.codex_token_fallback }}
         run: |
           set -uo pipefail
           OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
+          PROVIDER="${PROVIDER:-claude}"
           PATTERNS="$(mktemp)"; chmod 600 "$PATTERNS"
           # Each token (the lane's and its fallback) and its base64 form, read from a file so none appears in a
-          # command line.
-          for RAW in "$LANE_CLAUDE_TOKEN" "${LANE_CLAUDE_FALLBACK:-}"; do
+          # command line. An OpenAI key is also matched without its `sk-...-` prefix, the part that is secret.
+          for RAW in "${LANE_CLAUDE_TOKEN:-}" "${LANE_CLAUDE_FALLBACK:-}" "${LANE_CODEX_TOKEN:-}" "${LANE_CODEX_FALLBACK:-}"; do
             TOKEN="$(printf '%s' "$RAW" | tr -d '[:space:]')"
             if [ "${#TOKEN}" -ge 20 ]; then
               { printf '%s\n' "$TOKEN"; printf '%s' "$TOKEN" | base64 | tr -d '\n'; echo; } >> "$PATTERNS"
+              BODY="${TOKEN##*-}"
+              if [ "${TOKEN#sk-}" != "$TOKEN" ] && [ "${#BODY}" -ge 20 ]; then printf '%s\n' "$BODY" >> "$PATTERNS"; fi
             fi
           done
           if [ ! -s "$PATTERNS" ]; then rm -f "$PATTERNS"; echo "no token to guard"; exit 0; fi
@@ -338,8 +425,9 @@ jobs:
           rm -f "$PATTERNS"
           if [ -n "$WHERE" ]; then
             rm -rf "$OUT"; mkdir -p "$OUT"
-            jq -n --arg where "$WHERE" '{night_shift_guard: "token-leak", where: $where}' > "$OUT/result.json"
-            echo "::error::The lane's Claude token appeared in $WHERE. Nothing from this run was uploaded; rotate the token."
+            jq -n --arg where "$WHERE" --arg provider "$PROVIDER" \
+              '{night_shift_guard: "token-leak", where: $where, provider: $provider}' > "$OUT/result.json"
+            echo "::error::The lane's $PROVIDER token appeared in $WHERE. Nothing from this run was uploaded; rotate the token."
           else
             echo "token guard: clean"
           fi

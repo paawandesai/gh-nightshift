@@ -1,7 +1,8 @@
 """Publish job (clean runner, holds the PAT): validate the agent's bundle, push, open the PR, report.
 
 The agent job had no GitHub credentials. Everything it produced arrives as two files: result.json
-(Claude's structured output) and agent.bundle (its commits). Nothing in them is trusted: the bundle is
+(the agent's structured output; a Codex run's event stream is reshaped to match, see providers.py) and
+agent.bundle (its commits). Nothing in them is trusted: the bundle is
 fetched into a fresh clone and checked against protected paths before anything is pushed, and every
 GitHub write here is capped (needs, notes, follow-ups) so a confused agent cannot flood the repo.
 
@@ -23,7 +24,7 @@ from pathlib import Path
 from collections.abc import Callable
 from zoneinfo import ZoneInfo
 
-from . import planner
+from . import planner, providers
 from . import protocol as ns
 from .config import Config
 from .gh import GH, GHError
@@ -95,21 +96,27 @@ def _turns(value) -> int:
 def classify(result_path: str | None) -> Result:
     """A run that never really started (no result file, or <2 turns and no structured output: expired
     token, usage limit, outage) is infra-error and gets refunded, not counted."""
-    if not result_path or not Path(result_path).is_file():
+    found = providers.load_result(result_path)
+    if found is None:
         return Result("infra-error", "The agent job never produced a result (setup failed); see the run log.")
-    try:
-        data = json.loads(Path(result_path).read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return Result("stuck", "The agent run was cut off (crash or timeout); see the run log.")
+    if isinstance(found, dict):
+        data = found  # a Codex run, already reshaped
+    else:
+        try:
+            data = json.loads(found.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return Result("stuck", "The agent run was cut off (crash or timeout); see the run log.")
     if not isinstance(data, dict):
         return Result("stuck", "The agent run produced an unreadable result.")
     if data.get("night_shift_guard") == "token-leak":
         # Written by the agent job's token guard, which withheld the commits, the result and the log.
         where = re.sub(r"[^a-z' ]", "", str(data.get("where") or "its output"))[:80]
-        return Result("token-leak", f"The run was withheld: the lane's Claude token appeared in {where}. Nothing "
-                                    "from it was uploaded or pushed. Rotate the token (`claude setup-token`, then "
-                                    "`gh nightshift join --lane <lane>`, and revoke the old one), check what the "
-                                    "ticket asked for, then remove the needs-human label.")
+        rotate = ("make a new OpenAI API key, store it with `gh nightshift join --lane <lane>`"
+                  if data.get("provider") == "codex" else
+                  "`claude setup-token`, then `gh nightshift join --lane <lane>`")
+        return Result("token-leak", f"The run was withheld: the lane's model token appeared in {where}. Nothing "
+                                    f"from it was uploaded or pushed. Rotate the token ({rotate}, and revoke the "
+                                    "old one), check what the ticket asked for, then remove the needs-human label.")
     cost, turns = _cost(data.get("total_cost_usd")), _turns(data.get("num_turns"))
     out = data.get("structured_output")
     if isinstance(out, dict) and out.get("status") in {"done", "stuck", "waiting"}:
@@ -191,7 +198,7 @@ def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
         outcome = "infra-error (attempt not counted)"
 
     if res.status == "token-leak":
-        outcome = "withheld: Claude token found in the run's output (needs a person)"
+        outcome = "withheld: the lane's model token found in the run's output (needs a person)"
         if issue is not None:
             gh.add_labels(int(job.issue), [cfg.label("needs_human")])  # never retried automatically
 

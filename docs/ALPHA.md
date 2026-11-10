@@ -88,6 +88,12 @@ the first one hits its usage limit. The admin adds `fallback_token_secret: CLAUD
 `.night-shift/config.yml`, runs `gh nightshift init --regenerate` and commits; the owner then signs in to the second
 account and runs `gh nightshift join --lane <lane> --fallback`. Check that this fits your Claude plan's terms.
 
+**A Codex lane.** A lane can run OpenAI Codex instead of Claude (`provider: codex` and `codex_token_secret`, see
+the README's "Codex lanes"). Its owner pastes an OpenAI API key at `gh nightshift join --lane <lane>`. Use a key
+from its own OpenAI project with a spend limit: the night log shows no cost for Codex runs. If a Codex run fails
+with a quota or 401 error before doing any work, it is counted as "never started" (like a Claude usage limit), so
+check the key and the project's billing.
+
 ## 4. Write the first tickets (repo admin)
 
 Agents pick issues labelled `night-safe` plus exactly one `lane:<name>`. Good first tickets are small and
@@ -164,3 +170,5 @@ the PAT, and run `gh extension remove nightshift`.
   hide and send it elsewhere. See [SECURITY.md](../SECURITY.md#known-gaps).
 - Costs on the night log are API-equivalent figures from Claude Code, not a bill.
 - The CLI is tested on Linux and macOS in CI; Windows support is new.
+- Codex lanes are new and have not had a live run yet: the Codex CLI's event format and flags were checked against
+  version 0.167, so pin `CODEX_VERSION` if a later version changes them. Codex has no turn limit and reports no cost.

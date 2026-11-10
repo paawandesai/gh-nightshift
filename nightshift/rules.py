@@ -23,10 +23,20 @@ def clean_model(value: str | None) -> str:
     return value if MODEL_RE.fullmatch(value) else ""
 
 
-def model_for(item: dict, failed_attempts: int, lane_model: str, escalate_model: str) -> str:
-    """A `model:<alias>` label wins; otherwise the lane model first, the stronger one on retries."""
+CLAUDE_ALIASES = {"sonnet", "opus", "haiku", "fable", "opusplan", "default"}
+
+
+def is_claude_model(name: str) -> bool:
+    return name.lower() in CLAUDE_ALIASES or name.lower().startswith("claude")
+
+
+def model_for(item: dict, failed_attempts: int, lane_model: str, escalate_model: str, provider: str = "claude") -> str:
+    """A `model:<alias>` label wins; otherwise the lane model first, the stronger one on retries.
+    A Codex lane skips labels that name a Claude model (sonnet, opus, claude-...), which it cannot run."""
     for name in sorted(label_names(item)):
         if name.startswith("model:") and clean_model(name[6:]):
+            if provider == "codex" and is_claude_model(name[6:]):
+                continue
             return name[6:]
     return escalate_model if failed_attempts > 0 else lane_model
 

@@ -74,7 +74,13 @@ class Workflows(unittest.TestCase):
         agent = text[text.index("\n  agent:"):text.index("\n  publish:")]
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN: ${{", agent)
         self.assertIn("export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3", agent)
-        self.assertIn("env -u LANE_CLAUDE_TOKEN -u LANE_CLAUDE_FALLBACK claude -p", agent)
+        self.assertIn("env -u LANE_CLAUDE_TOKEN -u LANE_CLAUDE_FALLBACK -u LANE_CODEX_TOKEN -u LANE_CODEX_FALLBACK \\\n"
+                      "              claude -p", agent)
+        # Codex: the key only in a subshell's environment, never in a `${{ }}` env line for codex itself, and
+        # stripped from the commands Codex runs.
+        self.assertNotIn("CODEX_API_KEY: ${{", agent)
+        self.assertIn('export CODEX_HOME="$RUNNER_TEMP/codex-home" CODEX_API_KEY="$1"', agent)
+        self.assertIn("shell_environment_policy.exclude=[\"CODEX_API_KEY\"", agent)
         # The guard runs after the commits are packaged and before anything is uploaded.
         self.assertLess(agent.index("- name: Package commits"), agent.index("- name: Token guard"))
         self.assertLess(agent.index("- name: Token guard"), agent.rindex("actions/upload-artifact"))
@@ -270,6 +276,7 @@ if __name__ == "__main__":
 class TokenGuardScript(unittest.TestCase):
     """Runs the real guard step from lane.yml against a throwaway git repo."""
     TOKEN = "sk-ant-oat01-" + "Zx9" * 20
+    PROVIDER, TOKEN_VAR, FALLBACK_VAR, STDERR = "claude", "LANE_CLAUDE_TOKEN", "LANE_CLAUDE_FALLBACK", "claude.stderr"
 
     def script(self):
         text = workflow("lane.yml")
@@ -298,12 +305,13 @@ class TokenGuardScript(unittest.TestCase):
             git("add", "-A")
             git("commit", "-q", "-m", message)
         Path(out, "result.json").write_text(result)
-        Path(out, "claude.stderr").write_text(stderr)
+        Path(out, self.STDERR).write_text(stderr)
         Path(out, "agent.bundle").write_bytes(b"\x00PACK")
         run = subprocess.run(["bash", "-e", "-c", self.script()], cwd=repo, capture_output=True, text=True,
                              env={**env, "RUNNER_TEMP": tmp, "MAIN_BRANCH": "main", "BRANCH": "agent/api/issue-1",
-                                  "LANE_CLAUDE_TOKEN": self.TOKEN if token is None else token,
-                                  "LANE_CLAUDE_FALLBACK": fallback})
+                                  "PROVIDER": self.PROVIDER,
+                                  self.TOKEN_VAR: self.TOKEN if token is None else token,
+                                  self.FALLBACK_VAR: fallback})
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn(self.TOKEN, run.stdout + run.stderr)
         if fallback:
@@ -313,12 +321,13 @@ class TokenGuardScript(unittest.TestCase):
     def assert_withheld(self, got, where):
         files, result, log = got
         self.assertEqual(files, ["result.json"])  # the bundle and the log are gone
-        self.assertEqual(json.loads(result), {"night_shift_guard": "token-leak", "where": where})
+        self.assertEqual(json.loads(result), {"night_shift_guard": "token-leak", "where": where,
+                                              "provider": self.PROVIDER})
         self.assertIn("::error::", log)
 
     def test_clean_run_is_untouched(self):
         files, result, log = self.guard(result='{"structured_output": {"status": "done"}}')
-        self.assertEqual(files, ["agent.bundle", "claude.stderr", "result.json"])
+        self.assertEqual(files, ["agent.bundle", self.STDERR, "result.json"])
         self.assertIn('"done"', result)
         self.assertIn("token guard: clean", log)
 
@@ -353,16 +362,29 @@ class TokenGuardScript(unittest.TestCase):
         # exits 0, which the guard once read as "token found in its commits".
         files, result, log = self.guard(branch="empty", result='{"structured_output": {"status": "blocked"}}')
         self.assertIn("token guard: clean", log)
-        self.assertEqual(files, ["agent.bundle", "claude.stderr", "result.json"])
+        self.assertEqual(files, ["agent.bundle", self.STDERR, "result.json"])
         self.assertIn('"blocked"', result)
         # The run's result and log are still checked when there are no commits.
         self.assert_withheld(self.guard(branch="empty", stderr=f"auth {self.TOKEN}"), "the run's result or log")
 
     def test_fallback_token_is_guarded_too(self):
-        fallback = "sk-ant-oat01-" + "Fb7" * 20
+        fallback = self.TOKEN[:-60] + "Fb7" * 20
         self.assert_withheld(self.guard(commit_text=f"KEY = '{fallback}'\n", fallback=fallback), "its commits")
         self.assert_withheld(self.guard(token="", stderr=fallback, fallback=fallback), "the run's result or log")
         self.assertIn("token guard: clean", self.guard(fallback=fallback)[2])
+
+
+class CodexTokenGuardScript(TokenGuardScript):
+    """The same guard on a Codex lane: its OpenAI API key (and fallback) are what must not leave the runner."""
+    TOKEN = "sk-proj-" + "Kq4" * 20
+    PROVIDER, TOKEN_VAR, FALLBACK_VAR, STDERR = "codex", "LANE_CODEX_TOKEN", "LANE_CODEX_FALLBACK", "codex.stderr"
+
+    def test_key_without_its_prefix_is_caught(self):
+        self.assert_withheld(self.guard(stderr="key=" + self.TOKEN.removeprefix("sk-proj-")), "the run's result or log")
+
+    def test_codex_event_stream_is_searched(self):
+        got = self.guard()
+        self.assertIn("token guard: clean", got[2])
 
 
 class AgentRunScript(unittest.TestCase):
@@ -447,6 +469,96 @@ class AgentRunScript(unittest.TestCase):
         used, result, _, _ = self.run_agent(half, self.GOOD, half=half, rc=1)
         self.assertEqual(used, [half])
         self.assertEqual(result["num_turns"], 7)
+
+
+class CodexRunScript(unittest.TestCase):
+    """The real `Run agent` step on a Codex lane, with a fake `codex` that reads CODEX_API_KEY."""
+    GOOD = "sk-proj-" + "Gd1" * 20
+    LIMITED = "sk-proj-" + "Lm2" * 20
+    FAKE_CODEX = textwrap.dedent("""\
+        #!/bin/bash
+        printf '%s\\n' "$CODEX_API_KEY" >> "$NS_CALLS"
+        printf '%s\\n' "$*" >> "$NS_ARGS"
+        env | grep -c '^LANE_' >> "$NS_ENVLEAK"
+        last=""; prev=""
+        for a in "$@"; do [ "$prev" = "--output-last-message" ] && last="$a"; prev="$a"; done
+        echo '{"type":"thread.started","thread_id":"t1"}'
+        if [ "$CODEX_API_KEY" = "$NS_GOOD" ]; then
+          echo '{"type":"item.completed","item":{"id":"1","type":"command_execution","command":"ls"}}'
+          echo '{"type":"item.completed","item":{"id":"2","type":"agent_message","text":"done"}}'
+          echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+          echo '{"status":"done","summary":"ok","assumptions":[],"tests_passed":true,"needs":null}' > "$last"
+        else
+          echo '{"type":"turn.failed","error":{"message":"You exceeded your current quota"}}'; exit 1
+        fi
+        """)
+
+    def run_agent(self, token, fallback, rc=0, model="gpt-5-codex"):
+        tmp = tempfile.mkdtemp()
+        repo, bin_dir, task = (os.path.join(tmp, d) for d in ("repo", "bin", "task"))
+        for d in (repo, bin_dir, task):
+            os.makedirs(d)
+        Path(bin_dir, "codex").write_text(self.FAKE_CODEX)
+        os.chmod(Path(bin_dir, "codex"), 0o755)
+        Path(task, "prompt.md").write_text("do __TASK_FILE__")
+        Path(task, "schema.codex.json").write_text("{}")
+        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": tmp, "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_CONFIG_SYSTEM": os.devnull}
+        for args in (["init", "-q", "-b", "main"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                                                     "--allow-empty", "-m", "base"],
+                     ["update-ref", "refs/remotes/origin/main", "HEAD"]):
+            subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+        calls, leak, argv = (os.path.join(tmp, n) for n in ("calls", "leak", "argv"))
+        run = subprocess.run(["bash", "-e", "-c", AgentRunScript.script(self)], cwd=repo, capture_output=True,
+                             text=True,
+                             env={**env, "RUNNER_TEMP": tmp, "MAIN_BRANCH": "main", "BRANCH": "agent/api/issue-1",
+                                  "PROVIDER": "codex", "LANE_CODEX_TOKEN": token, "LANE_CODEX_FALLBACK": fallback,
+                                  "LANE_CLAUDE_TOKEN": "", "LANE_CLAUDE_FALLBACK": "", "TOKEN_IN_ENV": "false",
+                                  "MODEL": model, "MAX_TURNS": "80", "PERMISSION_FLAGS": "",
+                                  "CODEX_PERMISSION_FLAGS": "--dangerously-bypass-approvals-and-sandbox",
+                                  "NS_CALLS": calls, "NS_ENVLEAK": leak, "NS_ARGS": argv, "NS_GOOD": self.GOOD})
+        self.assertEqual(run.returncode, rc, run.stderr)
+        for secret in (token, fallback):
+            if secret:
+                self.assertNotIn(secret, run.stdout + run.stderr)
+                self.assertNotIn(secret, Path(argv).read_text())  # never on codex's command line
+        self.assertEqual(set(Path(leak).read_text().split()), {"0"})  # no LANE_* variable reaches codex
+        out = Path(tmp, "out")
+        return Path(calls).read_text().split(), Path(argv).read_text(), run.stdout, out
+
+    def test_working_key_runs_once_and_publish_reads_the_result(self):
+        from nightshift.publish import classify
+
+        used, argv, log, out = self.run_agent(self.GOOD, self.LIMITED)
+        self.assertEqual(used, [self.GOOD])
+        self.assertNotIn("fallback", log)
+        self.assertIn("--model gpt-5-codex", argv)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", argv)
+        self.assertIn("--output-schema", argv)
+        self.assertFalse((out / "result.json").exists())
+        res = classify(str(out / "result.json"))
+        self.assertEqual((res.status, res.summary, res.num_turns, res.cost), ("done", "ok", 2, ""))
+        self.assertEqual(res.needs, [])  # the strict schema's null came back as "absent"
+
+    def test_quota_error_switches_to_the_fallback_key(self):
+        used, _, log, out = self.run_agent(self.LIMITED, self.GOOD)
+        self.assertEqual(used, [self.LIMITED, self.GOOD])
+        self.assertIn("codex token: fallback", log)
+        self.assertTrue((out / "codex.primary.stderr").exists())
+
+    def test_quota_error_without_fallback_is_an_infra_error(self):
+        from nightshift.publish import classify
+
+        used, _, _, out = self.run_agent(self.LIMITED, "", rc=1)
+        self.assertEqual(used, [self.LIMITED])
+        res = classify(str(out / "result.json"))
+        self.assertEqual(res.status, "infra-error")
+        self.assertIn("quota", res.summary)
+
+    def test_no_model_lets_codex_choose(self):
+        _, argv, log, _ = self.run_agent(self.GOOD, "", model="")
+        self.assertNotIn("--model", argv)
+        self.assertIn("codex default", log)
 
 
 class TaskFileAuthors(unittest.TestCase):

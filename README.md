@@ -153,7 +153,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 
 | Key | Default | What it does |
 |---|---|---|
-| `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `fallback_token_secret` (a second Claude token used only when the first cannot start a run), `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image` |
+| `lanes[]` | required | `name`, `paths`, `claude_token_secret` (or `provider: codex` with `codex_token_secret`, see [Codex lanes](#codex-lanes)), optional `agent_pat_secret`, `fallback_token_secret` (a second token of the lane's provider, used only when the first cannot start a run), `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image` |
 | `main_branch` | `main` | Branch the lanes build on and protect |
 | `ci_workflow` | `ci.yml` | CI file whose runs on main gate every lane |
 | `required_checks` | `[test, "review / verdict"]` | Required status checks; a PR counts as green only when all have reported |
@@ -173,13 +173,45 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
 | `extends` | | `owner/repo` with an org-wide `.night-shift/config.yml` (see Org-wide config) |
-| `runners` | `ubuntu-latest` | `github` (jobs holding the PAT or App key: pick, publish, planner context and create, commands, digest) and `agent` (jobs that run Claude: the lane agent, planner draft and reviewer): a runner label or a list. Each needs a label the other lacks, and self-hosted runners for the two must be separate machines (see SECURITY.md); `init --regenerate` writes them into the callers |
+| `runners` | `ubuntu-latest` | `github` (jobs holding the PAT or App key: pick, publish, planner context and create, commands, digest) and `agent` (jobs that run the agents: the lane agent, planner draft and reviewer): a runner label or a list. Each needs a label the other lacks, and self-hosted runners for the two must be separate machines (see SECURITY.md); `init --regenerate` writes them into the callers |
 | `digest` | | `weekly_schedule` (`0 8 * * 1`, `""` = off), `enabled` (true), `schedule` (`0 7 * * *`, UTC), `webhook_secret` (optional secret holding a Slack or Discord webhook URL) |
 
 Repo variables override some settings at run time without a commit: `AGENTS_ENABLED`, `FIX_LANE`,
 `ESCALATE_MODEL`, `REVIEW_MODEL` (fallback), `PLANNER_MODEL`, `CLAUDE_CODE_VERSION`,
-`CLAUDE_PERMISSION_FLAGS` and `NIGHT_SHIFT_TOKEN_IN_ENV` (see SECURITY.md, known gap 2). A project can replace a prompt by committing `.night-shift/prompts/worker.md`,
+`CLAUDE_PERMISSION_FLAGS`, `CODEX_VERSION`, `CODEX_PERMISSION_FLAGS` and `NIGHT_SHIFT_TOKEN_IN_ENV` (see SECURITY.md, known gap 2). A project can replace a prompt by committing `.night-shift/prompts/worker.md`,
 `review.md` or `planner.md` on the default branch.
+
+## Codex lanes
+
+A lane can run OpenAI's Codex CLI instead of Claude Code. Everything around the agent stays the same: the
+picker, the task file and prompt, publish, protected paths, the review gate and the token guard.
+
+```yaml
+lanes:
+  - name: docs
+    paths: [docs/]
+    provider: codex
+    codex_token_secret: OPENAI_KEY_DOCS   # an OpenAI API key
+    model: gpt-5-codex                    # optional; empty uses the Codex CLI's default model
+```
+
+- **The key.** Store an OpenAI API key in the secret (`gh nightshift join --lane docs` prompts for it). Give it its
+  own OpenAI project with a spend limit: Codex reports token counts, not a cost, so the night log shows no `≈$` and
+  `budget_usd_per_night` is refused on a Codex lane. `fallback_token_secret` works as for Claude, with a second key.
+- **How it runs.** `codex exec --json --output-schema` with the worker prompt and the same result schema (in the
+  strict form OpenAI requires). The key reaches Codex as `CODEX_API_KEY` inside a subshell, never on a command line,
+  and Codex's shell environment policy strips it from the commands the agent runs. There is no turn limit
+  (`limits.max_turns` applies to Claude only); the agent job's 50-minute timeout bounds a run.
+- **Models.** `models.default`, `models.escalate` and the `ESCALATE_MODEL` variable name Claude models, so a Codex
+  lane ignores them and uses only its own `model` and `escalate_model`. A `model:` label naming a Claude model is
+  skipped on a Codex lane.
+- **Still Claude.** The review gate and the planner always run Claude. A config whose lanes are all Codex must set
+  `planner.claude_token_secret`.
+- **Variables.** `CODEX_VERSION` pins the CLI (default `latest`). `CODEX_PERMISSION_FLAGS` (default
+  `--dangerously-bypass-approvals-and-sandbox`, like Claude's `--dangerously-skip-permissions`: the runner is the
+  sandbox) can switch to Codex's own sandbox, for example `--sandbox workspace-write`, which blocks network access.
+- **Version.** The caller's `tool_ref` must be a release that has Codex support; older `lane.yml` versions have no
+  `codex_token` input.
 
 ## The comment protocol
 

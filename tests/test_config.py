@@ -33,14 +33,15 @@ class Yaml(unittest.TestCase):
 class Schema(unittest.TestCase):
     def test_example_is_valid(self):
         cfg = loads(open(os.path.join(ROOT, "examples/config.yml")).read())
-        self.assertEqual(cfg.lane_names, ["api", "web"])
+        self.assertEqual(cfg.lane_names, ["api", "web", "docs"])
+        self.assertEqual(cfg.lane("docs").provider, "codex")
         self.assertEqual(cfg.lane("web").setup_action, ".night-shift/actions/web-setup")
         self.assertEqual(cfg.lane("web").setup_commands, "cd web && npm ci")
         self.assertEqual(cfg.lane("api").postgres_image, "postgres:16")
         self.assertEqual(cfg.id_prefix("web"), "W")
         self.assertIn("contracts/", cfg.protected_paths)
         self.assertEqual(cfg.secret_names(), ["AGENT_PAT", "AGENT_PAT_BOB", "CLAUDE_TOKEN_ALICE", "CLAUDE_TOKEN_ALICE_2",
-                                              "CLAUDE_TOKEN_BOB", "CLAUDE_TOKEN_REVIEW"])
+                                              "CLAUDE_TOKEN_BOB", "CLAUDE_TOKEN_REVIEW", "OPENAI_KEY_DOCS"])
 
     def test_defaults(self):
         cfg = loads(MINIMAL)
