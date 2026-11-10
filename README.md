@@ -51,7 +51,7 @@ Python 3.10 or newer, and a CI workflow whose test job is called `test`. If it h
    Then it sets up the repo: labels, squash merge and delete-branch-on-merge, the `AGENTS_ENABLED`
    (`false`) and `FIX_LANE` variables, and a `night-log` issue. Last, it asks for any missing secrets, without
    echoing them. Branch protection waits until step 4, so it does not refuse the push of these files.
-   The workflows are pinned to the release of the extension you installed (`tool_ref: v0.1.2`); `--tool-ref`
+   The workflows are pinned to the release of the extension you installed (`tool_ref: v0.1.3`); `--tool-ref`
    picks another tag or SHA.
 
 3. Create the secrets (`init` asks for them; `gh nightshift join --lane <name>` lets a teammate add their own).

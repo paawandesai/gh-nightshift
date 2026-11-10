@@ -293,6 +293,7 @@ class TokenGuardScript(unittest.TestCase):
         git("update-ref", "refs/remotes/origin/main", "HEAD")
         if branch:
             git("switch", "-q", "-c", "agent/api/issue-1")
+        if branch and branch != "empty":
             Path(repo, "x.py").write_text(commit_text)
             git("add", "-A")
             git("commit", "-q", "-m", message)
@@ -346,6 +347,16 @@ class TokenGuardScript(unittest.TestCase):
     def test_empty_secret_and_no_branch_are_fine(self):
         self.assertIn("no token to guard", self.guard(token="")[2])
         self.assertIn("token guard: clean", self.guard(branch=False)[2])
+
+    def test_branch_without_commits_is_clean(self):
+        # A run that ends blocked or waiting leaves a branch with no commits. `xargs -r` then runs nothing and
+        # exits 0, which the guard once read as "token found in its commits".
+        files, result, log = self.guard(branch="empty", result='{"structured_output": {"status": "blocked"}}')
+        self.assertIn("token guard: clean", log)
+        self.assertEqual(files, ["agent.bundle", "claude.stderr", "result.json"])
+        self.assertIn('"blocked"', result)
+        # The run's result and log are still checked when there are no commits.
+        self.assert_withheld(self.guard(branch="empty", stderr=f"auth {self.TOKEN}"), "the run's result or log")
 
     def test_fallback_token_is_guarded_too(self):
         fallback = "sk-ant-oat01-" + "Fb7" * 20

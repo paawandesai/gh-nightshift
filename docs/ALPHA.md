@@ -31,7 +31,7 @@ One person can be both. Each lane uses its owner's Claude token, so usage is spr
 
 ```sh
 gh extension install paawandesai/gh-nightshift
-gh nightshift --version        # gh-nightshift 0.1.2 or later
+gh nightshift --version        # gh-nightshift 0.1.3 or later
 ```
 
 Upgrade later with `gh extension upgrade nightshift`. If `gh nightshift` says it cannot find Python, set
