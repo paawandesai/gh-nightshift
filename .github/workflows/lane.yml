@@ -9,6 +9,16 @@ name: night-shift-lane
 on:
   workflow_call:
     inputs:
+      runs_on:
+        description: Runner labels (JSON) for the jobs that hold a GitHub token or the App key
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
+      agent_runs_on:
+        description: Runner labels (JSON) for the Claude-only agent jobs; never a box that runs the token jobs
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
       lane:
         type: string
         required: true
@@ -55,7 +65,7 @@ env:
 
 jobs:
   pick:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 10
     env:
       PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
@@ -146,7 +156,7 @@ jobs:
   agent:
     needs: pick
     if: needs.pick.outputs.mode != 'skip'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
     timeout-minutes: 50
     permissions:
       contents: read
@@ -179,6 +189,11 @@ jobs:
           name: task-${{ inputs.lane }}
           path: ${{ runner.temp }}/task
 
+      # Node for Claude Code, set up before the lane's own setup so a Node version the lane picks wins.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Lane setup commands
         run: |
           if [ -s "$RUNNER_TEMP/task/setup.sh" ]; then bash -euo pipefail "$RUNNER_TEMP/task/setup.sh"; else echo "no setup commands for lane $LANE"; fi
@@ -196,8 +211,12 @@ jobs:
         if: needs.pick.outputs.setup_action != ''
         uses: ./.ns-lane-setup
 
+      # Claude Code goes into this job's temp directory, which the runner empties before every job, so
+      # nothing a run leaves behind on a self-hosted machine is what the next job executes as `claude`.
       - name: Install Claude Code
-        run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+        run: |
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
       - name: Run agent
         env:
@@ -208,7 +227,8 @@ jobs:
           TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
           MODEL: ${{ needs.pick.outputs.model || 'sonnet' }}
           MAX_TURNS: ${{ needs.pick.outputs.max_turns || '80' }}
-          # This runner holds no GitHub write credentials and is discarded after the job.
+          # This runner holds no GitHub write credentials. A GitHub-hosted one is discarded after the job;
+          # a self-hosted one is not, so register agent runners as ephemeral (see SECURITY.md).
           PERMISSION_FLAGS: ${{ vars.CLAUDE_PERMISSION_FLAGS || '--dangerously-skip-permissions' }}
         run: |
           set -uo pipefail
@@ -334,7 +354,7 @@ jobs:
   publish:
     needs: [pick, agent]
     if: always() && needs.pick.result == 'success' && needs.pick.outputs.mode != 'skip'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 10
     env:
       PYTHONPATH: ${{ github.workspace }}/.nightshift-tool

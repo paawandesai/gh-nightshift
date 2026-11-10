@@ -294,6 +294,27 @@
       "type": "string",
       "description": "gh-nightshift ref the caller workflows pin (default main; pin a tag or SHA)."
     },
+    "runners": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Runner labels for the reusable workflows (default ubuntu-latest). Each needs a label the other lacks; use different machines for the two.",
+      "properties": {
+        "github": {
+          "description": "Jobs holding the PAT or the App key: pick, publish, planner context/create, commands, digest",
+          "oneOf": [
+            {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+            {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"}}
+          ]
+        },
+        "agent": {
+          "description": "Jobs that run Claude: the lane agent, the planner draft and the reviewer",
+          "oneOf": [
+            {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+            {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"}}
+          ]
+        }
+      }
+    },
     "digest": {
       "type": "object",
       "additionalProperties": false,

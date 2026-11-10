@@ -75,5 +75,50 @@ class Schema(unittest.TestCase):
         self.assertEqual(len(schema.validate({"a": [1], "b": "x"}, s)), 2)
 
 
+
+class RunnersTest(unittest.TestCase):
+    BASE = "version: 1\nlanes:\n  - name: api\n    claude_token_secret: CLAUDE_TOKEN_A\n"
+
+    def test_default_is_github_hosted(self):
+        cfg = loads(self.BASE)
+        self.assertEqual((cfg.runner_github, cfg.runner_agent), (["ubuntu-latest"], ["ubuntu-latest"]))
+
+    def test_a_label_or_a_list(self):
+        cfg = loads(self.BASE + "runners:\n  github: ns-github\n  agent: [self-hosted, ns-agent]\n")
+        self.assertEqual(cfg.runner_github, ["ns-github"])
+        self.assertEqual(cfg.runner_agent, ["self-hosted", "ns-agent"])
+
+    def test_the_agent_never_shares_the_token_machine(self):
+        for github, agent in (
+            ("[self-hosted, box]", "[self-hosted, box]"),        # the same
+            ("[self-hosted, box]", "[box, self-hosted]"),        # reordered
+            ("[self-hosted, Box]", "[self-hosted, box]"),        # labels match without regard to case
+            ("[self-hosted, box, box]", "[self-hosted, box]"),   # duplicates
+            ("[self-hosted, box]", "box"),                       # a subset takes both kinds of job
+            ("box", "[self-hosted, box, gpu]"),                  # a superset is still on that box
+        ):
+            with self.subTest(github=github, agent=agent), self.assertRaisesRegex(ConfigError, "a label the other lacks"):
+                loads(self.BASE + f"runners:\n  github: {github}\n  agent: {agent}\n")
+
+    def test_a_self_hosted_set_needs_a_label_of_its_own(self):
+        for generic in ("self-hosted", "[self-hosted, linux, X64]", "[self-hosted, arm64]", "linux", "[linux, x64]"):
+            for key, other in (("github", "agent"), ("agent", "github")):
+                with self.subTest(generic=generic, key=key), self.assertRaisesRegex(ConfigError, "label of its own"):
+                    loads(self.BASE + f"runners:\n  {key}: {generic}\n  {other}: [self-hosted, ns-{other}]\n")
+
+    def test_separate_machines_and_mixed_hosting_are_accepted(self):
+        for github, agent in (("[self-hosted, ns-github]", "[self-hosted, ns-agent]"),
+                              ("[self-hosted, linux, ns-github]", "[self-hosted, linux, ns-agent]"),
+                              ("ubuntu-latest", "[self-hosted, ns-agent]"),
+                              ("[self-hosted, ns-github]", "ubuntu-latest")):
+            with self.subTest(github=github, agent=agent):
+                loads(self.BASE + f"runners:\n  github: {github}\n  agent: {agent}\n")
+
+    def test_bad_labels_are_refused(self):
+        for bad in ("[]", "'a b'", "'x: y'", "[ok, 'bad label']", "{a: 1}"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ConfigError, "runner label"):
+                loads(self.BASE + f"runners:\n  github: {bad}\n")
+
+
 if __name__ == "__main__":
     unittest.main()

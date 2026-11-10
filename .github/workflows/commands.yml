@@ -5,6 +5,11 @@ name: night-shift-commands
 on:
   workflow_call:
     inputs:
+      runs_on:
+        description: Runner labels (JSON) for the jobs that hold a GitHub token or the App key
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
       tool_repo:
         type: string
         required: false
@@ -35,7 +40,7 @@ env:
 
 jobs:
   command:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
