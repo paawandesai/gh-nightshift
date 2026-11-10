@@ -173,7 +173,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
 | `extends` | | `owner/repo` with an org-wide `.night-shift/config.yml` (see Org-wide config) |
-| `runners` | `ubuntu-latest` | `github` (jobs holding the GitHub token or App key: pick, publish, planner context and create, review, commands, digest) and `agent` (the Claude-only lane agent and planner draft): a runner label or a list. Self-hosted runners for the two must be separate machines; `init --regenerate` writes them into the callers |
+| `runners` | `ubuntu-latest` | `github` (jobs holding the PAT or App key: pick, publish, planner context and create, commands, digest) and `agent` (jobs that run Claude: the lane agent, planner draft and reviewer): a runner label or a list. Each needs a label the other lacks, and self-hosted runners for the two must be separate machines (see SECURITY.md); `init --regenerate` writes them into the callers |
 | `digest` | | `weekly_schedule` (`0 8 * * 1`, `""` = off), `enabled` (true), `schedule` (`0 7 * * *`, UTC), `webhook_secret` (optional secret holding a Slack or Discord webhook URL) |
 
 Repo variables override some settings at run time without a commit: `AGENTS_ENABLED`, `FIX_LANE`,

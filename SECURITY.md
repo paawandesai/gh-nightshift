@@ -27,9 +27,18 @@ runner:
 
 **Self-hosted runners.** `runners.github` and `runners.agent` choose where these jobs run. On GitHub-hosted
 runners every job gets a fresh machine. A self-hosted runner is not fresh: whatever one job leaves behind, the
-next job on that machine can find. So the two must be separate machines, and the config refuses the same labels
-for both. Keep the `github` machine for these jobs alone: no CI, no Docker group, no other org's work, since
-anything that runs there could read the token.
+next job on that machine can find. So the two must be separate machines. The config refuses label sets where
+either is a subset of the other (a runner carrying both would take both kinds of job) and self-hosted sets with
+only generic labels (`self-hosted`, `linux`, `x64`, ...), but labels cannot prove two machines are different:
+register each class on its own machine, ideally in its own runner group. Keep the `github` machine for the
+token jobs alone: no CI, no Claude, no Docker group, no other org's work, since anything that runs there could
+read the token. The reviewer runs Claude on PR content, so it is in the `agent` class even though it holds no PAT.
+
+On an `agent` machine, a prompt-injected run could leave something behind for the next job, which may belong to
+another lane with its own Claude token. Claude Code is installed fresh into the job's temp directory each time,
+but Node's tool cache and the runner user's home persist. Register agent runners with `--ephemeral` (one job
+per registration) if lanes must stay isolated from each other; otherwise treat every lane's Claude token as
+reachable from every other lane on that machine.
 
 The agent's work crosses to the publish job only as two artifacts, `result.json` and a git bundle. Lane setup
 (commands, composite action, Postgres service) runs only in the agent job. The planner uses the same split:

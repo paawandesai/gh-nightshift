@@ -10,8 +10,10 @@ name: night-shift-review
 on:
   workflow_call:
     inputs:
-      runs_on:
-        description: Runner labels (JSON) for the jobs that hold a GitHub token or the App key
+      agent_runs_on:
+        description: >-
+          Runner labels (JSON) for the reviewer. It runs Claude on PR content and holds no PAT or App key,
+          so it belongs with the agent jobs, never on a box that runs the token jobs
         type: string
         required: false
         default: '"ubuntu-latest"'
@@ -39,7 +41,7 @@ permissions:
 jobs:
   verdict:
     if: startsWith(github.head_ref, 'agent/')
-    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
     timeout-minutes: 20
     env:
       REPO: ${{ github.repository }}
@@ -88,12 +90,16 @@ jobs:
           python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
             --out-dir "$WORK" --github-output "$GITHUB_OUTPUT"
 
-      # Its own Node, so npm -g also works on a self-hosted runner without root.
+      # Node for Claude Code, in case a self-hosted runner has none.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # Claude Code goes into this job's temp directory, which the runner empties before every job, so
+      # nothing a run leaves behind on a self-hosted machine is what the next job executes as `claude`.
       - name: Install Claude Code
-        run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+        run: |
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
       - name: Review
         id: review

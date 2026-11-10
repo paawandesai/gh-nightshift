@@ -10,10 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `runners.github` and `runners.agent` in the config choose the runners the reusable workflows use (default
-  `ubuntu-latest`), so lanes can run on self-hosted machines. The jobs that hold a GitHub token or the App key
-  and the Claude-only agent jobs get separate labels, and the config refuses the same self-hosted labels for
-  both: the agent must never share a machine with the token. The agent, planner draft and review jobs now set
-  up their own Node, so `npm install -g` works on a runner without root.
+  `ubuntu-latest`), so lanes can run on self-hosted machines. The jobs that hold the PAT or the App key and the
+  jobs that run Claude (agent, planner draft, review) get separate labels, and the config refuses label sets
+  where either is a subset of the other, or a self-hosted set with only generic labels: Claude must never share
+  a machine with the token. The review workflow's input is now `agent_runs_on`.
+- The jobs that run Claude set up Node 22 (before the lane's own setup, which still wins) and install Claude
+  Code into the job's temp directory, so it works on a runner without root and a run cannot leave a planted
+  `claude` for the next job on a self-hosted machine.
 
 ### Fixed
 

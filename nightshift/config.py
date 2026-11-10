@@ -168,6 +168,31 @@ def _labels(value: object, key: str) -> list[str]:
     return list(labels)
 
 
+# Labels every self-hosted runner gets by default; they say nothing about which machine a job lands on.
+GENERIC_RUNNER_LABELS = {"self-hosted", "linux", "windows", "macos", "x64", "arm", "arm64"}
+
+
+def _check_runner_split(github: list[str], agent: list[str]) -> None:
+    """Keep the agent jobs off the machines that hold the GitHub token or App key.
+
+    A job runs on any runner that has all of its labels, so the two label sets must not be equal, and neither
+    may be a subset of the other (that runner would take both kinds of job). A self-hosted set also needs a
+    label of its own. Labels match without regard to case. This cannot prove two sets name different
+    machines: register each class on its own machine, ideally in its own runner group.
+    """
+    sets = {key: {x.casefold() for x in labels} for key, labels in (("runners.github", github), ("runners.agent", agent))}
+    if all(s == {"ubuntu-latest"} for s in sets.values()):
+        return
+    for key, s in sets.items():
+        if "self-hosted" in s and not s - GENERIC_RUNNER_LABELS:
+            raise ConfigError(f"{key} needs a label of its own besides {', '.join(sorted(s))}: those match any "
+                              "self-hosted runner, including the other class's")
+    g, a = sets.values()
+    if g <= a or a <= g:
+        raise ConfigError("runners.agent and runners.github must each have a label the other lacks: a runner "
+                          "carrying both sets would put the agent on a machine with the GitHub token")
+
+
 def parse(data: dict) -> Config:
     if not isinstance(data, dict):
         raise ConfigError("config must be a mapping")
@@ -252,9 +277,7 @@ def parse(data: dict) -> Config:
     if cfg.extends and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", cfg.extends)
                         or cfg.extends.split("/")[1] in (".", "..")):
         raise ConfigError(f"extends must be owner/repo, not {cfg.extends!r}")
-    if cfg.runner_agent == cfg.runner_github and cfg.runner_agent != ["ubuntu-latest"]:
-        raise ConfigError("runners.agent and runners.github must differ: on a self-hosted machine the agent "
-                          "would share a box with the GitHub token")
+    _check_runner_split(cfg.runner_github, cfg.runner_agent)
     if cfg.auth_mode not in ("pat", "app"):
         raise ConfigError(f"auth.mode must be pat or app, not {cfg.auth_mode!r}")
     if cfg.auth_mode == "app":

@@ -62,10 +62,10 @@ def _github_auth(cfg: Config, pat: str = "secrets.AGENT_PAT") -> tuple[str, str]
     return "", f"agent_pat: ${{{{ {pat} }}}}"
 
 
-def _runners(cfg: Config, agent: bool = False) -> str:
+def _runners(cfg: Config, agent: bool = False, github: bool = True) -> str:
     """Extra `with:` lines choosing runners; nothing when they are the default GitHub-hosted ones."""
     out = ""
-    if cfg.runner_github != ["ubuntu-latest"]:
+    if github and cfg.runner_github != ["ubuntu-latest"]:
         out += f"\n      runs_on: {_q(json.dumps(cfg.runner_github))}"
     if agent and cfg.runner_agent != ["ubuntu-latest"]:
         out += f"\n      agent_runs_on: {_q(json.dumps(cfg.runner_agent))}"
@@ -149,7 +149,7 @@ jobs:
     with:
       tool_repo: {tool_repo}
       tool_ref: {cfg.tool_ref}
-      model: {cfg.review_model}{_runners(cfg)}
+      model: {cfg.review_model}{_runners(cfg, agent=True, github=False)}
     secrets:
       claude_token: ${{{{ secrets.{cfg.review_token_secret} }}}}
 """

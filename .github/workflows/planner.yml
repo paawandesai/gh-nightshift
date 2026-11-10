@@ -119,12 +119,16 @@ jobs:
         with:
           name: plan-context
           path: ${{ runner.temp }}/plan
-      # Its own Node, so npm -g also works on a self-hosted runner without root.
+      # Node for Claude Code, in case a self-hosted runner has none.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # Claude Code goes into this job's temp directory, which the runner empties before every job, so
+      # nothing a run leaves behind on a self-hosted machine is what the next job executes as `claude`.
       - name: Install Claude Code
-        run: npm install -g "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+        run: |
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
       - name: Draft tickets (read-only)
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
