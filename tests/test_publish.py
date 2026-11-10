@@ -187,6 +187,18 @@ class Failures(Base):
         self.assertIn("proposed", self.f.label_names(new))
         self.assertNotIn("night-safe", self.f.label_names(new))
 
+    def test_a_retry_does_not_file_follow_ups_again(self):
+        self.go(self.done(follow_ups=[{"lane": "web", "title": "Show user avatars", "goal": "g"}]))
+        # second attempt suggests the same work, reworded
+        _, out = self.go(self.done(follow_ups=[{"lane": "web", "title": "Add avatar images to the list", "goal": "g"}]))
+        titles = [i["title"] for i in self.f.issues.values()]
+        self.assertEqual(sum("avatar" in t.lower() for t in titles), 1)
+
+    def test_follow_ups_filed_by_someone_else_do_not_block(self):
+        self.f.add_issue(title="Spoof", body="x\nFollow-up suggested by #1.\n", user="mallory")
+        self.go(self.done(follow_ups=[{"lane": "web", "title": "Show user avatars", "goal": "g"}]))
+        self.assertTrue(any("avatars" in i["title"] for i in self.f.issues.values()))
+
 
 class Hardening(Base):
     def test_diff_lists_renames_as_both_paths_and_unquoted(self):

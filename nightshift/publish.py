@@ -346,6 +346,17 @@ def send_notes(gh: GH, cfg: Config, job: Job, issue: dict, notes: list[dict]) ->
 def file_follow_ups(gh: GH, cfg: Config, job: Job, issue: dict, follow_ups: list[dict]) -> list[str]:
     """Builders may suggest follow-up work (step 4). Filed as `proposed`; a person promotes them."""
     out = []
+    if not follow_ups:
+        return out
+    # One set of follow-ups per issue: a retry after a failed review suggests them again, often
+    # reworded, so the title check alone files duplicates. Only issues our own login filed count.
+    tag = f"\nFollow-up suggested by #{issue['number']}.\n"
+    earlier = [i["number"] for i in gh.issues(state="all")
+               if "pull_request" not in i and (i.get("user") or {}).get("login") in gh.trusted
+               and tag in (i.get("body") or "")]
+    if earlier:
+        listed = ", ".join(f"#{n}" for n in sorted(earlier))
+        return [f"follow-ups skipped: an earlier attempt already filed {listed}"]
     lanes = lanes_of(issue)
     for fu in follow_ups[:MAX_FOLLOW_UPS]:
         lane = str(fu.get("lane") or (lanes[0] if lanes else "")).strip()
@@ -357,7 +368,7 @@ def file_follow_ups(gh: GH, cfg: Config, job: Job, issue: dict, follow_ups: list
             out.append(f"follow-up skipped (duplicate): {ticket.plain_title}")
             continue
         ticket.title = planner.next_id(gh.issues(state="all"), cfg.id_prefix(lane)) + " " + ticket.plain_title
-        created = gh.create_issue(ticket.title, planner.render(ticket, {}) + f"\nFollow-up suggested by #{issue['number']}.\n",
+        created = gh.create_issue(ticket.title, planner.render(ticket, {}) + tag,
                                   [f"lane:{lane}", f"wave:{ticket.wave}", cfg.label("proposed")])
         out.append(f"follow-up #{created.get('number', 0)} filed as proposed")
     return out
