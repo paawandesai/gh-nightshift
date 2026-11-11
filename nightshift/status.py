@@ -113,7 +113,8 @@ def stats(gh: GH, cfg: Config, audit_csv: str | None = None) -> str:
         bad = sum(1 for r in labelled if r[use] in BAD_LABELS)
         out.append("")
         out.append(f"Review gate catch rate (from {audit_csv}, {use}{'' if use == 'human_label' else ', not ground truth'}):")
-        out.append("  " + catch_rate(reasons.get("verdict_failed", 0), len(merged), (bad, len(labelled))))
+        caught = reasons.get("verdict_failed", 0) + reasons.get("security_failed", 0)
+        out.append("  " + catch_rate(caught, len(merged), (bad, len(labelled))))
     return "\n".join(out)
 
 

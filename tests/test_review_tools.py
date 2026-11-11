@@ -114,7 +114,7 @@ class WriteInputsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
             DriftRepo(d, overlap=True)
             values = write_inputs(fake.gh(), git_in(d), "main", "agent/api/issue-7", out)
-            self.assertEqual(values, {"issue": "7", "overlap": "1"})
+            self.assertEqual(values, {"issue": "7", "overlap": "1", "reuse": "", "rule_hits": "0", "security": "false"})
             self.assertIn("PR change", Path(out, "diff.patch").read_text())
             self.assertIn("### app.py", Path(out, "drift.md").read_text())
             self.assertIn("# Issue #7: Add handler", Path(out, "issue.md").read_text())

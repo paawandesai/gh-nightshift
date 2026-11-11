@@ -191,6 +191,43 @@ prompt says to treat the PR's contents, including any `CLAUDE.md` in it, as mate
 GitHub token in the job is used only by the script steps, never by Claude's step. The review workflow
 itself lives under `.github/`, which agents cannot change.
 
+**Review rules.** `.night-shift/review-rules.yml` is read from the base checkout, never from the PR, and sits
+under `.night-shift/`, a built-in protected path, so an agent cannot add, weaken or delete the rules that judge
+its own PR. The runner is deterministic and stdlib only and never executes PR code. It lists changed files with
+`git diff --name-only -z` and reads added lines from each file's own `-U0` hunk headers, so no line of file
+content is parsed as diff syntax. Every diff runs with `--text --no-ext-diff --no-textconv
+--ignore-submodules=none --no-renames`, so a PR's `.gitattributes` or `.gitmodules` cannot mark code as binary,
+run a converter or hide a change, and a rename counts under both names. A file a rule selects but cannot read
+(a symlink, outside the checkout, over 1 MB, not UTF-8, a lone carriage return) or parse becomes a
+check-by-hand hit instead of being skipped. Rules are selectors, not a boundary: aliased imports or unusual
+syntax can avoid a pattern, which is why the reviewers still read the whole diff. Security rules may not use
+`unless`, which searches PR-controlled text. Snippets it
+quotes are code under review; backticks are replaced so a snippet cannot close its code span. A hit the reviewer
+leaves unanswered or answers `no` fails the review whatever verdict the reviewer gave, and more hits than the
+cap (60) fail it too.
+
+**Verdict reuse.** After `update-branch`, the gates may keep a passed verdict without calling Claude. They do
+so only when the new head is a merge whose first parent is the PR's head before this push (`before` from the
+pull_request event) and whose second parent is on the base branch, the PR's own diff against its
+merge base is byte for byte the reviewed one, main, from the reviewed merge base to its current tip, changed none of the PR's files and no protected path (so
+the rules, prompts, workflows and agent instruction files the reviewer saw are unchanged), and every
+`review / verdict` (or `review / security`) run on the previous head passed, read from GitHub's check runs
+(which comments cannot forge). The reusable `review.yml` declares no permissions of its own, because a called
+workflow can only narrow its caller's grant; the generated caller grants exactly `contents: read`,
+`pull-requests: write`, `issues: write`, `checks: read` and `actions: read`, and `doctor` fails a caller with no
+permissions block, `write-all`/`read-all`, or any write scope besides pull-requests and issues. An agent cannot
+produce such a merge with new code in it: any change to the PR's own diff forces a full review. What reuse
+gives up is the reviewer re-reading the PR against main changes in other files it depends on; CI still runs
+on the merged result. `review.reuse_on_update: false` turns it off.
+
+**The security gate** (`security.enabled`) is a second job in `review.yml` with the same isolation: base
+checkout as working directory, PR mounted read-only, `Read,Grep,Glob` only, no PAT. It receives one Claude
+token, `security.claude_token_secret` (default: the review token), never a PAT; the config refuses a secret name
+used both ways. It calls Claude only when a `security: true` rule hits, the PR touches `security.paths` or
+`risk.approve_paths`, or `security.always` is on, and otherwise passes. A high or critical finding fails the
+check even if the reviewer said pass. Findings on a PR are posted as PR comments (and on the issue when it
+fails), so on a public repo they are public; they describe unmerged code that the gate has just kept out of main.
+
 ## Auto-merge
 
 The picker merges a lane's PR itself (squash, via the PAT) when it is green. It does not use GitHub's
@@ -207,7 +244,9 @@ auto-merge. The risk is that a wrong but plausible change lands on main overnigh
   re-checked before it can merge, so CI tests what will land. `doctor` fails when `strict` is off in strict
   mode.
 - **The review gate,** an independent Claude run on the base branch's rules. It also checks whether main
-  changed under the PR.
+  changed under the PR, and must answer every hit of the repo's own review rules.
+- **The security gate** (optional, `review / security`): a second read-only reviewer that looks only for
+  exploitable changes, started by security rules or security paths.
 - **Measure the gate.** `gh nightshift audit` samples merged agent PRs and reruns their tests with the
   implementation reverted. `gh nightshift stats --audit audit.csv` estimates the review gate's catch rate,
   with the stated assumptions. LLM labels are not ground truth; a human should label the sample.

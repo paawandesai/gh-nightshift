@@ -1,0 +1,49 @@
+# .night-shift/review-rules.yml: repo-tuned checks the review gate runs on every agent PR.
+# Read from the base branch only, and under .night-shift/, so an agent can never change the rules that judge it.
+# Each rule selects code the PR adds or changes and asks a yes/no question, phrased so that "yes" means the
+# concern is handled. The reviewer must answer every hit; an unanswered hit or a "no" fails the review.
+# `security: true` rules also start the security reviewer (`review / security`, when security.enabled).
+# Try them on a branch with `gh nightshift rules --base origin/main`.
+version: 1
+rules:
+  - id: route-needs-auth
+    kind: python-decorator
+    paths: [api/]
+    pattern: 'router\.(get|post|put|patch|delete)'
+    requires: 'require_user|require_tenant'
+    question: "Does this route authenticate the caller and check they own the data before any read or write?"
+    security: true
+    severity: high
+
+  - id: raw-sql
+    kind: python-call
+    pattern: '(^|\.)(execute|executemany|raw)$'
+    question: "Is every value in this query passed as a bound parameter, never formatted into the SQL string?"
+    security: true
+    severity: high
+
+  - id: shell-call
+    kind: python-call
+    pattern: '^(subprocess\.\w+|os\.system|os\.popen)$'
+    question: "Is the command a fixed list (no shell=True) with no caller-controlled program name or flags?"
+    security: true
+
+  - id: redirect-target
+    kind: regex
+    glob: "*.py"
+    pattern: 'RedirectResponse\(|redirect\('
+    question: "Is the redirect target a fixed path or checked against an allow-list, never taken from the request as is?"
+    security: true
+
+  - id: migration-reversible
+    kind: path
+    paths: [migrations/]
+    question: "Does this migration have a working down step, and does it avoid locking a large table?"
+
+  - id: no-print-debugging
+    kind: regex
+    paths: [api/]
+    glob: "*.py"
+    pattern: '^\s*print\('
+    question: "Is this print intentional output rather than leftover debugging (use the logger otherwise)?"
+    severity: low

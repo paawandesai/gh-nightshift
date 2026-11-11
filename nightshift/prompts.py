@@ -1,5 +1,5 @@
 """Prompt templates and output schemas. A project overrides a prompt by committing
-`.night-shift/prompts/<name>.md` (worker, review, planner) on the default branch."""
+`.night-shift/prompts/<name>.md` (worker, review, planner, security) on the default branch."""
 from __future__ import annotations
 
 import json
@@ -33,6 +33,10 @@ WORKER_SCHEMA = {
     "required": ["status", "summary", "assumptions", "tests_passed"],
 }
 
+_RULE_ANSWERS = {"type": "array", "items": {"type": "object", "properties": {
+    "key": {"type": "string"}, "answer": {"type": "string", "enum": ["yes", "no"]}, "evidence": {"type": "string"}},
+    "required": ["key", "answer", "evidence"]}}
+
 REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
@@ -43,11 +47,31 @@ REVIEW_SCHEMA = {
         "fixes": {"type": "string"},
         "main_changed_overlap": {"type": "boolean"},
         "still_correct_against_main": {"type": "string"},
+        "rule_answers": _RULE_ANSWERS,
     },
     "required": ["verdict", "answers", "main_changed_overlap"],
 }
 
-SCHEMAS = {"worker": WORKER_SCHEMA, "review": REVIEW_SCHEMA, "planner": PLAN_SCHEMA}
+SECURITY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "fail"]},
+        "rule_answers": _RULE_ANSWERS,
+        "findings": {"type": "array", "items": {"type": "object", "properties": {
+            "title": {"type": "string"}, "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+            "location": {"type": "string"}, "evidence": {"type": "string"}, "attack_path": {"type": "string"}},
+            "required": ["title", "severity", "location", "evidence", "attack_path"]}},
+        "fixes": {"type": "string"},
+    },
+    "required": ["verdict", "rule_answers", "findings"],
+}
+
+SCHEMAS = {"worker": WORKER_SCHEMA, "review": REVIEW_SCHEMA, "planner": PLAN_SCHEMA, "security": SECURITY_SCHEMA}
+PROMPTS = ("worker", "review", "planner", "security")
+# Appended when a project's own review or security prompt predates the rules file, so its hits are still seen.
+RULES_FALLBACK = ("\n\nRepo review rules: `{path}` lists code this PR adds or changes that the repository's own rules "
+                  "selected. Answer every item in `rule_answers` with its key exactly as listed: `yes` only if the "
+                  "item's question holds for that code, quoting the lines that show it, otherwise `no` with the fix.\n")
 
 
 def template(name: str, root: str | Path = ".") -> str:
@@ -67,6 +91,8 @@ def version(name: str, root: str | Path = ".") -> str:
 
 def render(name: str, values: dict[str, str], root: str | Path = ".") -> str:
     text = template(name, root)
+    if "RULES_FILE" in values and "__RULES_FILE__" not in text:
+        text += RULES_FALLBACK.format(path=values["RULES_FILE"])
     for key, value in values.items():
         text = text.replace(f"__{key}__", value)
     return text

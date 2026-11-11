@@ -14,6 +14,7 @@ from . import schema, yamlish
 
 CONFIG_PATH = ".night-shift/config.yml"
 # Always protected, whatever the config says: agents may never change their own rules or CI.
+SECURITY_CHECK = "review / security"
 BUILTIN_PROTECTED = [".github/", ".claude/", "CLAUDE.md", "AGENTS.md", ".mcp.json", ".night-shift/"]
 DEFAULT_LABELS = {
     "ready": "night-safe", "blocked": "blocked", "needs_human": "needs-human", "human": "human",
@@ -102,6 +103,12 @@ class Config:
     risk_approve_paths: list[str] = field(default_factory=list)
     risk_auto_labels: list[str] = field(default_factory=list)
     risk_codeowners: bool = False  # PRs touching files with CODEOWNERS owners need one of those owners' approval
+    reuse_on_update: bool = True  # review.reuse_on_update: keep a passed verdict when update-branch only merged main
+    security_enabled: bool = False  # the `review / security` gate (see review_rules.py)
+    security_token_secret: str = ""  # default: review_token_secret
+    security_model: str = ""  # default: review_model
+    security_paths: list[str] = field(default_factory=list)
+    security_always: bool = False
     extends: str = ""  # owner/repo whose .night-shift/config.yml is the org-wide base (`gh nightshift config pull`)
     digest_enabled: bool = True
     digest_schedule: str = "0 7 * * *"
@@ -113,6 +120,15 @@ class Config:
     def protected_paths(self) -> list[str]:
         extra = ["CODEOWNERS", "docs/CODEOWNERS"] if self.risk_codeowners else []  # .github/ is already built in
         return BUILTIN_PROTECTED + [p for p in self.extra_protected + extra if p not in BUILTIN_PROTECTED]
+
+    @property
+    def security_token(self) -> str:
+        return self.security_token_secret or self.review_token_secret
+
+    @property
+    def security_trigger_paths(self) -> list[str]:
+        """Paths that always get a security review: security.paths plus risk.approve_paths."""
+        return list(dict.fromkeys(self.security_paths + self.risk_approve_paths))
 
     @property
     def ready_label(self) -> str:
@@ -150,6 +166,8 @@ class Config:
 
     def secret_names(self) -> list[str]:
         names = {self.github_secret, self.review_token_secret, self.planner_token_secret or self.lanes[0].token_secret}
+        if self.security_enabled:
+            names.add(self.security_token)
         for lane in self.lanes:
             names.add(lane.token_secret)
             if lane.pat_secret:
@@ -223,12 +241,16 @@ def parse(data: dict) -> Config:
     models = data.get("models", {})
     limits = data.get("limits", {})
     planner = data.get("planner", {})
+    security = data.get("security") or {}
+    checks = list(data.get("required_checks", ["test", "review / verdict"]))
+    if security.get("enabled") is True and SECURITY_CHECK not in checks:
+        checks.append(SECURITY_CHECK)  # once switched on, the security gate is always required
     cfg = Config(
         lanes=lanes,
         main_branch=data.get("main_branch", "main"),
         ci_workflow=data.get("ci_workflow", "ci.yml"),
         fix_lane=data.get("fix_lane", ""),
-        required_checks=data.get("required_checks", ["test", "review / verdict"]),
+        required_checks=checks,
         timezone=data.get("timezone", "UTC"),
         extra_protected=data.get("protected_paths", []),
         merge_mode=(data.get("merge") or {}).get("mode", "strict"),
@@ -267,6 +289,12 @@ def parse(data: dict) -> Config:
         risk_approve_paths=list((data.get("risk") or {}).get("approve_paths", [])),
         risk_auto_labels=list((data.get("risk") or {}).get("auto_labels", [])),
         risk_codeowners=bool((data.get("risk") or {}).get("codeowners", False)),
+        reuse_on_update=(data.get("review") or {}).get("reuse_on_update", True) is not False,
+        security_enabled=security.get("enabled") is True,
+        security_token_secret=security.get("claude_token_secret", ""),
+        security_model=security.get("model", ""),
+        security_paths=list(security.get("paths", [])),
+        security_always=security.get("always") is True,
         extends=data.get("extends", ""),
         digest_enabled=(data.get("digest") or {}).get("enabled", True),
         digest_schedule=str((data.get("digest") or {}).get("schedule", "0 7 * * *")),
@@ -288,8 +316,8 @@ def parse(data: dict) -> Config:
             raise ConfigError("auth.private_key_secret must be a secret name (A-Z, 0-9, _)")
         if any(lane.pat_secret for lane in cfg.lanes):
             raise ConfigError("auth.mode app replaces every PAT: remove agent_pat_secret from the lanes")
-        if cfg.app_key_secret in claude_secrets(cfg) | {cfg.planner_token_secret,
-                                                                           cfg.review_token_secret}:
+        if cfg.app_key_secret in claude_secrets(cfg) | {cfg.planner_token_secret, cfg.review_token_secret,
+                                                        cfg.security_token}:
             raise ConfigError(f"secret {cfg.app_key_secret} is used both as a Claude token and as the App key")
     if cfg.risk_default not in ("auto", "approve"):
         raise ConfigError(f"risk.default must be auto or approve, not {cfg.risk_default!r}")
@@ -307,7 +335,7 @@ def parse(data: dict) -> Config:
         raise ConfigError(f"planner.id_prefixes names unknown lane(s): {', '.join(unknown)}")
     # A Claude token secret that is also a PAT secret would hand the PAT to the agent job.
     pats = {"AGENT_PAT"} | {lane.agent_pat_secret for lane in lanes}  # AGENT_PAT is always passed as fallback
-    claude = claude_secrets(cfg) | {cfg.planner_token_secret, cfg.review_token_secret}
+    claude = claude_secrets(cfg) | {cfg.planner_token_secret, cfg.review_token_secret, cfg.security_token}
     clash = sorted(pats & claude)
     if clash:
         raise ConfigError(f"secret(s) {', '.join(clash)} used both as a Claude token and as a PAT: the agent job "
@@ -322,7 +350,7 @@ def claude_secrets(cfg: Config) -> set[str]:
 
 
 def pats_or_claude(cfg: Config) -> set[str]:
-    return ({"AGENT_PAT", cfg.planner_token_secret, cfg.review_token_secret}
+    return ({"AGENT_PAT", cfg.planner_token_secret, cfg.review_token_secret, cfg.security_token}
             | claude_secrets(cfg) | {lane.agent_pat_secret for lane in cfg.lanes})
 
 
@@ -330,8 +358,9 @@ BASE_PATH = ".night-shift/base.yml"  # written by `gh nightshift config pull` fr
 # What an org-wide base may set. Lanes, identities, auth and secret names always stay in the repo's own config.
 # Labels, merge mode and tool_ref are left out: each could switch a safety check off (a renamed `human` label
 # makes taken tickets pickable, queue mode skips risk tiers, tool_ref picks the code that runs with the PAT).
-INHERITABLE = {"models", "limits", "protected_paths", "required_checks", "timezone", "risk", "digest", "planner"}
-NOT_FROM_BASE = {"planner": {"claude_token_secret"}, "digest": {"webhook_secret"}}
+INHERITABLE = {"models", "limits", "protected_paths", "required_checks", "timezone", "risk", "digest", "planner",
+               "security"}
+NOT_FROM_BASE = {"planner": {"claude_token_secret"}, "digest": {"webhook_secret"}, "security": {"claude_token_secret"}}
 
 
 def merge_base(base: dict, local: dict) -> dict:
@@ -365,6 +394,17 @@ def merge_base(base: dict, local: dict) -> dict:
                 merged["default"] = "approve"
             if value.get("codeowners") or mine.get("codeowners"):
                 merged["codeowners"] = True
+            out[key] = merged
+        elif key == "security" and isinstance(value, dict):
+            # Only stricter: the gate and `always` stay on if either side turns them on; paths add up.
+            mine = dict(local.get("security") or {})
+            merged = {**value, **mine}
+            for flag in ("enabled", "always"):
+                if value.get(flag) is True or mine.get(flag) is True:
+                    merged[flag] = True
+            paths = list(dict.fromkeys(list(value.get("paths") or []) + list(mine.get("paths") or [])))
+            if paths:
+                merged["paths"] = paths
             out[key] = merged
         elif isinstance(value, dict) and isinstance(local.get(key), dict):
             out[key] = {**value, **local[key]}

@@ -40,6 +40,13 @@ risk:                          # optional: green PRs merge unless a rule below a
   approve_paths: [migrations/]
   auto_labels: [risk:low]
   codeowners: true             # files with CODEOWNERS owners need one of those owners' approval
+review:
+  reuse_on_update: true        # keep a passed verdict when update-branch only merged main (CI still runs)
+# security:                    # optional: the `review / security` gate (see README, "Review rules")
+#   enabled: true
+#   claude_token_secret: CLAUDE_TOKEN_SECURITY   # default: review_token_secret
+#   paths: [api/auth/, api/billing/]             # always reviewed, as are risk.approve_paths
+#   always: false                                # true: review every agent PR
 runners:                       # optional; default ubuntu-latest (GitHub-hosted) for both
   github: [self-hosted, nightshift-github]   # jobs holding the PAT or App key
   agent: [self-hosted, nightshift-agent]     # jobs that run Claude (agent, planner draft, review); another machine

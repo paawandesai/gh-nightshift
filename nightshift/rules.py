@@ -169,6 +169,7 @@ def path_is_protected(path: str, protected: list[str]) -> bool:
 
 
 REVIEW_CHECK = "verdict"
+SECURITY_CHECK = "security"
 
 
 def failed_check_names(check_runs: list[dict], statuses: list[dict]) -> list[str]:
@@ -179,7 +180,10 @@ def failed_check_names(check_runs: list[dict], statuses: list[dict]) -> list[str
 
 
 def close_reason(failed: list[str]) -> str:
-    """verdict_failed when the review gate is among the failures, else checks_failed."""
+    """security_failed when the security gate is among the failures, verdict_failed when the review gate is,
+    else checks_failed."""
+    if any(n == f"review / {SECURITY_CHECK}" for n in failed):
+        return "security_failed"
     return "verdict_failed" if any(_matches(REVIEW_CHECK, n) for n in failed) else "checks_failed"
 
 

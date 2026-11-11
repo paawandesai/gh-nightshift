@@ -373,6 +373,48 @@
         }
       }
     },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The review gate",
+      "properties": {
+        "reuse_on_update": {
+          "type": "boolean",
+          "description": "default true: when update-branch only merged main and main touched none of the PR's files or the review inputs, keep the passed verdict instead of running the reviewer again (CI still runs)"
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Security review gate: a second read-only reviewer, required check `review / security`, that runs when a PR hits a `security: true` rule in .night-shift/review-rules.yml or touches a listed path",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "default false; true adds `review / security` to the default required checks"
+        },
+        "claude_token_secret": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$",
+          "description": "Claude token for the security reviewer; default review_token_secret"
+        },
+        "model": {
+          "type": "string",
+          "description": "default: models.review"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "PRs touching these paths always get a security review (risk.approve_paths count too)"
+        },
+        "always": {
+          "type": "boolean",
+          "description": "review every agent PR, not only triggered ones"
+        }
+      }
+    },
     "auth": {
       "type": "object",
       "additionalProperties": false,
