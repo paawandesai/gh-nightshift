@@ -172,6 +172,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `review` | `reuse_on_update: true` | Keep a passed verdict when update-branch only merged main (see Merge modes) |
+| `reduce` | `enabled: false` | `enabled`, `schedule` (`30 6 * * *`, must differ from `planner.schedule`), `window_hours` (24). Needs `planner.enabled`. See Reduce |
 | `security` | `enabled: false` | `enabled` (adds the required check `review / security`), `claude_token_secret` (default `review_token_secret`), `model`, `paths` (always reviewed, as are `risk.approve_paths`), `always` (review every PR). See Review rules |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
 | `extends` | | `owner/repo` with an org-wide `.night-shift/config.yml` (see Org-wide config) |
@@ -206,7 +207,7 @@ outsider cannot forge attempt counts, unblock an issue or steer work.
 | `pr` | PR | `{"reason": ..., "pr": n, "issue": n}` |
 | `handoff-data` | PR body | The agent's hand-off, read when the PR merges |
 | `handoff-done` | merged PR | Hand-offs went out (makes the step idempotent) |
-| `plan` | night-log issue | A planner run: lane, `complete`, `docs_sha` |
+| `plan` | night-log issue | A planner run: lane, `complete`, `docs_sha`; a reduce run has `lane: reduce` and `prs` |
 
 **Hand-off.** When a PR merges, the picker posts a hand-off comment on every open issue whose `Blocked by`
 line lists the merged issue (for PRs merged in the last 72 hours). The comment gives the interface as built
@@ -247,6 +248,7 @@ them.
 | `gap` | `gh nightshift plan --gap [--lane X]`, or dispatch | What the docs ask for and the code lacks |
 | `review` | A comment starting with `/night-shift plan <request>` on an issue, from a user with write access | Only what the request needs; the request is fenced as data |
 | refill | Timer (`planner.schedule`) when `planner.refill_below > 0` | Gap mode for the lane with the fewest ready issues, when it has fewer than `refill_below` |
+| `reduce` | Timer (`reduce.schedule`) when `reduce.enabled`, or dispatch | Problems across lanes in the agent PRs merged in `reduce.window_hours` (see Reduce); tickets are `proposed` |
 
 The validator applies the ticket guide (`docs/NIGHT_SHIFT_ISSUES.md`). A ticket must have:
 
@@ -267,6 +269,20 @@ docs' commit SHA. Refill does not run again until the docs change.
 
 Follow-up work an agent notices while building is filed as `proposed` (at most 3 per run, deduplicated).
 Agents skip it until a person relabels it `night-safe`.
+
+### Reduce
+
+Each agent PR is reviewed on its own, so two lanes can both pass while disagreeing about the interface between
+them. With `reduce.enabled`, the planner workflow runs once a day (`reduce.schedule`, default `30 6 * * *` UTC)
+in `reduce` mode. The context job (GITHUB_TOKEN) collects the agent PRs merged in the last
+`reduce.window_hours` (24) from the PAT's login or `trusted_logins`, each one's ticket `## Interface`, the
+agent's hand-off (from the trusted marker in the PR body only), and the open tickets that are `Blocked by` them,
+all fenced as data. The read-only draft job compares those claims with the code on main and drafts tickets for
+contract mismatches, drift from the ticket that a consumer relies on, contradicted assumptions, cross-lane
+chains and duplicated work, with one coverage entry per merged PR. The create job validates them like any plan
+and files every ticket as `proposed` (or `human` for protected paths): a person reads it and swaps the label
+for `night-safe` to queue it. The run is skipped when nothing merged, when only one lane merged and no open
+ticket depends on it, or when a `plan` marker with `lane: reduce` already lists every PR in the window.
 
 ## Commands
 

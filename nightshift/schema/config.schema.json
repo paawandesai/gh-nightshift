@@ -415,6 +415,27 @@
         }
       }
     },
+    "reduce": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Cross-lane reduce: a scheduled read-only planner run over the agent PRs merged in the window (their tickets' Interface sections and the agents' hand-offs) that files `proposed` tickets for contract mismatches and cross-lane chains",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "default false; needs planner.enabled"
+        },
+        "schedule": {
+          "type": "string",
+          "description": "5-field cron (UTC), default \"30 6 * * *\"; must differ from planner.schedule"
+        },
+        "window_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168,
+          "description": "look back this far for merged agent PRs (default 24)"
+        }
+      }
+    },
     "auth": {
       "type": "object",
       "additionalProperties": false,

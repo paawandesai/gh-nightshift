@@ -109,6 +109,9 @@ class Config:
     security_model: str = ""  # default: review_model
     security_paths: list[str] = field(default_factory=list)
     security_always: bool = False
+    reduce_enabled: bool = False  # the nightly cross-lane pass (see reduce.py); runs in the planner workflow
+    reduce_schedule: str = "30 6 * * *"
+    reduce_window_hours: int = 24
     extends: str = ""  # owner/repo whose .night-shift/config.yml is the org-wide base (`gh nightshift config pull`)
     digest_enabled: bool = True
     digest_schedule: str = "0 7 * * *"
@@ -295,6 +298,9 @@ def parse(data: dict) -> Config:
         security_model=security.get("model", ""),
         security_paths=list(security.get("paths", [])),
         security_always=security.get("always") is True,
+        reduce_enabled=(data.get("reduce") or {}).get("enabled") is True,
+        reduce_schedule=str((data.get("reduce") or {}).get("schedule", "30 6 * * *")),
+        reduce_window_hours=int((data.get("reduce") or {}).get("window_hours", 24)),
         extends=data.get("extends", ""),
         digest_enabled=(data.get("digest") or {}).get("enabled", True),
         digest_schedule=str((data.get("digest") or {}).get("schedule", "0 7 * * *")),
@@ -328,6 +334,15 @@ def parse(data: dict) -> Config:
         raise ConfigError("digest.webhook_secret must be a secret name (A-Z, 0-9, _)")
     if cfg.digest_webhook_secret in pats_or_claude(cfg):
         raise ConfigError("digest.webhook_secret must not be a PAT or Claude token secret")
+    if cfg.reduce_enabled:
+        if not re.fullmatch(r"[0-9*/,\- ]{9,60}", cfg.reduce_schedule) or len(cfg.reduce_schedule.split()) != 5:
+            raise ConfigError(f"reduce.schedule {cfg.reduce_schedule!r} is not a 5-field cron expression")
+        if cfg.planner_refill_below > 0 and cfg.reduce_schedule == cfg.planner_schedule:
+            raise ConfigError("reduce.schedule must differ from planner.schedule (the planner tells them apart by cron)")
+        if not cfg.planner_enabled:
+            raise ConfigError("reduce runs in the planner workflow: it needs planner.enabled")
+    if not 1 <= cfg.reduce_window_hours <= 168:
+        raise ConfigError("reduce.window_hours must be between 1 and 168")
     if cfg.fix_lane and cfg.fix_lane not in names:
         raise ConfigError(f"fix_lane {cfg.fix_lane!r} is not a lane")
     unknown = sorted(set(cfg.planner_id_prefixes) - set(names))

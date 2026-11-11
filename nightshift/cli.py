@@ -485,6 +485,34 @@ def plan_context(ctx: Ctx, mode: str, docs: list[str] | None, lane: str, out_dir
     return {"context": str(out_dir / "context.md")}
 
 
+def reduce_context(ctx: Ctx, out_dir: Path, github_output: str | None) -> int:
+    """(workflow) Write the reduce context and prompt, or skip when nothing crosses a lane boundary."""
+    from . import reduce
+
+    cfg = ctx.cfg
+    if os.environ.get("AGENTS_ENABLED", "true").lower() != "true":
+        ctx.say("skip: AGENTS_ENABLED is not true")
+        write_outputs(github_output, {"run": "false"})
+        return 0
+    if not ctx.gh.trusted:
+        raise SystemExit("this token cannot read GET /user and the config names no bot_login or trusted_logins, "
+                         "so agent PRs and hand-offs cannot be trusted; set bot_login in .night-shift/config.yml")
+    text, numbers, skip = reduce.context(ctx.gh, cfg, cfg.reduce_window_hours)
+    if skip:
+        ctx.say(f"skip: {skip}")
+        write_outputs(github_output, {"run": "false"})
+        return 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "context.md").write_text(text, encoding="utf-8")
+    (out_dir / "prompt.md").write_text(prompts.render("reduce", {
+        "CONTEXT_FILE": str(out_dir / "context.md"), "MAX": str(cfg.planner_max_tickets)}, ctx.root), encoding="utf-8")
+    (out_dir / "schema.json").write_text(prompts.schema_json("reduce"), encoding="utf-8")
+    prs = ",".join(str(n) for n in numbers)
+    write_outputs(github_output, {"run": "true", "mode": "reduce", "lane": "", "issue": "", "prs": prs})
+    ctx.say(f"reduce context written for PR(s) {prs}")
+    return 0
+
+
 def docs_sha(gh: GH, docs: list[str]) -> str:
     shas = []
     for d in docs:
@@ -512,6 +540,8 @@ def refill_lane(ctx: Ctx) -> tuple[str, str]:
     done = set()
     if log:
         for m in ns.trusted(gh.comments(log), gh.trusted, "plan"):
+            if m.get("lane") == "reduce":
+                continue  # a reduce run says nothing about doc coverage
             if m.get("complete") and m.get("docs_sha") == sha:
                 done.add(m.get("lane") or "*")
     lanes = [ln for ln in lanes if ln not in done and "*" not in done]
@@ -545,6 +575,8 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
             data = ctx.gh.issue(int(issue)) or {}
             request = (f"Issue #{issue}: {data.get('title', '')}\n\n{data.get('body') or ''}\n\n"
                        f"Request from {author}: {body.strip()[len('/night-shift plan'):].strip()}")
+        elif mode == "reduce":
+            return reduce_context(ctx, Path(a.out_dir), a.github_output)
         elif mode not in planner.MODES:
             raise SystemExit(f"unknown mode {mode!r}")
         plan_context(ctx, mode, docs, lane, Path(a.out_dir), request)
@@ -552,7 +584,7 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
         ctx.say(f"planning context written ({mode}{', lane ' + lane if lane else ''})")
         return 0
     if a.plan_action == "publish":
-        return publish_plan_file(ctx, a.file, a.lane, a.reply_to)
+        return publish_plan_file(ctx, a.file, a.lane, a.reply_to, reduce_prs=a.prs if a.mode == "reduce" else None)
     if a.show:
         ctx.say(roadmap.render(cfg, roadmap.tickets(ctx.gh, cfg)).split("\n", 1)[1].rstrip())
         return 0
@@ -572,21 +604,32 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
     return publish_plan_file(ctx, plan_path, a.lane or "", "")
 
 
-def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str) -> int:
+def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str, reduce_prs: str | None = None) -> int:
+    """Create a draft's tickets. With `reduce_prs` (reduce mode: the merged PRs the context covered, as
+    "12,15") every ticket is filed as `proposed` and the night-log marker records those PRs as reduced."""
     cfg, gh = ctx.cfg, ctx.gh
     if not Path(path).is_file():
         raise ConfigError(f"plan file not found: {path}")
+    if reduce_prs is not None and not re.fullmatch(r"[0-9]{1,9}(,[0-9]{1,9}){0,99}", reduce_prs):
+        raise ConfigError(f"--prs must be comma-separated PR numbers, not {reduce_prs!r}")
     raw = Path(path).read_text(encoding="utf-8")
-    result = planner.publish_plan(gh, cfg, raw, lane)
+    result = planner.publish_plan(gh, cfg, raw, "" if reduce_prs is not None else lane, proposed=reduce_prs is not None)
     lines = [ns.defang(line) for line in result.lines()]  # titles, notes, keys come from the model
     ctx.say(*lines)
-    summary = "**Night shift planner**\n\n" + "\n".join(f"- {line}" for line in lines)
+    title = "Night shift reduce" if reduce_prs is not None else "Night shift planner"
+    summary = f"**{title}**\n\n" + "\n".join(f"- {line}" for line in lines)
+    if reduce_prs is not None:
+        summary += (f"\n\nCross-lane pass over PR(s) {', '.join('#' + n for n in reduce_prs.split(','))}. "
+                    f"Tickets are `{cfg.label('proposed')}`: swap the label for `{cfg.ready_label}` to queue one.")
     if reply_to:
         gh.comment(int(reply_to), summary)
     log = gh.night_log(cfg.label("night_log"))
     if log:
-        marker = ns.marker("plan", lane=lane or "*", complete=result.coverage_complete,
-                           docs_sha=docs_sha(gh, cfg.planner_docs), created=len(result.created) + len(result.human))
+        if reduce_prs is not None:
+            marker = ns.marker("plan", lane="reduce", prs=reduce_prs, created=len(result.created) + len(result.human))
+        else:
+            marker = ns.marker("plan", lane=lane or "*", complete=result.coverage_complete,
+                               docs_sha=docs_sha(gh, cfg.planner_docs), created=len(result.created) + len(result.human))
         gh.comment(log, marker + "\n" + summary)
     ctx.say(roadmap.safe_update(gh, cfg, extra=result.issues))
     return 0
@@ -953,6 +996,8 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("file")
     c.add_argument("--lane", default=argparse.SUPPRESS)
     c.add_argument("--reply-to", default="")
+    c.add_argument("--mode", default="", help="reduce: file every ticket as proposed and record --prs as reduced")
+    c.add_argument("--prs", default="", help="(reduce) the merged PR numbers the context covered, comma-separated")
 
     s = sub.add_parser("audit", parents=[common], help="sample merged agent PRs and measure quality")
     s.add_argument("--sample", type=int, default=25)

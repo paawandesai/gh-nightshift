@@ -37,7 +37,7 @@ TITLE_MAX = 100
 ID_RE = re.compile(r"^\[([A-Z]{1,4})(\d+)\]\s+\S")
 ANY_ID_RE = re.compile(r"^\[([A-Z]{1,4})(\d+)\]")
 COVERAGE_STATES = {"done", "ticketed", "deferred"}
-MODES = ("prd", "gap", "review")
+MODES = ("prd", "gap", "review", "reduce")
 
 TICKET_PROPS = {
     "key": {"type": "string"}, "title": {"type": "string"}, "lane": {"type": "string"},
@@ -374,7 +374,10 @@ def validate_plan(tickets: list[Ticket], cfg: Config, all_issues: list[dict],
     return ok, notes
 
 
-def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tickets: int | None = None) -> PlanResult:
+def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tickets: int | None = None,
+                 proposed: bool = False) -> PlanResult:
+    """Validate and create a draft's tickets. `proposed` (reduce mode) files valid tickets as `proposed`, which
+    no lane picks up until a person swaps the label for the ready one."""
     tickets, coverage, plan_notes = parse_plan(data)
     all_issues = gh.issues(state="all")
     ok, notes = validate_plan(tickets, cfg, all_issues, lane)
@@ -392,7 +395,8 @@ def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tick
             new_id = next_id(all_issues, cfg.id_prefix(t.lane), taken)
             taken.add(new_id[1:-1])
             t.title = f"{new_id} {t.title}"
-        labels = [f"lane:{t.lane}", f"wave:{t.wave}", cfg.label("human") if human else cfg.ready_label]
+        ready = cfg.label("proposed") if proposed else cfg.ready_label
+        labels = [f"lane:{t.lane}", f"wave:{t.wave}", cfg.label("human") if human else ready]
         created = gh.create_issue(t.title, render(t, numbers), labels)
         if isinstance(created, dict) and created.get("number"):
             result.issues.append(created)

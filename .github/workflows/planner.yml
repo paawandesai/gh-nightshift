@@ -1,4 +1,5 @@
-# gh-nightshift: the planner. Turns docs, a gap analysis or a request into night-shift tickets.
+# gh-nightshift: the planner. Turns docs, a gap analysis or a request into night-shift tickets. In reduce mode
+# it reads the agent PRs merged in reduce.window_hours and files cross-lane problems as `proposed` tickets.
 #   context  (GITHUB_TOKEN, read)   decide whether to run and write the planning context
 #   draft    (Claude token only)    read-only Claude run -> plan.json (tickets + coverage)
 #   create   (PAT)                  validate against the ticket guide, dedupe, cap, create the issues
@@ -18,7 +19,7 @@ on:
         required: false
         default: '"ubuntu-latest"'
       mode:
-        description: prd | gap | review | refill
+        description: prd | gap | review | refill | reduce
         type: string
         required: true
       docs:
@@ -74,6 +75,7 @@ jobs:
       mode: ${{ steps.ctx.outputs.mode }}
       lane: ${{ steps.ctx.outputs.lane }}
       issue: ${{ steps.ctx.outputs.issue }}
+      prs: ${{ steps.ctx.outputs.prs }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -177,4 +179,8 @@ jobs:
           GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
           LANE: ${{ needs.context.outputs.lane }}
           ISSUE: ${{ needs.context.outputs.issue }}
-        run: python3 -m nightshift plan publish "$RUNNER_TEMP/plan/plan.json" --lane "$LANE" --reply-to "$ISSUE"
+          MODE: ${{ needs.context.outputs.mode }}
+          PRS: ${{ needs.context.outputs.prs }}
+        run: |
+          python3 -m nightshift plan publish "$RUNNER_TEMP/plan/plan.json" --lane "$LANE" --reply-to "$ISSUE" \
+            --mode "$MODE" --prs "$PRS"
