@@ -190,7 +190,20 @@ class ReduceTests(CliTestCase):
         for n in range(45):
             self.merged(100 + n, "api" if n % 2 else "web", 200 + n, hours=1 + n / 10)
         _, _, out_dir, outputs = self.context()
-        self.assertIn("5 older PR(s) in the window were left out", Path(out_dir, "context.md").read_text())
+        ctx = Path(out_dir, "context.md").read_text()
+        self.assertIn("5 newer unreduced PR(s) wait for the next run", ctx)
+        self.assertIn("### PR #144 ", ctx)  # the oldest are reduced first
+        self.assertNotIn("### PR #100 ", ctx)
+        self.fake.add_comment(1, ns.marker("plan", lane="reduce", prs=outputs.split("prs=")[1].strip()))
+        _, _, out_dir, outputs = self.context()
+        self.assertIn("prs=100,101,102,103,104\n", outputs)  # the backlog drains on the next run
+
+    def test_needs_a_night_log(self):
+        del self.fake.issues[1]
+        self.merged(20, "api", 10)
+        self.merged(21, "web", 11)
+        with self.assertRaisesRegex(SystemExit, "night-log"):
+            self.context()
 
     def test_skips_when_agents_disabled(self):
         os.environ["AGENTS_ENABLED"] = "false"
@@ -206,8 +219,7 @@ class ReduceTests(CliTestCase):
             f.add_pull(n, branch=f"agent/api/issue-{n}", state="closed", merged_at=ago(100 + n))
             f.pulls[n]["updated_at"] = ago(100 + n)
         f.pulls[250]["merged_at"] = f.pulls[250]["updated_at"] = ago(1)
-        prs, dropped = reduce.merged_prs(f.gh(), 24)
-        self.assertEqual(dropped, 0)
+        prs = reduce.merged_prs(f.gh(), 24)
         self.assertEqual([p["number"] for p in prs], [250])
         pages = [p for m, p, b in f.calls if m == "GET" and re.search(r"/pulls(\?|$)", p)]
         self.assertEqual(len(pages), 1)
@@ -280,17 +292,23 @@ class ReduceConfigTests(unittest.TestCase):
         self.assertIn('"prd (from docs) or gap (docs against code)"', text)
 
     def test_schedule_must_differ_from_refill(self):
-        for refill, red in (("0 6 * * *", "0 6 * * *"), ("17 * * * *", "17 6 * * *")):
-            with self.assertRaisesRegex(ConfigError, "different minute from planner.schedule"):
+        for refill, red in (("0 6 * * *", "0 6 * * *"), ("17 * * * *", "17 6 * * *"), ("*/5 * * * *", "30 6 * * *"),
+                            ("0,30 * * * *", "30 6 * * *"), ("30 * * * *", "030 6 * * *")):
+            with self.assertRaisesRegex(ConfigError, "minutes planner.schedule never uses"):
                 write_config(self.tmp.name, planner={"refill_below": 2, "schedule": refill},
                              reduce={"enabled": True, "schedule": red})
 
     def test_bad_schedule_window_and_disabled_planner(self):
-        for bad in ("daily", "- - - - -", "30 6 * *", "x 6 * * *", "30 6 * * * *"):
+        for bad in ("daily", "- - - - -", "30 6 * *", "x 6 * * *", "30 6 * * * *", "60 25 * * *", "*/0 6 * * *",
+                    "5-1 6 * * *", "30 6 * FOO *"):
             with self.assertRaisesRegex(ConfigError, "5-field cron"):
                 write_config(self.tmp.name, reduce={"enabled": True, "schedule": bad})
-        for good in ("30 6 * * MON", "*/15 1-5 * * 1-5", "0 0,12 1 JAN *"):
+        for good in ("30 6 * * MON", "*/15 1-5 * * 1-5", "0 0,12 1 JAN *", "0 6 * * MON-FRI"):
             self.assertTrue(write_config(self.tmp.name, reduce={"enabled": True, "schedule": good}).reduce_enabled)
+        cfg = write_config(self.tmp.name, reduce={"enabled": True, "schedule": " 30\t6  * * * "})
+        self.assertEqual(cfg.reduce_schedule, "30 6 * * *")
+        with self.assertRaisesRegex(ConfigError, "planner.schedule"):
+            write_config(self.tmp.name, planner={"refill_below": 2, "schedule": ""}, reduce={"enabled": True})
         with self.assertRaisesRegex(ConfigError, "window_hours"):
             write_config(self.tmp.name, reduce={"window_hours": 0})
         with self.assertRaisesRegex(ConfigError, "needs planner.enabled"):

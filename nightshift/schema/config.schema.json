@@ -426,7 +426,7 @@
         },
         "schedule": {
           "type": "string",
-          "description": "5-field cron (UTC), default \"30 6 * * *\"; its minute must differ from planner.schedule's"
+          "description": "5-field cron (UTC), default \"30 6 * * *\"; no minute in common with planner.schedule"
         },
         "window_hours": {
           "type": "integer",

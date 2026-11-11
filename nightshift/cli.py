@@ -497,6 +497,9 @@ def reduce_context(ctx: Ctx, out_dir: Path, github_output: str | None) -> int:
     if not ctx.gh.trusted:
         raise SystemExit("this token cannot read GET /user and the config names no bot_login or trusted_logins, "
                          "so agent PRs and hand-offs cannot be trusted; set bot_login in .night-shift/config.yml")
+    if not ctx.gh.night_log(cfg.label("night_log")):
+        raise SystemExit("reduce records the PRs it covered on the night-log issue, and there is none: run "
+                         "`gh nightshift setup` (without it every run would reduce the whole window again)")
     text, numbers, skip = reduce.context(ctx.gh, cfg, cfg.reduce_window_hours)
     if skip:
         ctx.say(f"skip: {skip}")

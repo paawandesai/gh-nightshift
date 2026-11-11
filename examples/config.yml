@@ -49,7 +49,7 @@ review:
 #   always: false                                # true: review every agent PR
 # reduce:                      # optional: nightly cross-lane pass over merged agent PRs (see README, "Reduce")
 #   enabled: true
-#   schedule: "30 6 * * *"     # UTC; use a different minute from planner.schedule
+#   schedule: "30 6 * * *"     # UTC; no minute in common with planner.schedule
 #   window_hours: 48           # merged agent PRs from this far back (already reduced ones are skipped)
 runners:                       # optional; default ubuntu-latest (GitHub-hosted) for both
   github: [self-hosted, nightshift-github]   # jobs holding the PAT or App key
