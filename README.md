@@ -172,7 +172,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `review` | `reuse_on_update: true` | Keep a passed verdict when update-branch only merged main (see Merge modes) |
-| `reduce` | `enabled: false` | `enabled`, `schedule` (`30 6 * * *`, must differ from `planner.schedule`), `window_hours` (24). Needs `planner.enabled`. See Reduce |
+| `reduce` | `enabled: false` | `enabled`, `schedule` (`30 6 * * *`, its minute must differ from `planner.schedule`'s), `window_hours` (48). Needs `planner.enabled`. See Reduce |
 | `security` | `enabled: false` | `enabled` (adds the required check `review / security`), `claude_token_secret` (default `review_token_secret`), `model`, `paths` (always reviewed, as are `risk.approve_paths`), `always` (review every PR). See Review rules |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
 | `extends` | | `owner/repo` with an org-wide `.night-shift/config.yml` (see Org-wide config) |
@@ -275,14 +275,16 @@ Agents skip it until a person relabels it `night-safe`.
 Each agent PR is reviewed on its own, so two lanes can both pass while disagreeing about the interface between
 them. With `reduce.enabled`, the planner workflow runs once a day (`reduce.schedule`, default `30 6 * * *` UTC)
 in `reduce` mode. The context job (GITHUB_TOKEN) collects the agent PRs merged in the last
-`reduce.window_hours` (24) from the PAT's login or `trusted_logins`, each one's ticket `## Interface`, the
-agent's hand-off (from the trusted marker in the PR body only), and the open tickets that are `Blocked by` them,
-all fenced as data. The read-only draft job compares those claims with the code on main and drafts tickets for
+`reduce.window_hours` (48) from the PAT's login or `trusted_logins` that no earlier reduce covered, each one's
+ticket `## Interface`, the agent's hand-off (from the trusted marker in the PR body only), and the open lane
+tickets that are `Blocked by` them, all fenced as data. PRs an earlier run covered are listed for reference, so a
+late or failed run is caught up by the next one. The read-only draft job compares those claims with the code on main and drafts tickets for
 contract mismatches, drift from the ticket that a consumer relies on, contradicted assumptions, cross-lane
 chains and duplicated work, with one coverage entry per merged PR. The create job validates them like any plan
 and files every ticket as `proposed` (or `human` for protected paths): a person reads it and swaps the label
 for `night-safe` to queue it. The run is skipped when nothing merged, when only one lane merged and no open
-ticket depends on it, or when a `plan` marker with `lane: reduce` already lists every PR in the window.
+lane ticket depends on it, or when `plan` markers with `lane: reduce` already list every PR in the window. The
+planner caller needs `pull-requests: read`; `init --regenerate` adds it.
 
 ## Commands
 

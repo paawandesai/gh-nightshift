@@ -426,13 +426,13 @@
         },
         "schedule": {
           "type": "string",
-          "description": "5-field cron (UTC), default \"30 6 * * *\"; must differ from planner.schedule"
+          "description": "5-field cron (UTC), default \"30 6 * * *\"; its minute must differ from planner.schedule's"
         },
         "window_hours": {
           "type": "integer",
           "minimum": 1,
           "maximum": 168,
-          "description": "look back this far for merged agent PRs (default 24)"
+          "description": "look back this far for merged agent PRs (default 48); PRs an earlier run covered are only listed for reference"
         }
       }
     },

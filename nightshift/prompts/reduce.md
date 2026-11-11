@@ -11,6 +11,6 @@ Look for:
 
 For each real problem, draft one ticket that fixes it in exactly one lane (the lane whose code should change; say in `do` why that side). Quote the conflicting lines from both sides in `do`, with file paths. Every ticket must be one small change an agent finishes in 15 to 45 minutes, with machine-checkable `acceptance` (a test that fails today and passes after the fix), `files`, and an `interface` stating the agreed contract. Do not ticket style, speculative hardening without a concrete path, or anything an open ticket already covers. Tickets that must touch protected or contract paths are allowed but become human tickets.
 
-`coverage`: one entry per merged PR in the context, with requirement `PR #<n>`, status `done` when you checked its boundaries and found nothing, `ticketed` with the ticket keys when you drafted a fix, or `deferred` with a reason (for example, a product decision is needed). Put open questions for a person in `notes`.
+`coverage`: one entry per PR under "New merged PRs" (earlier PRs are context only), with requirement `PR #<n>`, status `done` when you checked its boundaries and found nothing, `ticketed` with the ticket keys when you drafted a fix, or `deferred` with a reason (for example, a product decision is needed). Put open questions for a person in `notes`.
 
 Draft at most __MAX__ tickets. Every ticket you draft is filed as `proposed`: a person reads it before any lane builds it, so be specific and show your evidence. If nothing crosses a boundary badly, return no tickets.

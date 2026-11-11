@@ -59,6 +59,7 @@ on:
 permissions:
   contents: read
   issues: read
+  pull-requests: read  # reduce lists the merged agent PRs
 
 env:
   REPO: ${{ github.repository }}

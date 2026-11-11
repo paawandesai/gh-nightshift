@@ -187,7 +187,8 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "prd (from docs), gap (docs against code){' or reduce (cross-lane pass)' if cfg.reduce_enabled else ''}"
+        description: "{'prd (from docs), gap (docs against code) or reduce (cross-lane pass)' if cfg.reduce_enabled
+                         else 'prd (from docs) or gap (docs against code)'}"
         type: choice
         options: {options}
         default: gap
@@ -205,6 +206,7 @@ on:
 permissions:
   contents: read
   issues: read
+  pull-requests: read  # reduce lists the merged agent PRs
 
 jobs:
   plan:

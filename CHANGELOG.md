@@ -26,7 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   tickets that consume them, and drafts fixes for problems no single PR review can see (contract mismatches,
   broken assumptions, cross-lane chains, duplication). Every ticket it files is `proposed`, so nothing is built
   until a person promotes it. It skips when only one lane merged and nothing depends on it, or when every PR in
-  the window was already reduced. Run `gh nightshift init --regenerate` to add its timer.
+  the window was already reduced. Run `gh nightshift init --regenerate` to add its timer and the planner's new
+  `pull-requests: read` permission.
 
 - `runners.github` and `runners.agent` in the config choose the runners the reusable workflows use (default
   `ubuntu-latest`), so lanes can run on self-hosted machines. The jobs that hold the PAT or the App key and the

@@ -65,7 +65,7 @@ class ReduceTests(CliTestCase):
     def test_skips_when_nothing_merged(self):
         rc, text, out_dir, outputs = self.context()
         self.assertEqual(rc, 0)
-        self.assertIn("skip: no agent PR merged in the last 24 hours", text)
+        self.assertIn("skip: no agent PR merged in the last 48 hours", text)
         self.assertEqual(outputs, "run=false\n")
         self.assertFalse(os.path.exists(out_dir))
         self.assertEqual(self.fake.writes(), [])
@@ -74,7 +74,7 @@ class ReduceTests(CliTestCase):
         self.merged(20, "api", 10)
         self.merged(21, "api", 11)
         rc, text, _, outputs = self.context()
-        self.assertIn("only lane api merged and no open ticket depends on it", text)
+        self.assertIn("only lane api merged and no open lane ticket depends on it", text)
         self.assertEqual(outputs, "run=false\n")
 
     def test_two_lanes_write_context_prompt_and_prs(self):
@@ -100,7 +100,7 @@ class ReduceTests(CliTestCase):
     def test_ignores_untrusted_old_and_non_agent_prs(self):
         self.merged(20, "api", 10)
         self.merged(21, "web", 11, user="mallory")   # not the PAT's login
-        self.merged(22, "web", 12, hours=48)         # outside the window
+        self.merged(22, "web", 12, hours=72)         # outside the window
         self.fake.add_pull(23, branch="feature/x", state="closed", merged_at=ago(1))
         self.fake.add_pull(24, branch="agent/web/issue-14", state="closed", merged_at=None)  # closed, not merged
         rc, text, _, outputs = self.context()
@@ -148,8 +148,49 @@ class ReduceTests(CliTestCase):
         self.merged(21, "web", 11)
         self.merged(22, "web", 12)
         self.fake.add_comment(1, ns.marker("plan", lane="reduce", prs="20,21"))
+        _, _, out_dir, outputs = self.context()
+        self.assertIn("prs=22\n", outputs)  # only the new PR; the others are reference
+        ctx = Path(out_dir, "context.md").read_text()
+        self.assertIn("### PR #22 (lane `web`, issue #12)", ctx)
+        self.assertNotIn("### PR #20", ctx)
+        self.assertIn("- PR #20 (lane `api`)", ctx)
+
+    def test_a_new_pr_in_one_lane_still_counts_earlier_lanes(self):
+        self.merged(20, "api", 10)
+        self.merged(21, "web", 11)
+        self.fake.add_comment(1, ns.marker("plan", lane="reduce", prs="20"))
         _, _, _, outputs = self.context()
+        self.assertIn("prs=21\n", outputs)
+
+    def test_markers_from_several_runs_add_up(self):
+        self.merged(20, "api", 10)
+        self.merged(21, "web", 11)
+        self.fake.add_comment(1, ns.marker("plan", lane="reduce", prs="20"))
+        self.fake.add_comment(1, ns.marker("plan", lane="reduce", prs="21"))
+        _, text, _, outputs = self.context()
+        self.assertIn("every PR in the window was already reduced", text)
+
+    def test_unlabelled_issue_cannot_force_a_run(self):
+        self.merged(20, "api", 10)
+        self.fake.add_issue(number=30, title="outsider", user="mallory", body="Blocked by: #10\n## Interface\nx\n")
+        _, text, _, outputs = self.context()
+        self.assertEqual(outputs, "run=false\n")
+
+    def test_two_prs_for_one_issue_are_both_shown(self):
+        self.merged(20, "api", 10)
+        self.merged(21, "api", 10)
+        self.merged(22, "web", 11)
+        _, _, out_dir, outputs = self.context()
         self.assertIn("prs=20,21,22\n", outputs)
+        ctx = Path(out_dir, "context.md").read_text()
+        self.assertIn("### PR #20 ", ctx)
+        self.assertIn("### PR #21 ", ctx)
+
+    def test_too_many_prs_are_reported(self):
+        for n in range(45):
+            self.merged(100 + n, "api" if n % 2 else "web", 200 + n, hours=1 + n / 10)
+        _, _, out_dir, outputs = self.context()
+        self.assertIn("5 older PR(s) in the window were left out", Path(out_dir, "context.md").read_text())
 
     def test_skips_when_agents_disabled(self):
         os.environ["AGENTS_ENABLED"] = "false"
@@ -165,7 +206,8 @@ class ReduceTests(CliTestCase):
             f.add_pull(n, branch=f"agent/api/issue-{n}", state="closed", merged_at=ago(100 + n))
             f.pulls[n]["updated_at"] = ago(100 + n)
         f.pulls[250]["merged_at"] = f.pulls[250]["updated_at"] = ago(1)
-        prs = reduce.merged_prs(f.gh(), 24)
+        prs, dropped = reduce.merged_prs(f.gh(), 24)
+        self.assertEqual(dropped, 0)
         self.assertEqual([p["number"] for p in prs], [250])
         pages = [p for m, p, b in f.calls if m == "GET" and re.search(r"/pulls(\?|$)", p)]
         self.assertEqual(len(pages), 1)
@@ -231,17 +273,24 @@ class ReduceConfigTests(unittest.TestCase):
     def test_defaults_off(self):
         cfg = write_config(self.tmp.name)
         self.assertFalse(cfg.reduce_enabled)
-        self.assertEqual((cfg.reduce_schedule, cfg.reduce_window_hours), ("30 6 * * *", 24))
-        self.assertNotIn("reduce", scaffold.planner_workflow(cfg))
+        self.assertEqual((cfg.reduce_schedule, cfg.reduce_window_hours), ("30 6 * * *", 48))
+        text = scaffold.planner_workflow(cfg)
+        self.assertNotIn("'reduce'", text)
+        self.assertIn("options: [prd, gap]\n", text)
+        self.assertIn('"prd (from docs) or gap (docs against code)"', text)
 
     def test_schedule_must_differ_from_refill(self):
-        with self.assertRaisesRegex(ConfigError, "must differ from planner.schedule"):
-            write_config(self.tmp.name, planner={"refill_below": 2, "schedule": "0 6 * * *"},
-                         reduce={"enabled": True, "schedule": "0 6 * * *"})
+        for refill, red in (("0 6 * * *", "0 6 * * *"), ("17 * * * *", "17 6 * * *")):
+            with self.assertRaisesRegex(ConfigError, "different minute from planner.schedule"):
+                write_config(self.tmp.name, planner={"refill_below": 2, "schedule": refill},
+                             reduce={"enabled": True, "schedule": red})
 
     def test_bad_schedule_window_and_disabled_planner(self):
-        with self.assertRaisesRegex(ConfigError, "5-field cron"):
-            write_config(self.tmp.name, reduce={"enabled": True, "schedule": "daily"})
+        for bad in ("daily", "- - - - -", "30 6 * *", "x 6 * * *", "30 6 * * * *"):
+            with self.assertRaisesRegex(ConfigError, "5-field cron"):
+                write_config(self.tmp.name, reduce={"enabled": True, "schedule": bad})
+        for good in ("30 6 * * MON", "*/15 1-5 * * 1-5", "0 0,12 1 JAN *"):
+            self.assertTrue(write_config(self.tmp.name, reduce={"enabled": True, "schedule": good}).reduce_enabled)
         with self.assertRaisesRegex(ConfigError, "window_hours"):
             write_config(self.tmp.name, reduce={"window_hours": 0})
         with self.assertRaisesRegex(ConfigError, "needs planner.enabled"):
@@ -254,6 +303,12 @@ class ReduceConfigTests(unittest.TestCase):
         self.assertIn('- cron: "17 * * * *"  # refill', text)
         self.assertIn("(github.event.schedule == '5 4 * * *' && 'reduce' || 'refill')", text)
         self.assertIn("options: [prd, gap, reduce]", text)
+        self.assertIn("pull-requests: read", text)
+
+    def test_reusable_planner_grants_pull_requests_read(self):
+        # A reusable workflow's permissions cap the caller's token, so both must allow listing PRs.
+        text = (Path(__file__).parent.parent / ".github/workflows/planner.yml").read_text()
+        self.assertIn("  pull-requests: read", text.split("jobs:")[0])
 
     def test_caller_with_reduce_only(self):
         cfg = write_config(self.tmp.name, reduce={"enabled": True})
