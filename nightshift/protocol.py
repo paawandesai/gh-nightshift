@@ -22,7 +22,7 @@ Types
                 run has lane "reduce" and "prs" (the merged PRs it covered, "12,15")
   redteam       on the night-log issue after a red-team scan: {"sha" (the commit it reached), "base"}
   redteam-finding  in a draft security advisory's description (public repo) or a `security` issue's body (private
-                repo): {"fp" (fingerprint), "sha"}
+                repo): {"fp" (title + file), "wk" (CWE + file, when given), "sha"}
 """
 from __future__ import annotations
 

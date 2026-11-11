@@ -20,7 +20,8 @@ new finding at or above `redteam.min_severity`:
 - private repo (GitHub offers no advisories there): an issue labelled `security` and `human`, which only repo
   members can see and agents never pick up.
 
-Dedupe: each advisory or issue carries a `redteam-finding` marker with a fingerprint (title + file), and only
+Dedupe: each advisory or issue carries a `redteam-finding` marker with a fingerprint (title + file) and,
+when the model gave a CWE, a weakness key (CWE + file); a match on either is a duplicate. Only
 ones authored by a trusted login count, so an outsider's private vulnerability report cannot suppress a finding.
 """
 from __future__ import annotations
@@ -195,11 +196,22 @@ def findings_of(data: dict) -> list[dict]:
     return out[:MAX_FINDINGS]
 
 
+def _path(f: dict) -> str:
+    return re.split(r"[:#]", f["location"].strip(), maxsplit=1)[0].strip().lower()
+
+
 def fingerprint(f: dict) -> str:
     """Stable across runs: the title (case and spacing folded) and the file, not the line, which moves."""
-    path = re.split(r"[:#]", f["location"].strip(), maxsplit=1)[0].strip().lower()
     title = " ".join(re.sub(r"[^a-z0-9 ]", " ", f["title"].lower()).split())
-    return hashlib.sha256(f"{title}\n{path}".encode()).hexdigest()[:16]
+    return hashlib.sha256(f"{title}\n{_path(f)}".encode()).hexdigest()[:16]
+
+
+def weakness_key(f: dict) -> str:
+    """The file and CWE number, or "" without a CWE. The model rewords titles between runs (seen live: "OS command
+    injection in export()" became "OS command injection and path traversal in export()"), so a finding whose file
+    and CWE match one already filed counts as the same one."""
+    m = re.search(r"CWE-?\s*(\d+)", f.get("cwe") or "", re.I)
+    return hashlib.sha256(f"cwe-{int(m.group(1))}\n{_path(f)}".encode()).hexdigest()[:16] if m else ""
 
 
 LABEL = "security"
@@ -216,11 +228,12 @@ def existing_fingerprints(gh: GH, public: bool) -> set[str]:
         docs = [{"id": i["number"], "user": i.get("user") or {}, "body": i.get("body") or ""}
                 for i in gh.issues([LABEL], state="all")]
     for m in ns.trusted(docs, gh.trusted, "redteam-finding"):
-        seen.add(str(m.get("fp")))
+        seen.update(str(m.get(k)) for k in ("fp", "wk") if m.get(k))
     return seen
 
 
 def _description(f: dict, fp: str, head: str, base: str) -> str:
+    wk = weakness_key(f)
     rng = f"{base[:12]}..{head[:12]}" if base else f"baseline at {head[:12]}"
 
     def block(title: str, text: str) -> list[str]:
@@ -231,7 +244,7 @@ def _description(f: dict, fp: str, head: str, base: str) -> str:
             f"**Location:** `{ns.defang(f['location']).replace('`', '')}`"
             + (f"  \n**CWE:** {ns.defang(f['cwe']).replace('`', '')}" if f["cwe"] else ""), "",
             *block("Evidence", f["evidence"]), *block("Attack path", f["attack_path"]), *block("Suggested fix", f["fix"]),
-            ns.marker("redteam-finding", fp=fp, sha=head)]
+            ns.marker("redteam-finding", fp=fp, sha=head, **({"wk": wk} if wk else {}))]
     return "\n".join(desc)
 
 
@@ -262,8 +275,8 @@ def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public:
         result.failed.append(f"cannot list earlier findings: {err}")
         return result
     for f in keep:
-        fp = fingerprint(f)
-        if fp in seen:
+        fp, wk = fingerprint(f), weakness_key(f)
+        if fp in seen or (wk and wk in seen):
             result.duplicates += 1
             continue
         try:
@@ -277,7 +290,7 @@ def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public:
         except GHError as err:
             result.failed.append(f"{f['severity']}: {err}")
             continue
-        seen.add(fp)
+        seen.update(k for k in (fp, wk) if k)
         result.filed.append(f"{f['severity']} {where}".strip())
     return result
 

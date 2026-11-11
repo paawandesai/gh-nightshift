@@ -206,6 +206,18 @@ class PublishTests(RedteamCase):
         self.assertEqual(len(self.fake.advisories), 1)
         self.assertEqual(len(ns.trusted([{"id": 1, **c} for c in self.fake.comments[1]], "night-bot", "redteam")), 2)
 
+    def test_reworded_title_with_the_same_cwe_and_file_is_a_duplicate(self):
+        self.publish({"findings": [FINDING]})
+        # Seen live: the second scan reworded the title and raised the severity.
+        reworded = {**FINDING, "title": "OS command injection and path traversal in export()", "severity": "critical",
+                    "cwe": "CWE 78", "location": "API/export.py:8"}
+        self.publish({"findings": [reworded]})
+        self.assertEqual(len(self.fake.advisories), 1)
+        other = {**FINDING, "title": "Path traversal in export", "cwe": "CWE-22"}
+        no_cwe = {**FINDING, "title": "Unbounded archive size", "cwe": ""}
+        self.publish({"findings": [other, no_cwe]})
+        self.assertEqual(len(self.fake.advisories), 3)
+
     def test_untrusted_advisory_does_not_suppress_a_finding(self):
         fp = redteam.fingerprint(redteam.findings_of({"findings": [FINDING]})[0])
         self.fake.advisories.append({"author": {"login": "mallory"}, "description": ns.marker("redteam-finding", fp=fp)})
