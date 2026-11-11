@@ -485,6 +485,9 @@ def refill_lane(ctx: Ctx) -> tuple[str, str]:
     if not lanes:
         return "", f"every lane has at least {cfg.planner_refill_below} ready issues"
     counts = ready_counts(gh, cfg)
+    if not gh.trusted:
+        raise SystemExit("this token cannot read GET /user and the config names no bot_login or trusted_logins, "
+                         "so plan markers cannot be trusted; set bot_login in .night-shift/config.yml")
     log = gh.night_log(cfg.label("night_log"))
     sha = docs_sha(gh, cfg.planner_docs)
     done = set()
