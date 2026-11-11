@@ -185,9 +185,11 @@ def changes(git, rng: str) -> dict[str, set[int]]:
     names = git(["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "--name-only", "-z", *DIFF_FLAGS, rng])
     out: dict[str, set[int]] = {}
     for raw in names.split("\0"):
-        path = normalize_path(raw) if raw else None
-        if not path:
+        if not raw:
             continue
+        # Keyed by git's own name. A name normalize_path would change (surrounding spaces, backslashes) could
+        # collide with another file's key; scan() turns such names into check-by-hand hits instead.
+        path = raw
         added: set[int] = set()
         diff = git(["--literal-pathspecs", "-c", "core.quotePath=false", "diff", "-U0", *DIFF_FLAGS, rng, "--", raw])
         for line in diff.split("\n"):
@@ -212,7 +214,7 @@ def _read(pr_dir: Path, path: str) -> str | None:
             return None
         if not file.resolve().is_relative_to(pr_dir.resolve()):
             return None
-        text = file.read_text(encoding="utf-8")
+        text = file.read_bytes().decode("utf-8")  # not read_text: universal newlines would hide a lone CR
         # A lone carriage return is a line break to Python but not to git, so AST line numbers would no longer
         # match the diff's: treat such a file as unreadable (a check-by-hand hit) rather than mis-attribute it.
         return None if re.search(r"\r(?!\n)", text) else text
@@ -279,6 +281,10 @@ def scan(rules: list[Rule], pr_dir: str | Path, changed: dict[str, set[int]]) ->
     hits: list[Hit] = []
     for rule in rules:
         for path in sorted(changed):
+            if normalize_path(path) != path:
+                hits.append(Hit(rule, path, 0, "(unusual file name: surrounding spaces, backslashes or dots; "
+                                               "check this file by hand)"))
+                continue
             if not rule.selects(path):
                 continue
             added = changed[path]

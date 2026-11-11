@@ -118,8 +118,10 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(self.keys(), ["ev@api/a.py:3", "rx@api/a.py:3"])
 
     def test_lone_carriage_return_is_unreadable(self):
-        Path(self.root, "api/a.py").write_bytes(b"a = 1\rb = 2\neval(x)\n")
-        self.assertTrue(all(":0" in k for k in self.keys()))
+        Path(self.root, "api/a.py").write_bytes(b'"""doc"""\nimport os\n# x\ry\n\n\ndef f():\n    return eval("1")\n')
+        keys = self.keys()
+        self.assertTrue(keys)
+        self.assertTrue(all(":0" in k for k in keys))
 
     def test_rename_mode_and_binary_reach_path_rules(self):
         git(self.root, "mv", "api/routes.py", "api/moved.py")
@@ -127,6 +129,19 @@ class ScanTests(unittest.TestCase):
         rules = parse({"rules": [rule(kind="path", pattern="", paths=["api/"])]})
         paths = sorted(h.path for h in scan(rules, self.root, self.diff()))
         self.assertEqual(paths, ["api/blob.bin", "api/moved.py", "api/routes.py"])
+
+    def test_colliding_odd_name_is_a_hit(self):
+        write(self.root, "api/routes.py", "def old():\n    pass\nx = 1\n")
+        write(self.root, " api/routes.py", "eval(x)\n")
+        self.assertIn("ev@ api/routes.py:0", self.keys())
+
+    def test_reviewer_diff_ignores_pr_gitattributes(self):
+        from nightshift.review_tools import drift_report
+        write(self.root, ".gitattributes", "*.py -diff\n")
+        write(self.root, "api/a.py", "eval(x)\n")
+        commit_all(self.root, "pr")
+        pr_diff, _, _ = drift_report(git_in(str(self.root)), "main")
+        self.assertIn("+eval(x)", pr_diff)
 
     def test_decorated_class(self):
         write(self.root, "api/m.py", "@register\nclass Thing:\n    pass\n")

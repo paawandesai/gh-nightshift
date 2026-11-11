@@ -30,7 +30,13 @@ def drift_report(git: GitRunner, base_ref: str) -> tuple[str, str, list[str]]:
     """(diff of the PR, drift markdown, overlapping files). Drift = what changed on main since the PR's
     merge base: `git diff <merge-base>..<base_ref> --stat` plus the main-side diffs of files the PR touches."""
     mb = git(["merge-base", base_ref, "HEAD"]).strip()
-    pr_diff = git(["diff", *review_rules.DIFF_FLAGS, f"{mb}..HEAD"])
+    # The reviewer's diff: attributes from the merge base (trusted), never from the PR's own .gitattributes, and
+    # no --text, so a binary asset stays one line instead of crowding out the code.
+    flags = ["diff", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", f"{mb}..HEAD"]
+    try:
+        pr_diff = git([f"--attr-source={mb}", *flags])
+    except RuntimeError:  # git older than 2.40 has no --attr-source; --text keeps the PR's attributes from hiding code
+        pr_diff = git([*flags[:1], "--text", *flags[1:]])
     def names(rng: str) -> set[str]:
         out = git(["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", "-z", rng])
         return {p for p in out.replace("\n", "\0").split("\0") if p}
