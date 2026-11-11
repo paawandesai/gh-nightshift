@@ -477,3 +477,19 @@ class ReuseVerdictTests(unittest.TestCase):
         self.assertNotIn("reuse_verdict", caller)
         off = config.loads(CFG + "review:\n  reuse_on_update: false\n")
         self.assertIn("reuse_verdict: false", scaffold.review_workflow(off))
+
+
+class ReviewCallerPermissionTests(unittest.TestCase):
+    def test_doctor_requires_a_narrow_permissions_block(self):
+        cfg = config.loads(CFG)
+        with tempfile.TemporaryDirectory() as d:
+            write(d, ".github/workflows/night-shift-review.yml", scaffold.review_workflow(cfg))
+            self.assertFalse([c for c in doctor.rules_checks(Path(d), cfg) if c.level != doctor.OK])
+            write(d, ".github/workflows/night-shift-review.yml", "on: pull_request\njobs: {}\n")
+            self.assertTrue(any("permissions block" in c.what for c in doctor.rules_checks(Path(d), cfg)))
+            write(d, ".github/workflows/night-shift-review.yml", "permissions: write-all\njobs: {}\n")
+            self.assertTrue(any("permissions block" in c.what for c in doctor.rules_checks(Path(d), cfg)))
+
+    def test_reusable_review_workflow_leaves_permissions_to_the_caller(self):
+        text = (Path(__file__).resolve().parents[1] / ".github/workflows/review.yml").read_text()
+        self.assertNotRegex(text, r"(?m)^permissions:")

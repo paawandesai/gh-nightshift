@@ -184,7 +184,12 @@ def rules_checks(root: Path, cfg: Config) -> list[Check]:
         sec = sum(r.security for r in rules)
         out.append(Check(OK, f"{review_rules.RULES_PATH}: {len(rules)} rule(s), {sec} security rule(s)"))
     review = root / ".github/workflows/night-shift-review.yml"
-    if cfg.reuse_on_update and review.is_file() and "checks: read" not in review.read_text(encoding="utf-8"):
+    text = review.read_text(encoding="utf-8") if review.is_file() else ""
+    if text and (not re.search(r"^permissions:", text, re.M) or re.search(r"write-all|contents: write|actions: write", text)):
+        out.append(Check(FAIL, "night-shift-review.yml must set its own permissions block (contents: read, "
+                               "pull-requests: write, issues: write, checks: read, actions: read): the reusable "
+                               "review workflow takes its token permissions from it", "run `gh nightshift init --regenerate`"))
+    if cfg.reuse_on_update and text and "checks: read" not in text:
         out.append(Check(WARN, "night-shift-review.yml does not grant checks: read, so every update-branch reruns the "
                                "full review", "run `gh nightshift init --regenerate`"))
     if cfg.security_enabled:
