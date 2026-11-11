@@ -51,6 +51,7 @@ class FakeGitHub:
         self.permissions: dict[str, str] = {}
         self.commits_by_path: dict[str, list[dict]] = {}
         self.denied: set[str] = set()  # repo-relative paths that answer 404 (a PAT missing a permission)
+        self.user_forbidden = False  # GET /user answers 403, as for GITHUB_TOKEN or an App token
         self.forbidden: set[str] = set()  # repo-relative path patterns that answer 403 (e.g. check-runs for a PAT)
         self.jobs: dict[int, list[dict]] = {}
         self.job_logs: dict[int, str] = {}
@@ -123,6 +124,8 @@ class FakeGitHub:
         p = parsed.path
         prefix = f"repos/{self.repo}"
         if p == "user":
+            if self.user_forbidden:  # GITHUB_TOKEN and App installation tokens
+                raise GHError("gh: Resource not accessible by integration (HTTP 403)", 403)
             return {"login": self.login}
         if p.startswith("repos/paawandesai/gh-nightshift") and method == "GET":
             tail = p[len("repos/paawandesai/gh-nightshift"):]

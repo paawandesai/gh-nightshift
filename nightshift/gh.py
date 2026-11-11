@@ -131,7 +131,14 @@ class GH:
     def login(self) -> str:
         """Account behind the token. Only markers it posted count, so outsiders can't forge them."""
         if self._login is None:
-            self._login = (self.get("user") or {}).get("login", "")
+            try:
+                self._login = (self.get("user") or {}).get("login", "")
+            except GHError as err:
+                if err.status != 403:
+                    raise
+                # GITHUB_TOKEN and App installation tokens cannot read /user. Trust only the config's
+                # bot_login and trusted_logins then (callers that need a login check `trusted`).
+                self._login = ""
         return self._login
 
     @login.setter

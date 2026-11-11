@@ -19,7 +19,7 @@ from fakegh import FakeGitHub
 from nightshift import audit, cli, prompts, scaffold
 from nightshift import protocol as ns
 from nightshift.config import CONFIG_PATH, ConfigError, load
-from nightshift.gh import command_for
+from nightshift.gh import GH, GHError, command_for
 
 ENV_DROP = ("GITHUB_REPOSITORY", "GH_REPO", "AGENTS_ENABLED", "GH_TOKEN", "GITHUB_TOKEN", "COMMENT_AUTHOR",
             "COMMENT_BODY", "ISSUE_NUMBER", "ONLY_LANE", "FIX_LANE", "LANE_MODEL", "ESCALATE_MODEL")
@@ -829,6 +829,29 @@ class PlanTests(CliTestCase):
         rc, text, _, outputs = self.context("refill")
         self.assertIn("coverage is complete for the current docs", text)
         self.assertEqual(outputs, "run=false\n")
+
+    def test_refill_works_when_the_token_cannot_read_user(self):
+        # The planner's context job holds GITHUB_TOKEN, which gets 403 on GET /user; the config's bot_login is trusted.
+        write_config(self.root, planner={"docs": ["docs/PRD.md"], "refill_below": 2}, bot_login="night-bot")
+        self.seed(self.fake)
+        self.fake.user_forbidden = True
+        self.fake.add_comment(1, ns.marker("plan", lane="*", complete=True, docs_sha="abcdef123456"))
+        rc, text, _, outputs = self.context("refill")
+        self.assertEqual(rc, 0)
+        self.assertIn("coverage is complete for the current docs", text)
+        self.assertEqual(outputs, "run=false\n")
+
+    def test_refill_without_any_trusted_login_fails_clearly(self):
+        self.seed(self.fake)
+        self.fake.user_forbidden = True
+        with self.assertRaisesRegex(SystemExit, "set bot_login"):
+            self.context("refill")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "gh_output")))
+
+    def test_other_errors_reading_user_still_raise(self):
+        gh = GH("o/r", transport=lambda m, p, b=None: (_ for _ in ()).throw(GHError("boom", 500)))
+        with self.assertRaises(GHError):
+            _ = gh.login
 
     def test_review_mode_refuses_commenter_without_write_access(self):
         self.fake.add_issue(number=5, title="Plan auth")
