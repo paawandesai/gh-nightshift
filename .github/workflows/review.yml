@@ -45,6 +45,13 @@ on:
         type: string
         required: false
         default: ""
+      reuse_verdict:
+        description: >-
+          Keep a passed verdict when a push only merged main (update-branch) and main changed none of the PR's
+          files or the review inputs; needs checks: read (or actions: read) in the caller. CI still runs
+        type: boolean
+        required: false
+        default: true
     secrets:
       claude_token:
         required: false
@@ -52,6 +59,9 @@ on:
         description: Claude token for the security reviewer; the review token is used when this is empty
         required: false
 
+# Reusing a verdict also reads check runs (checks: read, or actions: read). Those are not requested here: a
+# called workflow may not ask for more than its caller grants, and older callers grant neither. Without them
+# the review simply runs in full.
 permissions:
   contents: read
   pull-requests: write
@@ -107,21 +117,33 @@ jobs:
           echo "::add-mask::${AUTH#AUTHORIZATION: basic }"
           git -C pr -c "http.https://github.com/.extraheader=$AUTH" fetch -q origin "$BASE_REF"
           python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
-            --out-dir "$WORK" --rules-root base --github-output "$GITHUB_OUTPUT"
+            --out-dir "$WORK" --rules-root base --github-output "$GITHUB_OUTPUT" \
+            --reuse-check "${{ inputs.reuse_verdict && 'verdict' || '' }}"
+
+      - name: Reuse the passed verdict (only main moved)
+        if: steps.gather.outputs.reuse != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          jq -n --rawfile b "$RUNNER_TEMP/review/reuse.md" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$PR/comments" --input - >/dev/null || true
 
       # Node for Claude Code, in case a self-hosted runner has none.
       - uses: actions/setup-node@v4
+        if: steps.gather.outputs.reuse == ''
         with:
           node-version: 22
       # Claude Code goes into this job's temp directory, which the runner empties before every job, so
       # nothing a run leaves behind on a self-hosted machine is what the next job executes as `claude`.
       - name: Install Claude Code
+        if: steps.gather.outputs.reuse == ''
         run: |
           npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
       - name: Review
         id: review
+        if: steps.gather.outputs.reuse == ''
         working-directory: base
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
@@ -145,6 +167,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Post review and set verdict
+        if: steps.gather.outputs.reuse == ''
         env:
           GH_TOKEN: ${{ github.token }}
           VERDICT: ${{ steps.review.outputs.verdict }}
@@ -217,25 +240,34 @@ jobs:
           echo "::add-mask::${AUTH#AUTHORIZATION: basic }"
           git -C pr -c "http.https://github.com/.extraheader=$AUTH" fetch -q origin "$BASE_REF"
           python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
-            --out-dir "$WORK" --rules-root base --github-output "$GITHUB_OUTPUT"
+            --out-dir "$WORK" --rules-root base --github-output "$GITHUB_OUTPUT" \
+            --reuse-check "${{ inputs.reuse_verdict && 'security' || '' }}"
+
+      - name: Reuse the passed security verdict (only main moved)
+        if: steps.gather.outputs.reuse != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          jq -n --rawfile b "$RUNNER_TEMP/review/reuse.md" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$PR/comments" --input - >/dev/null || true
 
       - name: Nothing to review
-        if: steps.gather.outputs.security != 'true'
+        if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security != 'true'
         run: echo "No security rule, security path or security.always applies to this PR; passing."
 
       - uses: actions/setup-node@v4
-        if: steps.gather.outputs.security == 'true'
+        if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security == 'true'
         with:
           node-version: 22
       - name: Install Claude Code
-        if: steps.gather.outputs.security == 'true'
+        if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security == 'true'
         run: |
           npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
       - name: Security review
         id: review
-        if: steps.gather.outputs.security == 'true'
+        if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security == 'true'
         working-directory: base
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.security_claude_token || secrets.claude_token }}
@@ -257,7 +289,7 @@ jobs:
             --rules "$WORK/security_hits.json" --github-output "$GITHUB_OUTPUT"
 
       - name: Post security review and set verdict
-        if: steps.gather.outputs.security == 'true'
+        if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERDICT: ${{ steps.review.outputs.verdict }}

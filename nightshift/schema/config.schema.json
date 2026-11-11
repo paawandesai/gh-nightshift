@@ -373,6 +373,17 @@
         }
       }
     },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The review gate",
+      "properties": {
+        "reuse_on_update": {
+          "type": "boolean",
+          "description": "default true: when update-branch only merged main and main touched none of the PR's files or the review inputs, keep the passed verdict instead of running the reviewer again (CI still runs)"
+        }
+      }
+    },
     "security": {
       "type": "object",
       "additionalProperties": false,

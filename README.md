@@ -171,6 +171,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
+| `review` | `reuse_on_update: true` | Keep a passed verdict when update-branch only merged main (see Merge modes) |
 | `security` | `enabled: false` | `enabled` (adds the required check `review / security`), `claude_token_secret` (default `review_token_secret`), `model`, `paths` (always reviewed, as are `risk.approve_paths`), `always` (review every PR). See Review rules |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
 | `extends` | | `owner/repo` with an org-wide `.night-shift/config.yml` (see Org-wide config) |
@@ -326,7 +327,11 @@ high or critical finding fails it, and the picker closes the PR as `security_fai
 - **`strict`** (default): branch protection requires PRs to be up to date with main. When a lane's PR is
   behind main, the picker calls `update-branch`, and CI and the review run again on the merged result. A
   conflict while updating closes the PR as `conflict`, and the attempt is refunded. Main is never ahead of
-  what was tested, but each update re-runs CI and the review.
+  what was tested. Each update re-runs CI. The review and security gates keep their passed verdict instead of
+  calling Claude again when the update only merged main, the PR's own diff is unchanged, and main changed none
+  of the PR's files and none of the review inputs (workflows, `CLAUDE.md`, `.night-shift/`). The PR gets a
+  comment saying so. `review: {reuse_on_update: false}` turns this off; it needs `checks: read` in the review
+  caller, which `init --regenerate` adds.
 - **`queue`**: `setup` creates a GitHub merge queue ruleset, and your CI must also run on `merge_group`
   (`doctor` checks this). The queue tests the merged result, so the branch need not be up to date.
   Limitation in v0.1: the picker does not add PRs to the queue or enable auto-merge, so a person (or other

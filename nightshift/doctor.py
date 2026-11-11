@@ -183,8 +183,11 @@ def rules_checks(root: Path, cfg: Config) -> list[Check]:
     if rules:
         sec = sum(r.security for r in rules)
         out.append(Check(OK, f"{review_rules.RULES_PATH}: {len(rules)} rule(s), {sec} security rule(s)"))
+    review = root / ".github/workflows/night-shift-review.yml"
+    if cfg.reuse_on_update and review.is_file() and "checks: read" not in review.read_text(encoding="utf-8"):
+        out.append(Check(WARN, "night-shift-review.yml does not grant checks: read, so every update-branch reruns the "
+                               "full review", "run `gh nightshift init --regenerate`"))
     if cfg.security_enabled:
-        review = root / ".github/workflows/night-shift-review.yml"
         if review.is_file() and "security: true" not in review.read_text(encoding="utf-8"):
             out.append(Check(FAIL, "security.enabled is true but night-shift-review.yml does not run the security gate",
                              "run `gh nightshift init --regenerate`"))

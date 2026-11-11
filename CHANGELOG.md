@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   them deterministically over the PR's added and changed lines and hands every hit to the reviewer, which must
   answer each one; an unanswered hit or a `no` fails the review. `gh nightshift rules` shows the hits for the
   current branch, and `doctor` validates the file.
+- The review and security gates keep a passed verdict after `update-branch` when the update only merged main
+  and main touched none of the PR's files or the review inputs, so strict mode no longer pays for a second
+  review on every update. `review.reuse_on_update: false` turns it off. The generated review caller now grants
+  `checks: read` and `actions: read`; run `gh nightshift init --regenerate`.
 - An optional security gate (`security.enabled`): a second read-only reviewer, required check
   `review / security`, started by `security: true` rule hits, `security.paths`, `risk.approve_paths` or
   `security.always`. High or critical findings fail it; the picker closes such PRs as `security_failed`.

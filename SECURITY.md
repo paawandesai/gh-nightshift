@@ -199,6 +199,15 @@ quotes are code under review; backticks are replaced so a snippet cannot close i
 leaves unanswered or answers `no` fails the review whatever verdict the reviewer gave, and more hits than the
 cap (60) fail it too.
 
+**Verdict reuse.** After `update-branch`, the gates may keep a passed verdict without calling Claude. They do
+so only when the new head is a merge whose second parent is on the base branch, the PR's own diff against its
+merge base is byte for byte the reviewed one, main changed none of the PR's files and no protected path (so
+the rules, prompts, workflows and agent instruction files the reviewer saw are unchanged), and the same check
+passed on the previous head, read from GitHub's check runs (which comments cannot forge). An agent cannot
+produce such a merge with new code in it: any change to the PR's own diff forces a full review. What reuse
+gives up is the reviewer re-reading the PR against main changes in other files it depends on; CI still runs
+on the merged result. `review.reuse_on_update: false` turns it off.
+
 **The security gate** (`security.enabled`) is a second job in `review.yml` with the same isolation: base
 checkout as working directory, PR mounted read-only, `Read,Grep,Glob` only, no PAT. It receives one Claude
 token, `security.claude_token_secret` (default: the review token), never a PAT; the config refuses a secret name

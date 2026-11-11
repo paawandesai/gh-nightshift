@@ -381,3 +381,99 @@ class ConfigAndWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReuseVerdictTests(unittest.TestCase):
+    """update-branch merges main into the PR; the passed verdict carries over only when nothing it saw changed."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        r = self.root
+        git(r, "init", "-q")
+        git(r, "checkout", "-q", "-B", "main")
+        write(r, "api/app.py", "x = 1\n" + "\n" * 6 + "z = 0\n")
+        write(r, "web/page.py", "y = 1\n")
+        commit_all(r, "base")
+        git(r, "checkout", "-q", "-b", "agent/api/issue-7")
+        write(r, "api/app.py", "x = 2\n" + "\n" * 6 + "z = 0\n")
+        commit_all(r, "pr")
+        self.prev = git(r, "rev-parse", "HEAD").strip()
+        self.fake = FakeGitHub()
+        self.fake.check_runs[self.prev] = [{"name": "review / verdict", "status": "completed",
+                                            "conclusion": "success", "completed_at": "2026-11-11T10:00:00Z"}]
+
+    def main_moves(self, path, text):
+        git(self.root, "checkout", "-q", "main")
+        write(self.root, path, text)
+        commit_all(self.root, "main moves")
+        git(self.root, "checkout", "-q", "agent/api/issue-7")
+
+    def update_branch(self):
+        git(self.root, "merge", "-q", "--no-edit", "main")
+
+    def reuse(self, check="verdict"):
+        from nightshift.review_tools import reusable_verdict
+        return reusable_verdict(self.fake.gh(), git_in(str(self.root)), "main", check,
+                                config.BUILTIN_PROTECTED)
+
+    def test_unrelated_main_change_reuses(self):
+        self.main_moves("web/page.py", "y = 2\n")
+        self.update_branch()
+        prev, why = self.reuse()
+        self.assertEqual(prev, self.prev)
+        self.assertIn("only merged main", why)
+
+    def test_new_commit_from_the_agent_runs_in_full(self):
+        write(self.root, "api/app.py", "x = 3\n")
+        commit_all(self.root, "more work")
+        self.assertEqual(self.reuse()[0], "")
+
+    def test_overlapping_main_change_runs_in_full(self):
+        self.main_moves("api/app.py", "x = 1\n" + "\n" * 6 + "z = 9\n")
+        self.update_branch()
+        prev, why = self.reuse()
+        self.assertEqual(prev, "")
+        self.assertIn("api/app.py", why)
+
+    def test_review_inputs_changed_on_main_runs_in_full(self):
+        self.main_moves(".night-shift/review-rules.yml", "version: 1\nrules: []\n")
+        self.update_branch()
+        prev, why = self.reuse()
+        self.assertEqual(prev, "")
+        self.assertIn("review inputs", why)
+
+    def test_previous_check_must_have_passed(self):
+        self.fake.check_runs[self.prev][0]["conclusion"] = "failure"
+        self.main_moves("web/page.py", "y = 2\n")
+        self.update_branch()
+        self.assertIn("did not pass", self.reuse()[1])
+        self.assertIn("no `security` check", self.reuse("security")[1])
+
+    def test_unreadable_checks_runs_in_full(self):
+        self.fake.forbidden.add(r"commits/.*/check-runs")
+        self.fake.forbidden.add(r"actions/runs")
+        self.main_moves("web/page.py", "y = 2\n")
+        self.update_branch()
+        prev, why = self.reuse()
+        self.assertEqual(prev, "")
+        self.assertIn("could not read checks", why)
+
+    def test_write_inputs_reuse_short_circuits(self):
+        self.main_moves("web/page.py", "y = 2\n")
+        self.update_branch()
+        with tempfile.TemporaryDirectory() as out:
+            values = write_inputs(self.fake.gh(), git_in(str(self.root)), "main", "agent/api/issue-7", out,
+                                  pr_dir=str(self.root), reuse_check="verdict")
+            self.assertEqual(values, {"reuse": self.prev})
+            self.assertIn("**pass** (reused)", Path(out, "reuse.md").read_text())
+
+    def test_caller_and_config(self):
+        cfg = config.loads(CFG)
+        self.assertTrue(cfg.reuse_on_update)
+        caller = scaffold.review_workflow(cfg)
+        self.assertIn("checks: read", caller)
+        self.assertNotIn("reuse_verdict", caller)
+        off = config.loads(CFG + "review:\n  reuse_on_update: false\n")
+        self.assertIn("reuse_verdict: false", scaffold.review_workflow(off))

@@ -797,7 +797,7 @@ def cmd_review_inputs(ctx: Ctx) -> int:
 
     a = ctx.args
     values = write_inputs(ctx.gh, git_in(a.pr_dir), a.base_ref, a.head_ref, a.out_dir,
-                          rules_root=a.rules_root, pr_dir=a.pr_dir)
+                          rules_root=a.rules_root, pr_dir=a.pr_dir, reuse_check=a.reuse_check or "")
     write_outputs(a.github_output, values)
     ctx.say(json.dumps(values))
     return 0
@@ -1001,6 +1001,7 @@ def parser() -> argparse.ArgumentParser:
     for flag in ("--pr-dir", "--base-ref", "--head-ref", "--out-dir"):
         s.add_argument(flag, required=True)
     s.add_argument("--rules-root", help="base-branch checkout holding .night-shift/review-rules.yml and the config")
+    s.add_argument("--reuse-check", help="check name (verdict, security): reuse its pass when only main moved")
     s.add_argument("--github-output")
     s = sub.add_parser("review-report", parents=[common])
     s.add_argument("--result", required=True)

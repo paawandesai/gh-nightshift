@@ -103,6 +103,7 @@ class Config:
     risk_approve_paths: list[str] = field(default_factory=list)
     risk_auto_labels: list[str] = field(default_factory=list)
     risk_codeowners: bool = False  # PRs touching files with CODEOWNERS owners need one of those owners' approval
+    reuse_on_update: bool = True  # review.reuse_on_update: keep a passed verdict when update-branch only merged main
     security_enabled: bool = False  # the `review / security` gate (see review_rules.py)
     security_token_secret: str = ""  # default: review_token_secret
     security_model: str = ""  # default: review_model
@@ -288,6 +289,7 @@ def parse(data: dict) -> Config:
         risk_approve_paths=list((data.get("risk") or {}).get("approve_paths", [])),
         risk_auto_labels=list((data.get("risk") or {}).get("auto_labels", [])),
         risk_codeowners=bool((data.get("risk") or {}).get("codeowners", False)),
+        reuse_on_update=(data.get("review") or {}).get("reuse_on_update", True) is not False,
         security_enabled=security.get("enabled") is True,
         security_token_secret=security.get("claude_token_secret", ""),
         security_model=security.get("model", ""),

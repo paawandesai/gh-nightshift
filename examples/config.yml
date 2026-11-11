@@ -40,6 +40,8 @@ risk:                          # optional: green PRs merge unless a rule below a
   approve_paths: [migrations/]
   auto_labels: [risk:low]
   codeowners: true             # files with CODEOWNERS owners need one of those owners' approval
+review:
+  reuse_on_update: true        # keep a passed verdict when update-branch only merged main (CI still runs)
 # security:                    # optional: the `review / security` gate (see README, "Review rules")
 #   enabled: true
 #   claude_token_secret: CLAUDE_TOKEN_SECURITY   # default: review_token_secret
