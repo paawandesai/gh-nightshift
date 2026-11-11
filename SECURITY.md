@@ -241,7 +241,16 @@ log, or `security` + `human` issues on a private repo, where the repo's visibili
 members. Finding text is the model's and is fenced and defanged. Only advisories or issues authored by a trusted
 login count for deduplication (an outsider's private vulnerability report cannot suppress a finding), and the
 scan's progress marker is trusted only from the PAT's login. A scan that fails, is cut short or cannot file
-records nothing, so the next scan covers the same range again.
+records nothing, so the next scan covers the same range again. On a public repo the run looks the same whether
+or not anything was found: the sealed output is padded to a fixed size, a filing error prints one generic line
+with no severity or count, and the token's access is checked on every run, findings or not.
+
+The ciphertext stays in public logs for the log retention period, and it is only as safe as the Claude token
+that sealed it. That token defaults to the security (or review) token, which agent jobs also hold; give the scan
+its own token with `redteam.claude_token_secret`, and rotate it if it may have leaked. On a private repo, removing the
+`security` label from a filed issue makes the next full scan file it again (deduplication looks at that label).
+In App mode the filing job always asks for Repository security advisories, so approve that permission on the
+installation even for private repos.
 
 ## Auto-merge
 

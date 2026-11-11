@@ -236,7 +236,7 @@ def _description(f: dict, fp: str, head: str, base: str) -> str:
 
 
 def advisory_body(f: dict, fp: str, head: str, base: str, repo: str) -> dict:
-    return {"summary": ns.defang(f["title"])[:1024], "description": _description(f, fp, head, base),
+    return {"summary": ns.one_line(ns.defang(f["title"]), 1024), "description": _description(f, fp, head, base),
             "severity": f["severity"], "vulnerabilities": [{"package": {"ecosystem": "other", "name": repo}}]}
 
 
@@ -254,8 +254,8 @@ def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public:
     found = findings_of(data)
     keep = [f for f in found if SEVERITIES.index(f["severity"]) >= floor]
     result.below = len(found) - len(keep)
-    if not keep:
-        return result
+    # List first, findings or not: a token without access then fails every run the same way, so a red run on a
+    # public repo does not tell anyone that this scan found something.
     try:
         seen = existing_fingerprints(gh, public)
     except GHError as err:
@@ -271,7 +271,7 @@ def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public:
                 adv = gh.post(gh.r("security-advisories"), advisory_body(f, fp, head, base, gh.repo)) or {}
                 where = f"{adv.get('ghsa_id') or '(draft)'} {adv.get('html_url', '')}"
             else:
-                title = f"[{f['severity']}] {ns.defang(f['title'])}"[:250]
+                title = f"[{f['severity']}] {ns.one_line(ns.defang(f['title']), 240)}"[:250]
                 issue = gh.create_issue(title, _description(f, fp, head, base), [LABEL, cfg.label("human")]) or {}
                 where = f"#{issue.get('number', '?')}"
         except GHError as err:
@@ -287,8 +287,9 @@ def summary(result: FileResult, head: str, base: str, cfg: Config, public: bool)
     unpatched hole, and where to look); admins see the drafts under Security > Advisories. Private repo: counts
     and issue links."""
     if public:
-        return ("**Night shift red-team scan** done. Any findings are draft advisories under Security > Advisories."
-                + ("\n\nSome findings could not be filed (see the workflow log)." if result.failed else ""))
+        if result.failed:  # the same words whether listing or filing failed, and no count
+            return "**Night shift red-team scan** could not finish filing (see the workflow log); the next scan retries."
+        return "**Night shift red-team scan** done. Any findings are draft advisories under Security > Advisories."
     rng = f"`{base[:12]}..{head[:12]}`" if base else f"baseline at `{head[:12]}`"
     lines = [f"**Night shift red-team scan** ({rng})", ""]
     lines.append(f"- {len(result.filed)} new `{LABEL}` issue(s) at {cfg.redteam_min_severity} or above"

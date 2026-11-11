@@ -5,8 +5,10 @@ import base64
 import gzip
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -63,7 +65,7 @@ class RedteamCase(CliTestCase):
         return sh(self.root, "rev-parse", "HEAD").strip()
 
     def scanned(self, sha, user=None):
-        self.fake.add_comment(1, ns.marker("redteam", sha=sha, base="", filed=0), user=user)
+        self.fake.add_comment(1, ns.marker("redteam", sha=sha, base=""), user=user)
 
     def context(self, *extra):
         out_dir = os.path.join(self.root, "ctx")
@@ -216,8 +218,26 @@ class PublishTests(RedteamCase):
         self.assertEqual(rc, 1)
         self.assertIn("Repository security advisories", text)
         self.assertEqual(ns.trusted([{"id": 1, **c} for c in self.fake.comments[1]], "night-bot", "redteam"), [])
-        self.assertIn("could not be filed", self.fake.comments[1][-1]["body"])
-        self.assertNotIn("Command injection", text)
+        log = self.fake.comments[1][-1]["body"]
+        self.assertIn("could not finish filing", log)
+        for leak in ("Command injection", "high", "critical", "finding ("):
+            self.assertNotIn(leak, text)
+            self.assertNotIn(leak, log)
+        self.assertEqual(text.count("::error::"), 1)
+
+    def test_public_failure_looks_the_same_with_or_without_findings(self):
+        self.fake.forbidden.add(r"security-advisories")
+        rc_none, text_none = self.publish({"findings": []})
+        log_none = self.fake.comments[1][-1]["body"]
+        rc_some, text_some = self.publish({"findings": [FINDING, {**FINDING, "title": "Second hole"}]})
+        self.assertEqual((rc_none, text_none, log_none), (rc_some, text_some, self.fake.comments[1][-1]["body"]))
+
+    def test_unknown_visibility_records_nothing(self):
+        del self.fake.repo_settings["private"]
+        rc, text = self.publish({"findings": [FINDING]})
+        self.assertEqual(rc, 1)
+        self.assertIn("public", text)
+        self.assertEqual(self.fake.advisories, [])
 
     def test_no_findings_still_records_the_commit(self):
         rc, _ = self.publish({"findings": []})
@@ -409,18 +429,32 @@ class SealTests(unittest.TestCase):
         scan, file_job = text.split("\n  scan:")[1].split("\n  file:")
         self.assertIn("openssl enc -aes-256-cbc", scan)
         self.assertIn("trap 'rm -f", scan)
-        self.assertIn("openssl enc -d -aes-256-cbc", file_job)
-        self.assertIn("--findings-file -", file_job)
-        self.assertNotIn("FINDINGS:", file_job)
+        self.assertIn("truncate -s 65536", scan)
+        self.assertNotIn("wc -c < \"$P/findings.json\"", scan)
+        # The scan job hands over exactly one output, and the only echo into it is the ciphertext.
+        outputs = scan.split("outputs:")[1].split("steps:")[0].strip().splitlines()
+        self.assertEqual(outputs, ["findings: ${{ steps.scan.outputs.findings }}"])
+        self.assertEqual([ln.strip() for ln in scan.splitlines() if "GITHUB_OUTPUT" in ln],
+                         ['echo "findings=$sealed" >> "$GITHUB_OUTPUT"'])
+        run = file_job.split("- name: File findings privately")[1].split("run: |")[1].strip().splitlines()
+        self.assertEqual([ln.strip() for ln in run], [
+            "set -euo pipefail",
+            "printf '%s' \"$SEALED\" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:SEAL_KEY \\",
+            '| python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file -'])
 
-    @unittest.skipUnless(subprocess.run(["which", "openssl"], capture_output=True).returncode == 0, "no openssl")
+    @unittest.skipUnless(all(shutil.which(t) for t in ("openssl", "jq", "truncate")), "no openssl, jq or truncate")
     def test_seal_round_trip_matches_the_workflow(self):
         doc = json.dumps({"type": "result", "subtype": "success", "is_error": False,
                           "structured_output": {"findings": [FINDING]}})
         env = {**os.environ, "K": "sk-test-token"}
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "f.json").write_text(doc)
         sealed = subprocess.run(
-            "gzip -c | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:K | base64 | tr -d '\\n'",
-            shell=True, input=doc.encode(), env=env, capture_output=True, check=True).stdout
+            "jq -c '{type, subtype, is_error, structured_output}' f.json | gzip -9 -c > slim.gz && truncate -s 65536 slim.gz"
+            " && openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:K < slim.gz | base64 | tr -d '\\n'",
+            shell=True, cwd=tmp, env=env, capture_output=True, check=True).stdout
+        self.assertTrue(80000 < len(sealed) < 120000)  # fixed size, under the env-var limit
         self.assertNotIn(b"Command", base64.b64decode(sealed))
         raw = subprocess.run("base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:K",
                              shell=True, input=sealed, env=env, capture_output=True, check=True).stdout

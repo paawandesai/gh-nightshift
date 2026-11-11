@@ -513,6 +513,8 @@ def cmd_redteam(ctx: Ctx) -> int:
     # publish
     if not re.fullmatch(r"[0-9a-f]{40}", a.sha) or not re.fullmatch(r"([0-9a-f]{40})?", a.base):
         raise ConfigError("--sha must be a full commit SHA and --base empty or one")
+    if a.findings_file == "-" and sys.stdin.isatty():
+        raise ConfigError("redteam publish reads the sealed scan output from a pipe; pass --findings-file PATH")
     raw = (sys.stdin.buffer.read() if a.findings_file == "-" else Path(a.findings_file).read_bytes())
     try:
         data = redteam.decode(raw)
@@ -520,18 +522,24 @@ def cmd_redteam(ctx: Ctx) -> int:
         # Never record progress for a scan that did not finish: the next run covers this range again.
         ctx.say(f"::error::{err}; recording nothing")
         return 1
-    public = not (gh.get(gh.r("")) or {}).get("private", True)
+    private = (gh.get(gh.r("")) or {}).get("private")
+    if not isinstance(private, bool):
+        ctx.say("::error::cannot tell whether the repo is public; recording nothing")
+        return 1
+    public = not private
     result = redteam.file_findings(gh, cfg, data, a.sha, a.base, public)
-    for line in result.failed:  # the reason only: never the finding
-        ctx.say(f"::error::could not file a finding ({line}); "
-                + ("the PAT or App needs Repository security advisories: Read and write, and the PAT's account must be "
-                   "a repo admin or security manager" if public else "the PAT or App needs Issues: Read and write"))
+    if result.failed and public:
+        # One line, no severity, no count: a public log must not say what the scan found.
+        ctx.say("::error::could not file the red-team results; the PAT or App needs Repository security advisories: "
+                "Read and write, and the PAT's account must be a repo admin or security manager")
+    for line in result.failed if not public else []:  # the reason only: never the finding
+        ctx.say(f"::error::could not file a finding ({line}); the PAT or App needs Issues: Read and write")
     text = redteam.summary(result, a.sha, a.base, cfg, public)
     # The scan only counts as done when every finding is filed; otherwise the next run covers this range again
     # (fingerprints keep it from filing the same one twice).
     marker = "" if result.failed else ns.marker("redteam", sha=a.sha, base=a.base) + "\n"
     gh.comment(log, marker + text)
-    ctx.say("filed" if not result.failed else "some findings could not be filed")
+    ctx.say("done" if not result.failed else "could not finish filing")
     return 1 if result.failed else 0
 
 
@@ -884,11 +892,8 @@ def cmd_check_pat(ctx: Ctx, run=subprocess.run) -> int:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
     checks = pat_checks(token, run)
     if checks[0].level == OK:
-        try:
-            advisories = ctx.cfg.redteam_enabled
-        except (ConfigError, OSError):
-            advisories = False  # no readable config here: probe what every lane needs
-        checks += access_checks(ctx.gh, advisories=advisories)
+        # Only the red-team filing job asks for advisories (--advisories); lane PATs never need them.
+        checks += access_checks(ctx.gh, advisories=getattr(ctx.args, "advisories", False))
     for c in checks:
         ctx.say(c.line())
     if any(c.level == FAIL for c in checks):
@@ -1116,7 +1121,8 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--out-dir", required=True)
     c.add_argument("--github-output")
     c.add_argument("--full", action="store_true", help="scan the whole tree, not only what changed since the last scan")
-    c = rsub.add_parser("publish", parents=[sub_common], help="file findings as draft private security advisories")
+    c = rsub.add_parser("publish", parents=[sub_common],
+                       help="file findings as draft security advisories (public repo) or `security` issues (private)")
     c.add_argument("--sha", required=True, help="the commit the scan reached")
     c.add_argument("--base", default="", help="the commit it started from (empty for a baseline scan)")
     c.add_argument("--findings-file", default="-", metavar="PATH",
@@ -1153,7 +1159,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("lane-config", parents=[common])
     s.add_argument("--lane", required=True)
     s.add_argument("--github-output")
-    sub.add_parser("check-pat", parents=[common])
+    s = sub.add_parser("check-pat", parents=[common])
+    s.add_argument("--advisories", action="store_true", help="also probe security advisories (public repos only)")
     s = sub.add_parser("pick", parents=[common])
     s.add_argument("--lane", required=True)
     s.add_argument("--github-output")

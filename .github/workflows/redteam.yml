@@ -121,21 +121,28 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
           MODEL: ${{ vars.REDTEAM_MODEL || inputs.model }}
-        # Findings stay out of the log: only the exit code and sizes are printed, and what leaves the job is
+        # Findings stay out of the log: only the exit code is printed. What leaves the job is the result fields
+        # only, gzip'd, zero-padded to a fixed 64 KiB (so its size does not say whether anything was found) and
         # AES-256 encrypted with the Claude token (a masked secret the file job also holds).
         run: |
           set -uo pipefail
           if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::red-team Claude token is empty"; exit 1; fi
           P="$RUNNER_TEMP/redteam"
-          trap 'rm -f "$P/findings.json"' EXIT
+          trap 'rm -f "$P/findings.json" "$P/slim.json" "$P/slim.gz"' EXIT
           claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
             --model "$MODEL" --max-turns 120 --add-dir "$P" --allowedTools "Read,Grep,Glob" \
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$P/findings.json" 2> /dev/null
-          rc=$?; echo "claude exit code: $rc, output $(wc -c < "$P/findings.json") bytes"
+          rc=$?; echo "claude exit code: $rc"
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
-          sealed=$(gzip -c "$P/findings.json" \
-            | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:CLAUDE_CODE_OAUTH_TOKEN | base64 | tr -d '\n')
-          if [ -z "$sealed" ] || [ "${#sealed}" -gt 900000 ]; then echo "::error::could not seal the findings"; exit 1; fi
+          jq -c '{type, subtype, is_error, structured_output}' "$P/findings.json" > "$P/slim.json" 2> /dev/null \
+            || { echo "::error::the scan did not return a JSON result"; exit 1; }
+          gzip -9 -c "$P/slim.json" > "$P/slim.gz" || { echo "::error::could not compress the findings"; exit 1; }
+          if [ "$(wc -c < "$P/slim.gz")" -gt 65536 ]; then echo "::error::the scan output is too large to seal"; exit 1; fi
+          truncate -s 65536 "$P/slim.gz"   # zero padding; gzip readers stop at the end of the stream
+          sealed=$(openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:CLAUDE_CODE_OAUTH_TOKEN < "$P/slim.gz" \
+            | base64 | tr -d '\n') || { echo "::error::could not seal the findings"; exit 1; }
+          # 64 KiB sealed is about 87,500 characters, under the 128 KiB limit for one environment variable in the file job.
+          if [ "${#sealed}" -lt 80000 ] || [ "${#sealed}" -gt 120000 ]; then echo "::error::could not seal the findings"; exit 1; fi
           echo "findings=$sealed" >> "$GITHUB_OUTPUT"
 
   file:
@@ -158,6 +165,11 @@ jobs:
           APP_ID: ${{ inputs.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
         run: python3 -m nightshift app-token --advisories --github-env "$GITHUB_ENV"
+      - name: Check the token can file (no finding is read here)
+        if: inputs.app_id == ''
+        env:
+          GH_TOKEN: ${{ secrets.agent_pat }}
+        run: python3 -m nightshift check-pat --advisories
       - name: File findings privately
         env:
           GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
