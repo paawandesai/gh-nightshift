@@ -11,7 +11,7 @@ from fakegh import FakeGitHub
 from test_review_tools import commit_all, git, result_file, write
 
 from nightshift import cli, config, doctor, review_rules, scaffold
-from nightshift.review_rules import RulesError, changed_lines, check_answers, items, parse, render, scan
+from nightshift.review_rules import RulesError, changes, check_answers, items, parse, render, scan
 from nightshift.review_tools import git_in, render_report, render_security_report, write_inputs
 from nightshift.rules import close_reason
 
@@ -45,6 +45,7 @@ class ParseTests(unittest.TestCase):
             ({"rules": [rule(severity="urgent")]}, "severity"),
             ({"rules": [rule(requires="x")]}, "requires applies"),
             ({"rules": [rule(kind="python-call", unless="x")]}, "unless applies"),
+            ({"rules": [rule(unless="x", security=True)]}, "cannot use unless"),
             ({"rules": [rule(kind="path", pattern="")]}, "needs paths or glob"),
             ({"rules": [rule(paths=["../etc/"])]}, "paths must be"),
             ({"rules": [rule(), rule()]}, "duplicate"),
@@ -66,37 +67,6 @@ class ParseTests(unittest.TestCase):
         self.assertTrue(any(r.security for r in rules))
 
 
-DIFF = textwrap.dedent("""\
-    diff --git a/api/app.py b/api/app.py
-    index 1..2 100644
-    --- a/api/app.py
-    +++ b/api/app.py
-    @@ -1,2 +1,3 @@
-     import os
-    -x = 1
-    +x = 2
-    +print(x)
-    diff --git a/old.py b/old.py
-    deleted file mode 100644
-    --- a/old.py
-    +++ /dev/null
-    @@ -1 +0,0 @@
-    -gone = 1
-    diff --git a/new.txt b/new.txt
-    new file mode 100644
-    --- /dev/null
-    +++ b/new.txt
-    @@ -0,0 +1,2 @@
-    +one
-    +two
-    """)
-
-
-class ChangedLinesTests(unittest.TestCase):
-    def test_added_lines_per_file(self):
-        self.assertEqual(changed_lines(DIFF), {"api/app.py": {2, 3}, "old.py": set(), "new.txt": {1, 2}})
-
-
 class ScanTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -111,7 +81,57 @@ class ScanTests(unittest.TestCase):
 
     def diff(self):
         commit_all(self.root, "pr")
-        return git_in(str(self.root))(["diff", "main..HEAD"])
+        return changes(git_in(str(self.root)), "main..HEAD")
+
+    EVAL = [{"id": "ev", "kind": "python-call", "pattern": "^eval$", "question": "q?"},
+            {"id": "rx", "pattern": "eval", "question": "q?"}]
+
+    def keys(self, changed=None):
+        return [h.key for h in scan(parse({"rules": self.EVAL}), self.root, changed or self.diff())]
+
+    def test_changes_lists_every_kind_of_change(self):
+        write(self.root, "new.txt", "one\ntwo\n")
+        git(self.root, "rm", "-q", "migrations/001.sql")
+        changed = self.diff()
+        self.assertEqual(changed, {"new.txt": {1, 2}, "migrations/001.sql": set()})
+
+    def test_diff_header_lookalike_in_content_does_not_hide_code(self):
+        write(self.root, "api/a.py", '"""\n++ /dev/null\n++ b/decoy.txt\n"""\neval(x)\n')
+        self.assertEqual(self.keys(), ["ev@api/a.py:5", "rx@api/a.py:5"])
+
+    def test_gitattributes_cannot_make_code_binary(self):
+        write(self.root, ".gitattributes", "*.py -diff\n")
+        write(self.root, "api/a.py", "eval(x)\n")
+        self.assertEqual(self.keys(), ["ev@api/a.py:1", "rx@api/a.py:1"])
+
+    def test_non_ascii_path(self):
+        write(self.root, "api/é.py", "eval(x)\n")
+        self.assertEqual(self.keys(), ["ev@api/é.py:1", "rx@api/é.py:1"])
+
+    def test_unreadable_file_is_a_hit_not_a_skip(self):
+        write(self.root, "api/big.py", "#\n" * 600_000 + "eval(x)\n")
+        self.assertEqual(len(self.keys()), 2)
+        self.assertTrue(all(":0" in k for k in self.keys(changes(git_in(str(self.root)), "main..HEAD"))))
+
+    def test_form_feeds_do_not_shift_lines(self):
+        write(self.root, "api/a.py", "# x\x0c \x0c \x0c \x0c\nok = 1\neval(x)\n")
+        self.assertEqual(self.keys(), ["ev@api/a.py:3", "rx@api/a.py:3"])
+
+    def test_lone_carriage_return_is_unreadable(self):
+        Path(self.root, "api/a.py").write_bytes(b"a = 1\rb = 2\neval(x)\n")
+        self.assertTrue(all(":0" in k for k in self.keys()))
+
+    def test_rename_mode_and_binary_reach_path_rules(self):
+        git(self.root, "mv", "api/routes.py", "api/moved.py")
+        Path(self.root, "api/blob.bin").write_bytes(bytes(range(256)))
+        rules = parse({"rules": [rule(kind="path", pattern="", paths=["api/"])]})
+        paths = sorted(h.path for h in scan(rules, self.root, self.diff()))
+        self.assertEqual(paths, ["api/blob.bin", "api/moved.py", "api/routes.py"])
+
+    def test_decorated_class(self):
+        write(self.root, "api/m.py", "@register\nclass Thing:\n    pass\n")
+        rules = parse({"rules": [rule(kind="python-decorator", pattern="register")]})
+        self.assertIn("class Thing", scan(rules, self.root, self.diff())[0].snippet)
 
     def test_python_decorator_requires(self):
         write(self.root, "api/routes.py", textwrap.dedent("""\
@@ -176,7 +196,7 @@ class ScanTests(unittest.TestCase):
     def test_symlink_is_not_followed(self):
         os.symlink("/etc/hostname", self.root / "api" / "link.py")
         hits = scan(parse({"rules": [rule(pattern=".")]}), self.root, self.diff())
-        self.assertEqual(hits, [])
+        self.assertEqual([(h.line, "could not read" in h.snippet) for h in hits], [(0, True)])  # never its target
 
     def test_rules_command(self):
         write(self.root, ".night-shift/review-rules.yml", "version: 1\nrules:\n  - id: p\n    pattern: 'print'\n"
@@ -244,10 +264,11 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(verdict, "pass")
         self.assertIn("- ✅ `r@a.py:1`: line 1 is fine", comment)
 
-    def test_no_rules_file_changes_nothing(self):
+    def test_missing_rules_file_is_an_error_not_a_pass(self):
         path = result_file(self.d, {"structured_output": {"verdict": "pass", "main_changed_overlap": False,
                                                           "answers": []}})
-        self.assertEqual(render_report(path, 0, os.path.join(self.d, "missing.json"))[0], "pass")
+        self.assertEqual(render_report(path, 0, os.path.join(self.d, "missing.json"))[0], "error")
+        self.assertEqual(render_report(path)[0], "pass")
 
     def test_security_high_finding_fails_a_pass(self):
         path = result_file(self.d, {"structured_output": {
@@ -364,6 +385,7 @@ class ConfigAndWiringTests(unittest.TestCase):
 
     def test_close_reason(self):
         self.assertEqual(close_reason(["review / security"]), "security_failed")
+        self.assertEqual(close_reason(["security"]), "checks_failed")
         self.assertEqual(close_reason(["review / verdict"]), "verdict_failed")
         self.assertEqual(close_reason(["test"]), "checks_failed")
 
@@ -413,10 +435,10 @@ class ReuseVerdictTests(unittest.TestCase):
     def update_branch(self):
         git(self.root, "merge", "-q", "--no-edit", "main")
 
-    def reuse(self, check="verdict"):
+    def reuse(self, check="verdict", before=None):
         from nightshift.review_tools import reusable_verdict
         return reusable_verdict(self.fake.gh(), git_in(str(self.root)), "main", check,
-                                config.BUILTIN_PROTECTED)
+                                config.BUILTIN_PROTECTED, self.prev if before is None else before)
 
     def test_unrelated_main_change_reuses(self):
         self.main_moves("web/page.py", "y = 2\n")
@@ -424,6 +446,26 @@ class ReuseVerdictTests(unittest.TestCase):
         prev, why = self.reuse()
         self.assertEqual(prev, self.prev)
         self.assertIn("only merged main", why)
+
+    def test_merge_must_sit_on_the_previous_head(self):
+        self.main_moves("web/page.py", "y = 2\n")
+        self.update_branch()
+        self.assertIn("previous head", self.reuse(before="0" * 40)[1])
+        self.assertIn("previous head", self.reuse(before="")[1])
+
+    def test_main_moving_again_after_the_merge_counts(self):
+        self.main_moves("web/page.py", "y = 2\n")
+        self.update_branch()
+        self.main_moves(".night-shift/review-rules.yml", "version: 1\nrules: []\n")
+        self.assertIn("review inputs", self.reuse()[1])
+
+    def test_other_jobs_with_the_same_short_name_do_not_count(self):
+        self.fake.check_runs[self.prev] = [
+            {"name": "ci / verdict", "status": "completed", "conclusion": "success"},
+            {"name": "review / verdict", "status": "in_progress", "conclusion": None}]
+        self.main_moves("web/page.py", "y = 2\n")
+        self.update_branch()
+        self.assertIn("did not pass", self.reuse()[1])
 
     def test_new_commit_from_the_agent_runs_in_full(self):
         write(self.root, "api/app.py", "x = 3\n")
@@ -449,7 +491,7 @@ class ReuseVerdictTests(unittest.TestCase):
         self.main_moves("web/page.py", "y = 2\n")
         self.update_branch()
         self.assertIn("did not pass", self.reuse()[1])
-        self.assertIn("no `security` check", self.reuse("security")[1])
+        self.assertIn("no `review / security` check", self.reuse("security")[1])
 
     def test_unreadable_checks_runs_in_full(self):
         self.fake.forbidden.add(r"commits/.*/check-runs")
@@ -465,7 +507,7 @@ class ReuseVerdictTests(unittest.TestCase):
         self.update_branch()
         with tempfile.TemporaryDirectory() as out:
             values = write_inputs(self.fake.gh(), git_in(str(self.root)), "main", "agent/api/issue-7", out,
-                                  pr_dir=str(self.root), reuse_check="verdict")
+                                  pr_dir=str(self.root), reuse_check="verdict", before=self.prev)
             self.assertEqual(values, {"reuse": self.prev})
             self.assertIn("**pass** (reused)", Path(out, "reuse.md").read_text())
 
@@ -488,6 +530,9 @@ class ReviewCallerPermissionTests(unittest.TestCase):
             write(d, ".github/workflows/night-shift-review.yml", "on: pull_request\njobs: {}\n")
             self.assertTrue(any("permissions block" in c.what for c in doctor.rules_checks(Path(d), cfg)))
             write(d, ".github/workflows/night-shift-review.yml", "permissions: write-all\njobs: {}\n")
+            self.assertTrue(any("permissions block" in c.what for c in doctor.rules_checks(Path(d), cfg)))
+            write(d, ".github/workflows/night-shift-review.yml", "permissions:\n  contents: read\njobs:\n  r:\n"
+                                                                 "    permissions:\n      id-token: write\n")
             self.assertTrue(any("permissions block" in c.what for c in doctor.rules_checks(Path(d), cfg)))
 
     def test_reusable_review_workflow_leaves_permissions_to_the_caller(self):

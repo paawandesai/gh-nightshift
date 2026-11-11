@@ -11,7 +11,7 @@ from collections.abc import Callable
 from . import review_rules
 from .config import BUILTIN_PROTECTED, Config, ConfigError, load as load_config
 from .gh import GH, GHError
-from .rules import BRANCH_RE, _matches, path_is_protected
+from .rules import BRANCH_RE, path_is_protected
 
 GitRunner = Callable[[list[str]], str]
 MAX_OVERLAP_DIFF = 40_000
@@ -19,7 +19,7 @@ MAX_OVERLAP_DIFF = 40_000
 
 def git_in(repo: str) -> GitRunner:
     def run(args: list[str]) -> str:
-        r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+        r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, errors="replace")
         if r.returncode != 0:
             raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
         return r.stdout
@@ -30,7 +30,7 @@ def drift_report(git: GitRunner, base_ref: str) -> tuple[str, str, list[str]]:
     """(diff of the PR, drift markdown, overlapping files). Drift = what changed on main since the PR's
     merge base: `git diff <merge-base>..<base_ref> --stat` plus the main-side diffs of files the PR touches."""
     mb = git(["merge-base", base_ref, "HEAD"]).strip()
-    pr_diff = git(["diff", f"{mb}..HEAD"])
+    pr_diff = git(["diff", *review_rules.DIFF_FLAGS, f"{mb}..HEAD"])
     def names(rng: str) -> set[str]:
         out = git(["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", "-z", rng])
         return {p for p in out.replace("\n", "\0").split("\0") if p}
@@ -58,17 +58,15 @@ def drift_report(git: GitRunner, base_ref: str) -> tuple[str, str, list[str]]:
 
 def security_trigger(cfg: Config | None, hits: list[review_rules.Hit], changed: list[str]) -> list[str]:
     """Why the security reviewer must run (empty: it need not)."""
-    if cfg is None:
-        return []
-    reasons = ["`security.always` is on"] if cfg.security_always else []
+    reasons = ["`security.always` is on"] if cfg is not None and cfg.security_always else []
     reasons += [f"security rule `{h.rule.id}` matched {h.path}" + (f":{h.line}" if h.line else "")
                 for h in hits if h.rule.security]
-    paths = cfg.security_trigger_paths
+    paths = cfg.security_trigger_paths if cfg is not None else []
     reasons += [f"{p} is under a security path" for p in changed if paths and path_is_protected(p, paths)]
     return reasons
 
 
-def write_rules(rules_root: str | None, pr_dir: str, diff: str, out: Path) -> dict[str, str]:
+def write_rules(rules_root: str | None, pr_dir: str, changed: dict[str, set[int]], out: Path) -> dict[str, str]:
     """Run the base branch's review rules over the PR and write what the reviewers need."""
     cfg = None
     rules: list[review_rules.Rule] = []
@@ -78,49 +76,54 @@ def write_rules(rules_root: str | None, pr_dir: str, diff: str, out: Path) -> di
         except ConfigError:
             cfg = None  # no or broken config: the rules still run, the security gate has no paths
         rules = review_rules.load(rules_root)
-    hits = review_rules.scan(rules, pr_dir, diff)
+    hits = review_rules.scan(rules, pr_dir, changed)
     cap = review_rules.MAX_HITS
     sec = [h for h in hits if h.rule.security]
     (out / "rules.md").write_text(review_rules.render(hits, cap), encoding="utf-8")
     (out / "security_rules.md").write_text(review_rules.render(sec, cap, "Security rules"), encoding="utf-8")
     (out / "rule_hits.json").write_text(json.dumps(review_rules.items(hits, cap)), encoding="utf-8")
     (out / "security_hits.json").write_text(json.dumps(review_rules.items(sec, cap)), encoding="utf-8")
-    reasons = security_trigger(cfg, hits, sorted(review_rules.changed_lines(diff)))
+    reasons = security_trigger(cfg, hits, sorted(changed))
     (out / "security_trigger.md").write_text(
         "# Why the security review ran\n\n" + "".join(f"- {r}\n" for r in reasons[:50]), encoding="utf-8")
     return {"rule_hits": str(len(hits)), "security": "true" if reasons else "false"}
 
 
 def _names(git: GitRunner, rng: str) -> set[str]:
-    out = git(["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", "-z", rng])
-    return {p for p in out.replace("\n", "\0").split("\0") if p}
+    out = git(["-c", "core.quotePath=false", "diff", "--name-only", "-z", *review_rules.DIFF_FLAGS, rng])
+    return {p for p in out.split("\0") if p}
 
 
 def reusable_verdict(gh: GH, git: GitRunner, base_ref: str, check: str,
-                     protected: list[str]) -> tuple[str, str]:
+                     protected: list[str], before: str = "") -> tuple[str, str]:
     """(previous head SHA, why) when this head only merged main into a PR whose last review passed, else ("", why).
 
     In strict mode the picker brings a PR up to date with `update-branch`, which adds a merge commit and re-runs
     the review. The earlier verdict still holds when all of these are true:
-    - HEAD is a merge whose second parent is on main (an update from main, nothing else);
+    - HEAD is a merge whose first parent is `before`, the PR's head before this push (from the pull_request
+      event), and whose second parent is on main (an update from main, nothing else);
     - the PR's own diff against its merge base is byte for byte what it was before the update;
-    - main changed none of the files the PR changes, and none of the protected paths (workflows, CLAUDE.md,
-      .night-shift/ with the review rules and prompts), so the reviewer would see the same inputs;
-    - the check `check` (verdict or security) completed with success on the previous head.
+    - main, from the reviewed merge base up to its current tip, changed none of the files the PR changes and
+      none of the protected paths (workflows, CLAUDE.md, .night-shift/ with the review rules and prompts), so
+      the reviewer would see the same inputs;
+    - every `review / <check>` run on the previous head completed with success.
     CI still runs on the merged result, so a semantic break that crosses files is caught by the tests."""
     try:
         parents = git(["rev-list", "--parents", "-n", "1", "HEAD"]).split()
         if len(parents) != 3:
             return "", "the new head is not a merge from main"
         _, prev, merged = parents
+        if not before or prev != before:
+            return "", "the merge's first parent is not this PR's previous head"
         git(["merge-base", "--is-ancestor", merged, base_ref])
         mb_prev = git(["merge-base", base_ref, prev]).strip()
         mb_now = git(["merge-base", base_ref, "HEAD"]).strip()
-        main_files = _names(git, f"{mb_prev}..{mb_now}")
+        main_files = _names(git, f"{mb_prev}..{base_ref}")
         overlap = sorted(main_files & _names(git, f"{mb_now}..HEAD"))
         if overlap:
             return "", f"main changed file(s) this PR changes: {', '.join(overlap[:5])}"
-        if git(["diff", f"{mb_prev}..{prev}"]) != git(["diff", f"{mb_now}..HEAD"]):
+        flags = review_rules.DIFF_FLAGS
+        if git(["diff", *flags, f"{mb_prev}..{prev}"]) != git(["diff", *flags, f"{mb_now}..HEAD"]):
             return "", "the PR's own changes differ from the reviewed head"
         guarded = sorted(f for f in main_files if path_is_protected(f, protected))
         if guarded:
@@ -128,21 +131,23 @@ def reusable_verdict(gh: GH, git: GitRunner, base_ref: str, check: str,
     except RuntimeError as err:
         return "", f"git could not establish it ({str(err)[:200]})"
     try:
-        runs = [r for r in gh.check_runs(prev) if _matches(check, r.get("name", ""))]
+        name = f"review / {check}"
+        runs = [r for r in gh.check_runs(prev) if r.get("name", "") == name]
     except GHError as err:
         return "", f"could not read checks on {prev[:12]} (HTTP {err.status}; the caller needs checks: read)"
     if not runs:
-        return "", f"no `{check}` check on the previous head {prev[:12]}"
-    latest = max(runs, key=lambda r: r.get("completed_at") or r.get("started_at") or "")
-    if (latest.get("status") or "").lower() != "completed" or (latest.get("conclusion") or "").lower() != "success":
-        return "", f"`{check}` on the previous head {prev[:12]} did not pass"
+        return "", f"no `{name}` check on the previous head {prev[:12]}"
+    if any((r.get("status") or "").lower() != "completed" or (r.get("conclusion") or "").lower() != "success"
+           for r in runs):
+        return "", f"`{name}` on the previous head {prev[:12]} did not pass"
     return prev, (f"this push only merged main into the PR. The PR's own diff is unchanged since {prev[:12]}, "
                   f"where `{check}` passed; main changed {len(main_files)} file(s), none of them touched by this PR "
                   "and none of them review inputs. CI still runs on the merged result.")
 
 
 def write_inputs(gh: GH, git: GitRunner, base_ref: str, head_ref: str, out_dir: str,
-                 rules_root: str | None = None, pr_dir: str = ".", reuse_check: str = "") -> dict[str, str]:
+                 rules_root: str | None = None, pr_dir: str = ".", reuse_check: str = "",
+                 before: str = "") -> dict[str, str]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     if reuse_check:
@@ -152,14 +157,15 @@ def write_inputs(gh: GH, git: GitRunner, base_ref: str, head_ref: str, out_dir: 
                 protected = load_config(rules_root).protected_paths
             except ConfigError:
                 pass
-        prev, why = reusable_verdict(gh, git, base_ref, reuse_check, protected)
+        prev, why = reusable_verdict(gh, git, base_ref, reuse_check, protected, before)
         (out / "reuse.md").write_text(f"### Night-shift {'security review' if 'security' in reuse_check else 'review'}"
                                       f": **pass** (reused)\n\nVerdict reused: {why}\n" if prev else
                                       f"Full review: {why}\n", encoding="utf-8")
         if prev:
             return {"reuse": prev}
     diff, drift, overlap = drift_report(git, base_ref)
-    rule_values = write_rules(rules_root, pr_dir, diff, out)
+    mb = git(["merge-base", base_ref, "HEAD"]).strip()
+    rule_values = write_rules(rules_root, pr_dir, review_rules.changes(git, f"{mb}..HEAD"), out)
     (out / "diff.patch").write_text(diff, encoding="utf-8")
     (out / "drift.md").write_text(drift, encoding="utf-8")
     m = BRANCH_RE.match(head_ref)
@@ -209,6 +215,8 @@ def render_report(result_path: str, overlap: int = 0, rules_path: str | None = N
     if verdict == "error":
         return verdict, "Review run failed to produce a verdict; see the job log. The attempt is not counted.\n"
     listed = _load_json(rules_path)
+    if rules_path and "items" not in listed:
+        return "error", f"The rule hits file {rules_path} is missing or unreadable; see the job log.\n"
     lines = [f"### Night-shift review: **{verdict}**", ""]
     for a in out.get("answers") or []:
         q = str(a.get("question", ""))
@@ -251,6 +259,8 @@ def render_security_report(result_path: str, rules_path: str | None = None) -> t
     if verdict == "error":
         return verdict, "Security review failed to produce a verdict; see the job log. The attempt is not counted.\n"
     listed = _load_json(rules_path)
+    if rules_path and "items" not in listed:
+        return "error", f"The rule hits file {rules_path} is missing or unreadable; see the job log.\n"
     findings = [f for f in out.get("findings") or [] if isinstance(f, dict)]
     lines = ["### Night-shift security review: **pass**", ""]
     if findings:

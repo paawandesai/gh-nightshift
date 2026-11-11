@@ -311,7 +311,9 @@ so agents cannot change the rules that judge them. An annotated example is
 | `python-decorator` | Added or changed functions with a decorator matching `pattern`; with `requires`, only those lacking a decorator matching `requires` (a route without its auth wrapper) |
 | `path` | Every changed, added or deleted file under `paths` / matching `glob` |
 
-Every rule may narrow itself with `paths` and `glob`, and has a `severity` (`low` to `critical`). Run
+Every rule may narrow itself with `paths` and `glob`, and has a `severity` (`low` to `critical`). Rules are
+selectors that guarantee the reviewer looks at matching code; they are not a security boundary on their own
+(an aliased import can avoid a `python-call` pattern), and a file a rule cannot read becomes a check-by-hand hit. Run
 `gh nightshift rules` on a branch to see the checklist a PR would get, and `doctor` to validate the file.
 
 **The security gate.** With `security: {enabled: true}`, a second read-only reviewer runs as the required check

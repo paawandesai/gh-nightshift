@@ -448,11 +448,11 @@ def cmd_rules(ctx: Ctx) -> int:
     try:
         rules = review_rules.load(ctx.root)
         base = git(["merge-base", ctx.args.base, "HEAD"]).strip()
-        diff = git(["diff", f"{base}..HEAD"])
+        changed = review_rules.changes(git, f"{base}..HEAD")
     except (review_rules.RulesError, RuntimeError) as err:
         ctx.say(str(err))
         return 2
-    hits = review_rules.scan(rules, ctx.root, diff)
+    hits = review_rules.scan(rules, ctx.root, changed)
     ctx.say(f"{len(rules)} rule(s) in {review_rules.RULES_PATH}, {len(hits)} hit(s) in {ctx.args.base}...HEAD", "")
     ctx.out.write(review_rules.render(hits, review_rules.MAX_HITS))
     return 0
@@ -797,7 +797,8 @@ def cmd_review_inputs(ctx: Ctx) -> int:
 
     a = ctx.args
     values = write_inputs(ctx.gh, git_in(a.pr_dir), a.base_ref, a.head_ref, a.out_dir,
-                          rules_root=a.rules_root, pr_dir=a.pr_dir, reuse_check=a.reuse_check or "")
+                          rules_root=a.rules_root, pr_dir=a.pr_dir, reuse_check=a.reuse_check or "",
+                          before=a.before or "")
     write_outputs(a.github_output, values)
     ctx.say(json.dumps(values))
     return 0
@@ -1002,6 +1003,7 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument(flag, required=True)
     s.add_argument("--rules-root", help="base-branch checkout holding .night-shift/review-rules.yml and the config")
     s.add_argument("--reuse-check", help="check name (verdict, security): reuse its pass when only main moved")
+    s.add_argument("--before", help="the PR's head before this push (github.event.before); reuse needs it")
     s.add_argument("--github-output")
     s = sub.add_parser("review-report", parents=[common])
     s.add_argument("--result", required=True)

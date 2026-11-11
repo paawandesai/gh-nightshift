@@ -75,6 +75,8 @@ jobs:
       PR: ${{ github.event.pull_request.number }}
       HEAD_REF: ${{ github.head_ref }}
       BASE_REF: ${{ github.base_ref }}
+      # The PR's head before this push (pull_request synchronize); verdict reuse requires the merge to sit on it.
+      BEFORE: ${{ github.event.action == 'synchronize' && github.event.before || '' }}
       PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
       # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the PAT.
       PYTHONSAFEPATH: "1"
@@ -116,7 +118,7 @@ jobs:
           git -C pr -c "http.https://github.com/.extraheader=$AUTH" fetch -q origin "$BASE_REF"
           python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
             --out-dir "$WORK" --rules-root base --github-output "$GITHUB_OUTPUT" \
-            --reuse-check "${{ inputs.reuse_verdict && 'verdict' || '' }}"
+            --reuse-check "${{ inputs.reuse_verdict && 'verdict' || '' }}" --before "$BEFORE"
 
       - name: Reuse the passed verdict (only main moved)
         if: steps.gather.outputs.reuse != ''
@@ -201,6 +203,8 @@ jobs:
       PR: ${{ github.event.pull_request.number }}
       HEAD_REF: ${{ github.head_ref }}
       BASE_REF: ${{ github.base_ref }}
+      # The PR's head before this push (pull_request synchronize); verdict reuse requires the merge to sit on it.
+      BEFORE: ${{ github.event.action == 'synchronize' && github.event.before || '' }}
       PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
       PYTHONSAFEPATH: "1"
     steps:
@@ -239,7 +243,7 @@ jobs:
           git -C pr -c "http.https://github.com/.extraheader=$AUTH" fetch -q origin "$BASE_REF"
           python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
             --out-dir "$WORK" --rules-root base --github-output "$GITHUB_OUTPUT" \
-            --reuse-check "${{ inputs.reuse_verdict && 'security' || '' }}"
+            --reuse-check "${{ inputs.reuse_verdict && 'security' || '' }}" --before "$BEFORE"
 
       - name: Reuse the passed security verdict (only main moved)
         if: steps.gather.outputs.reuse != ''
