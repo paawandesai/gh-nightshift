@@ -109,6 +109,9 @@ class Config:
     security_model: str = ""  # default: review_model
     security_paths: list[str] = field(default_factory=list)
     security_always: bool = False
+    reduce_enabled: bool = False  # the nightly cross-lane pass (see reduce.py); runs in the planner workflow
+    reduce_schedule: str = "30 6 * * *"
+    reduce_window_hours: int = 48  # above the daily period, so a late or failed run is caught up
     extends: str = ""  # owner/repo whose .night-shift/config.yml is the org-wide base (`gh nightshift config pull`)
     digest_enabled: bool = True
     digest_schedule: str = "0 7 * * *"
@@ -212,6 +215,41 @@ def _check_runner_split(github: list[str], agent: list[str]) -> None:
                           "carrying both sets would put the agent on a machine with the GitHub token")
 
 
+_CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+_CRON_NAMES = ({}, {}, {},
+               {m: i + 1 for i, m in enumerate("JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split())},
+               {d: i for i, d in enumerate("SUN MON TUE WED THU FRI SAT".split())})
+
+
+def cron_values(field: str, index: int) -> set[int] | None:
+    """The values one cron field matches (`*`, values, ranges, steps, JAN/MON names), or None if invalid."""
+    lo, hi = _CRON_RANGES[index]
+    out: set[int] = set()
+    for item in field.split(","):
+        m = re.fullmatch(r"(\*|[0-9A-Za-z]+(?:-[0-9A-Za-z]+)?)(?:/([0-9]{1,2}))?", item)
+        if not m or (m.group(2) is not None and int(m.group(2)) == 0):
+            return None
+        if m.group(1) == "*":
+            a, b = lo, hi
+        else:
+            ends = []
+            for v in m.group(1).split("-"):
+                n = _CRON_NAMES[index].get(v.upper()) if not v.isdigit() else int(v)
+                if n is None or not lo <= n <= hi:
+                    return None
+                ends.append(n)
+            a, b = ends[0], ends[-1]
+            if a > b:
+                return None
+        out |= set(range(a, b + 1, int(m.group(2) or 1)))
+    return out
+
+
+def cron_ok(expr: str) -> bool:
+    fields = expr.split()
+    return len(fields) == 5 and all(cron_values(f, i) is not None for i, f in enumerate(fields))
+
+
 def parse(data: dict) -> Config:
     if not isinstance(data, dict):
         raise ConfigError("config must be a mapping")
@@ -273,7 +311,7 @@ def parse(data: dict) -> Config:
         planner_id_prefixes=planner.get("id_prefixes", {}),
         planner_human_paths=planner.get("human_paths", ["contracts/"]),
         planner_token_secret=planner.get("claude_token_secret", lanes[0].token_secret),
-        planner_schedule=planner.get("schedule", "17 * * * *"),
+        planner_schedule=" ".join(str(planner.get("schedule", "17 * * * *")).split()),
         review_token_secret=data.get("review_token_secret", "CLAUDE_TOKEN_REVIEW"),
         ci_workflow_name=data.get("ci_workflow_name", ""),
         tool_ref=data.get("tool_ref", "main"),
@@ -295,6 +333,9 @@ def parse(data: dict) -> Config:
         security_model=security.get("model", ""),
         security_paths=list(security.get("paths", [])),
         security_always=security.get("always") is True,
+        reduce_enabled=(data.get("reduce") or {}).get("enabled") is True,
+        reduce_schedule=" ".join(str((data.get("reduce") or {}).get("schedule", "30 6 * * *")).split()),
+        reduce_window_hours=int((data.get("reduce") or {}).get("window_hours", 48)),
         extends=data.get("extends", ""),
         digest_enabled=(data.get("digest") or {}).get("enabled", True),
         digest_schedule=str((data.get("digest") or {}).get("schedule", "0 7 * * *")),
@@ -328,6 +369,19 @@ def parse(data: dict) -> Config:
         raise ConfigError("digest.webhook_secret must be a secret name (A-Z, 0-9, _)")
     if cfg.digest_webhook_secret in pats_or_claude(cfg):
         raise ConfigError("digest.webhook_secret must not be a PAT or Claude token secret")
+    if cfg.reduce_enabled:
+        if not cron_ok(cfg.reduce_schedule):
+            raise ConfigError(f"reduce.schedule {cfg.reduce_schedule!r} is not a 5-field cron expression")
+        if cfg.planner_refill_below > 0:
+            if not cron_ok(cfg.planner_schedule):
+                raise ConfigError(f"planner.schedule {cfg.planner_schedule!r} is not a 5-field cron expression")
+            if cron_values(cfg.reduce_schedule.split()[0], 0) & cron_values(cfg.planner_schedule.split()[0], 0):
+                raise ConfigError("reduce.schedule must use minutes planner.schedule never uses (the planner tells "
+                                  "the two timers apart by cron, so they must never fire on the same tick)")
+        if not cfg.planner_enabled:
+            raise ConfigError("reduce runs in the planner workflow: it needs planner.enabled")
+    if not 1 <= cfg.reduce_window_hours <= 168:
+        raise ConfigError("reduce.window_hours must be between 1 and 168")
     if cfg.fix_lane and cfg.fix_lane not in names:
         raise ConfigError(f"fix_lane {cfg.fix_lane!r} is not a lane")
     unknown = sorted(set(cfg.planner_id_prefixes) - set(names))

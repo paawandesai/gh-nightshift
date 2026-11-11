@@ -18,7 +18,8 @@ Types
   handoff-data  in the body of a PR the PAT opened: the agent's `handoff` output, read at merge time
   handoff-done  on a merged PR once its hand-offs went out (idempotence)
   note-sent     on the sender issue, one per note, so the cap of notes per issue can be counted
-  plan          on the night-log issue after a planner run: {"mode","lane","complete","docs_sha"}
+  plan          on the night-log issue after a planner run: {"mode","lane","complete","docs_sha"}; a reduce
+                run has lane "reduce" and "prs" (the merged PRs it covered, "12,15")
 """
 from __future__ import annotations
 
