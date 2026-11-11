@@ -60,6 +60,7 @@ class FakeGitHub:
         self.other_repos: dict[str, dict] = {}  # "org/other": {"issues": {n: issue}, "contents": {path: text}}
         self.contents: dict[str, str] = {}      # files in this repo, served by GET contents/<path>
         self.pull_files: dict[int, list[str]] = {}
+        self.advisories: list[dict] = []
         self._ids = itertools.count(1000)
 
     # --- building state ----------------------------------------------------------------
@@ -206,6 +207,8 @@ class FakeGitHub:
                                                                   or r.get("head_sha") == q["head_sha"]],
                                                              "workflow_runs"))),
             (r"contents/(.+)", ("GET", self._contents)),
+            (r"security-advisories", ("GET", lambda q, b: copy.deepcopy(self.advisories[::-1]))),
+            (r"security-advisories", ("POST", self._create_advisory)),
             (r"commits", ("GET", lambda q, b: self.commits_by_path.get(q.get("path", ""), [])[: int(q.get("per_page", 30))])),
         ]
 
@@ -215,6 +218,13 @@ class FakeGitHub:
         per, page = int(q.get("per_page", 30)), int(q.get("page", 1))
         chunk = items[(page - 1) * per: page * per]
         return {key: chunk, "total_count": len(items)} if key else chunk
+
+    def _create_advisory(self, q, b):
+        n = len(self.advisories) + 1
+        adv = {**copy.deepcopy(b), "ghsa_id": f"GHSA-test-{n:04d}", "state": "draft", "author": {"login": self.login},
+               "html_url": f"https://github.com/{self.repo}/security/advisories/GHSA-test-{n:04d}"}
+        self.advisories.append(adv)
+        return adv
 
     def _list_issues(self, q, b):
         state = q.get("state", "open")

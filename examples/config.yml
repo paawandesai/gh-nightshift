@@ -47,6 +47,10 @@ review:
 #   claude_token_secret: CLAUDE_TOKEN_SECURITY   # default: review_token_secret
 #   paths: [api/auth/, api/billing/]             # always reviewed, as are risk.approve_paths
 #   always: false                                # true: review every agent PR
+# redteam:                     # optional: daily attacker's pass over main, filed as private advisories
+#   enabled: true
+#   schedule: "0 5 * * *"
+#   min_severity: high         # file high and critical; lower ones are only counted
 # reduce:                      # optional: nightly cross-lane pass over merged agent PRs (see README, "Reduce")
 #   enabled: true
 #   schedule: "30 6 * * *"     # UTC; no minute in common with planner.schedule

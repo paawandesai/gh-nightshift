@@ -111,6 +111,11 @@ class Config:
     security_always: bool = False
     reduce_enabled: bool = False  # the nightly cross-lane pass (see reduce.py); runs in the planner workflow
     reduce_schedule: str = "30 6 * * *"
+    redteam_enabled: bool = False  # scheduled red-team scan of main, filed as private advisories (see redteam.py)
+    redteam_schedule: str = "0 5 * * *"
+    redteam_min_severity: str = "high"
+    redteam_token_secret: str = ""  # default: the security reviewer's token
+    redteam_model: str = ""  # default: security.model, then models.review
     reduce_window_hours: int = 48  # above the daily period, so a late or failed run is caught up
     extends: str = ""  # owner/repo whose .night-shift/config.yml is the org-wide base (`gh nightshift config pull`)
     digest_enabled: bool = True
@@ -127,6 +132,10 @@ class Config:
     @property
     def security_token(self) -> str:
         return self.security_token_secret or self.review_token_secret
+
+    @property
+    def redteam_token(self) -> str:
+        return self.redteam_token_secret or self.security_token
 
     @property
     def security_trigger_paths(self) -> list[str]:
@@ -171,6 +180,8 @@ class Config:
         names = {self.github_secret, self.review_token_secret, self.planner_token_secret or self.lanes[0].token_secret}
         if self.security_enabled:
             names.add(self.security_token)
+        if self.redteam_enabled:
+            names.add(self.redteam_token)
         for lane in self.lanes:
             names.add(lane.token_secret)
             if lane.pat_secret:
@@ -334,6 +345,11 @@ def parse(data: dict) -> Config:
         security_paths=list(security.get("paths", [])),
         security_always=security.get("always") is True,
         reduce_enabled=(data.get("reduce") or {}).get("enabled") is True,
+        redteam_enabled=(data.get("redteam") or {}).get("enabled") is True,
+        redteam_schedule=" ".join(str((data.get("redteam") or {}).get("schedule", "0 5 * * *")).split()),
+        redteam_min_severity=str((data.get("redteam") or {}).get("min_severity", "high")),
+        redteam_token_secret=str((data.get("redteam") or {}).get("claude_token_secret", "")),
+        redteam_model=str((data.get("redteam") or {}).get("model", "")),
         reduce_schedule=" ".join(str((data.get("reduce") or {}).get("schedule", "30 6 * * *")).split()),
         reduce_window_hours=int((data.get("reduce") or {}).get("window_hours", 48)),
         extends=data.get("extends", ""),
@@ -358,7 +374,7 @@ def parse(data: dict) -> Config:
         if any(lane.pat_secret for lane in cfg.lanes):
             raise ConfigError("auth.mode app replaces every PAT: remove agent_pat_secret from the lanes")
         if cfg.app_key_secret in claude_secrets(cfg) | {cfg.planner_token_secret, cfg.review_token_secret,
-                                                        cfg.security_token}:
+                                                        cfg.security_token, cfg.redteam_token}:
             raise ConfigError(f"secret {cfg.app_key_secret} is used both as a Claude token and as the App key")
     if cfg.risk_default not in ("auto", "approve"):
         raise ConfigError(f"risk.default must be auto or approve, not {cfg.risk_default!r}")
@@ -380,6 +396,12 @@ def parse(data: dict) -> Config:
                                   "the two timers apart by cron, so they must never fire on the same tick)")
         if not cfg.planner_enabled:
             raise ConfigError("reduce runs in the planner workflow: it needs planner.enabled")
+    if cfg.redteam_enabled and not cron_ok(cfg.redteam_schedule):
+        raise ConfigError(f"redteam.schedule {cfg.redteam_schedule!r} is not a 5-field cron expression")
+    if cfg.redteam_min_severity not in ("low", "medium", "high", "critical"):
+        raise ConfigError("redteam.min_severity must be low, medium, high or critical")
+    if cfg.redteam_token_secret and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cfg.redteam_token_secret):
+        raise ConfigError("redteam.claude_token_secret must be a secret name (A-Z, 0-9, _)")
     if not 1 <= cfg.reduce_window_hours <= 168:
         raise ConfigError("reduce.window_hours must be between 1 and 168")
     if cfg.fix_lane and cfg.fix_lane not in names:
@@ -389,7 +411,8 @@ def parse(data: dict) -> Config:
         raise ConfigError(f"planner.id_prefixes names unknown lane(s): {', '.join(unknown)}")
     # A Claude token secret that is also a PAT secret would hand the PAT to the agent job.
     pats = {"AGENT_PAT"} | {lane.agent_pat_secret for lane in lanes}  # AGENT_PAT is always passed as fallback
-    claude = claude_secrets(cfg) | {cfg.planner_token_secret, cfg.review_token_secret, cfg.security_token}
+    claude = claude_secrets(cfg) | {cfg.planner_token_secret, cfg.review_token_secret, cfg.security_token,
+                                    cfg.redteam_token}
     clash = sorted(pats & claude)
     if clash:
         raise ConfigError(f"secret(s) {', '.join(clash)} used both as a Claude token and as a PAT: the agent job "
@@ -404,7 +427,7 @@ def claude_secrets(cfg: Config) -> set[str]:
 
 
 def pats_or_claude(cfg: Config) -> set[str]:
-    return ({"AGENT_PAT", cfg.planner_token_secret, cfg.review_token_secret, cfg.security_token}
+    return ({"AGENT_PAT", cfg.planner_token_secret, cfg.review_token_secret, cfg.security_token, cfg.redteam_token}
             | claude_secrets(cfg) | {lane.agent_pat_secret for lane in cfg.lanes})
 
 

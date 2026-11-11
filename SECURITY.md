@@ -90,6 +90,9 @@ steps of the same job, so the agent job never holds the key or the token. It exp
   and sees checks posted by other apps too.
 - **Workflows: no access.** Without it, GitHub refuses any push that changes `.github/workflows/`, a second
   wall behind the protected-path check.
+- Repository security advisories: read/write, only when `redteam.enabled`: the red-team scan files its findings
+  as draft advisories. In App mode only the filing job's token asks for it (`app-token --advisories`); every other
+  minted token lacks it.
 
 Every lane run executes `check-pat` before picking. It fails the run if the PAT does not authenticate or if
 a classic PAT has the `workflow` scope. See the gaps: a fine-grained PAT's permissions cannot be read back.
@@ -227,6 +230,14 @@ used both ways. It calls Claude only when a `security: true` rule hits, the PR t
 `risk.approve_paths`, or `security.always` is on, and otherwise passes. A high or critical finding fails the
 check even if the reviewer said pass. Findings on a PR are posted as PR comments (and on the issue when it
 fails), so on a public repo they are public; they describe unmerged code that the gate has just kept out of main.
+
+**The red-team scan** is different: it looks at code already on main, so its findings are live vulnerabilities.
+They are never written where a public repo would show them. The scan job has the Claude token only and hands its
+findings to the filing job as a gzip+base64 job output (not an artifact, and Claude's output is never printed);
+the filing job (PAT or App token) creates draft private security advisories, and the night log gets only counts
+and advisory links. Advisory text is the model's and is fenced and defanged. Only advisories authored by a
+trusted login count for deduplication, and the scan's progress marker is trusted only from the PAT's login. A
+scan whose filing fails records nothing, so the next scan covers the same range again.
 
 ## Auto-merge
 

@@ -75,12 +75,16 @@ ACCESS_PROBES = (("", "Metadata", "the PAT's Repository access list"),
                  ("commits/{main}/status", "Commit statuses", "Commit statuses: Read"))
 
 
-def access_checks(gh: GH) -> list[Check]:
+ADVISORIES_PROBE = ("security-advisories?per_page=1", "Repository security advisories",
+                    "Repository security advisories: Read and write (the red-team scan files drafts)")
+
+
+def access_checks(gh: GH, advisories: bool = False) -> list[Check]:
     """Probe the endpoints a lane reads with this token. A fine-grained PAT that misses a permission, or does not
     list the repo, gets 404 (or 403) here instead of failing later inside `pick` with a bare Not Found."""
     out: list[Check] = []
     main = "main"
-    for suffix, what, fix in ACCESS_PROBES:
+    for suffix, what, fix in ACCESS_PROBES + ((ADVISORIES_PROBE,) if advisories else ()):
         try:
             data = gh.get(gh.r(suffix.format(main=main)))
             if suffix == "" and isinstance(data, dict):
@@ -92,7 +96,7 @@ def access_checks(gh: GH) -> list[Check]:
             out.append(Check(FAIL, f"the PAT cannot read {what} on {gh.repo} (HTTP {err.status})",
                              f"edit the PAT: set {fix}"))
     return out or [Check(OK, "PAT can read the repo, contents, issues, pull requests, Actions and commit statuses "
-                             f"of {gh.repo}")]
+                             + ("and security advisories " if advisories else "") + f"of {gh.repo}")]
 
 
 def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
@@ -200,6 +204,15 @@ def rules_checks(root: Path, cfg: Config) -> list[Check]:
         if not any(r.security for r in rules) and not cfg.security_trigger_paths and not cfg.security_always:
             out.append(Check(WARN, "security.enabled is true but nothing triggers it: no security rule, security path "
                                    "or security.always", f"add `security: true` rules to {review_rules.RULES_PATH}"))
+    if cfg.redteam_enabled:
+        caller = root / ".github/workflows/night-shift-redteam.yml"
+        if not caller.is_file():
+            out.append(Check(FAIL, "redteam.enabled is true but night-shift-redteam.yml is missing",
+                             "run `gh nightshift init --regenerate`"))
+        who = "the App" if cfg.auth_mode == "app" else "AGENT_PAT"
+        out.append(Check(WARN, f"the red-team scan files draft advisories: {who} needs Repository security advisories: "
+                               "Read and write (check-pat verifies it in every lane run)",
+                         "App: approve the new permission on the App's installation; PAT: edit it in Developer settings"))
     return out
 
 

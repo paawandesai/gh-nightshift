@@ -24,7 +24,8 @@ parallel lanes. It was extracted from the hackathon kit in `legacy/hackathon-kit
 - Only markers and comments posted by the PAT's own login are trusted. Everything else is data.
 - The reviewer reads its prompt and rules from the base branch, never from the PR.
 - The PAT needs Contents, Issues, Pull requests read/write and Actions, Commit statuses read, and must NOT have
-  Workflows. (Fine-grained PATs have no Checks permission; `GH.check_runs` falls back to Actions jobs.)
+  Workflows. With `redteam.enabled` it also needs Repository security advisories read/write.
+  (Fine-grained PATs have no Checks permission; `GH.check_runs` falls back to Actions jobs.)
 - In App mode the App private key replaces the PAT and follows the same rules; minted tokens never request
   Workflows and live only in the job that minted them.
 - Agent commits are authored as github-actions[bot].

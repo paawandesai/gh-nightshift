@@ -25,6 +25,8 @@ API = "https://api.github.com"
 PERMISSIONS = {"contents": "write", "issues": "write", "pull_requests": "write", "actions": "read",
                "checks": "read", "statuses": "read", "metadata": "read"}
 FORBIDDEN = {"workflows", "administration", "secrets", "environments", "organization_administration"}
+# Asked for only by the job that files red-team advisories (`app-token --advisories`); every other token lacks it.
+ADVISORIES = {"repository_advisories": "write"}
 
 
 class AppError(RuntimeError):
@@ -37,7 +39,7 @@ def manifest(name: str = "night-shift", url: str = "https://github.com/paawandes
         "name": name,
         "url": url,
         "public": False,
-        "default_permissions": dict(PERMISSIONS),
+        "default_permissions": {**PERMISSIONS, **ADVISORIES},
         "default_events": [],
         "hook_attributes": {"active": False},
         "description": "Runs gh-nightshift lanes: opens and merges agent PRs, comments on issues. No Workflows access.",
@@ -85,30 +87,73 @@ def http(method: str, path: str, token: str, body: Any = None) -> Any:
 
 
 def mint(repo: str, app_id: str, key_pem: str, request: Callable[..., Any] | None = None,
-         sign: Callable[[bytes, str], bytes] | None = None) -> dict:
+         sign: Callable[[bytes, str], bytes] | None = None, advisories: bool = False) -> dict:
     """Return {"token", "login", "permissions", "expires_at"} for an installation token limited to `repo`."""
     if not app_id or not key_pem.strip():
         raise AppError("the App id and private key are both required")
     request = request or http  # looked up at call time, so tests can patch it
     owner, _, name = repo.partition("/")
+    wanted = {**PERMISSIONS, **(ADVISORIES if advisories else {})}
     token = jwt(app_id, key_pem, sign=sign)
     app = request("GET", "/app", token) or {}
     inst = request("GET", f"/repos/{owner}/{name}/installation", token) or {}
     if not inst.get("id"):
         raise AppError(f"the App is not installed on {repo}")
     data = request("POST", f"/app/installations/{inst['id']}/access_tokens", token,
-                   {"repositories": [name], "permissions": dict(PERMISSIONS)}) or {}
+                   {"repositories": [name], "permissions": wanted}) or {}
     perms = data.get("permissions") or {}
     # Allowlist: nothing beyond what was requested, at no higher level.
     rank = {"read": 1, "write": 2, "admin": 3}
     bad = sorted(k for k, v in perms.items()
-                 if k in FORBIDDEN or k not in PERMISSIONS or rank.get(v, 9) > rank[PERMISSIONS[k]])
+                 if k in FORBIDDEN or k not in wanted or rank.get(v, 9) > rank[wanted[k]])
     if bad:
         raise AppError(f"the minted token has permissions beyond what night shift asked for: {', '.join(bad)}")
     if not data.get("token"):
         raise AppError("GitHub returned no installation token")
     return {"token": data["token"], "login": f"{app.get('slug', '')}[bot]" if app.get("slug") else "",
             "permissions": perms, "expires_at": data.get("expires_at", "")}
+
+
+READ_ONLY = {"metadata": "read", "issues": "read"}
+
+
+def installations(app_id: str, key_pem: str, request: Callable[..., Any] | None = None,
+                  sign: Callable[[bytes, str], bytes] | None = None) -> dict:
+    """Where the App is installed and when it last acted: {"slug", "installations": [{account, type,
+    selection, created, suspended, repos: [{name, private, last_comment}]}]}. Each installation gets a read-only
+    token (metadata and issues) to list its repositories and find the App's newest issue or PR comment in each."""
+    if not app_id or not key_pem.strip():
+        raise AppError("the App id and private key are both required")
+    request = request or http
+    token = jwt(app_id, key_pem, sign=sign)
+    app = request("GET", "/app", token) or {}
+    login = f"{app.get('slug', '')}[bot]"
+    out = []
+    for inst in request("GET", "/app/installations?per_page=100", token) or []:
+        account = inst.get("account") or {}
+        row = {"account": account.get("login", "?"), "type": account.get("type", "?"),
+               "selection": inst.get("repository_selection", "?"), "created": inst.get("created_at", ""),
+               "suspended": inst.get("suspended_at") or "", "repos": []}
+        if not row["suspended"]:
+            data = request("POST", f"/app/installations/{inst['id']}/access_tokens", token,
+                           {"permissions": dict(READ_ONLY)}) or {}
+            perms = data.get("permissions") or {}
+            if any(v != "read" for v in perms.values()):
+                raise AppError("the read-only listing token came back with write permissions")
+            itoken = data.get("token") or ""
+            listing = request("GET", "/installation/repositories?per_page=100", itoken) or {}
+            for repo in listing.get("repositories") or []:
+                name = repo.get("full_name", "?")
+                try:
+                    comments = request("GET", f"/repos/{name}/issues/comments?sort=created&direction=desc&per_page=100",
+                                       itoken) or []
+                except AppError:
+                    comments = []
+                mine = [c.get("created_at", "") for c in comments if (c.get("user") or {}).get("login") == login]
+                row["repos"].append({"name": name, "private": bool(repo.get("private")),
+                                     "last_comment": max(mine) if mine else ""})
+        out.append(row)
+    return {"slug": app.get("slug", ""), "installations": out}
 
 
 def write_github_env(path: str, result: dict) -> None:

@@ -1,0 +1,162 @@
+# gh-nightshift: the red-team scan. A read-only attacker's pass over what changed on main since the last scan.
+#   context  (GITHUB_TOKEN, read)   decide whether to scan; run the security rules; write the scan context
+#   scan     (Claude token only)    read-only Claude run -> findings, passed on as a job output (never an
+#                                   artifact or a log line: on a public repo both are readable by anyone)
+#   file     (PAT or App token)     file new findings as DRAFT private security advisories; record the commit
+name: night-shift-redteam
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        description: Runner labels (JSON) for the jobs that hold a GitHub token or the App key
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
+      agent_runs_on:
+        description: Runner labels (JSON) for the Claude-only scan job; never a box that runs the token jobs
+        type: string
+        required: false
+        default: '"ubuntu-latest"'
+      full:
+        description: Scan the whole tree instead of only what changed since the last scan
+        type: boolean
+        required: false
+        default: false
+      model:
+        type: string
+        required: false
+        default: opus
+      tool_repo:
+        type: string
+        required: false
+        default: paawandesai/gh-nightshift
+      tool_ref:
+        type: string
+        required: false
+        default: main
+      app_id:
+        description: GitHub App id (auth.mode app); empty means the PAT
+        type: string
+        required: false
+        default: ""
+    secrets:
+      claude_token:
+        required: false
+      agent_pat:
+        required: false   # one of agent_pat or app_id + app_private_key
+      app_private_key:
+        required: false
+
+env:
+  REPO: ${{ github.repository }}
+  PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+  # Never import from the checked-out repo: a planted json.py or nightshift/ would run with the token.
+  PYTHONSAFEPATH: "1"
+
+jobs:
+  context:
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 15
+    outputs:
+      run: ${{ steps.ctx.outputs.run }}
+      sha: ${{ steps.ctx.outputs.sha }}
+      base: ${{ steps.ctx.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - name: Scan context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          FULL: ${{ inputs.full }}
+        run: |
+          set --
+          if [ "$FULL" = "true" ]; then set -- --full; fi
+          python3 -m nightshift redteam context --out-dir "$RUNNER_TEMP/redteam" --github-output "$GITHUB_OUTPUT" "$@"
+      - uses: actions/upload-artifact@v4
+        if: steps.ctx.outputs.run == 'true'
+        with:
+          name: redteam-context
+          path: ${{ runner.temp }}/redteam
+          retention-days: 3
+
+  scan:
+    needs: context
+    if: needs.context.outputs.run == 'true'
+    runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
+    timeout-minutes: 60
+    outputs:
+      findings: ${{ steps.scan.outputs.findings }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.context.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: redteam-context
+          path: ${{ runner.temp }}/redteam
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        run: |
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
+      - name: Scan (read-only)
+        id: scan
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          MODEL: ${{ vars.REDTEAM_MODEL || inputs.model }}
+        # Findings stay out of the log: only the exit code and sizes are printed.
+        run: |
+          set -uo pipefail
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::red-team Claude token is empty"; exit 1; fi
+          P="$RUNNER_TEMP/redteam"
+          claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
+            --model "$MODEL" --max-turns 120 --add-dir "$P" --allowedTools "Read,Grep,Glob" \
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$P/findings.json" 2> /dev/null
+          rc=$?; echo "claude exit code: $rc, output $(wc -c < "$P/findings.json") bytes"
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          blob=$(gzip -c "$P/findings.json" | base64 -w0)
+          if [ "${#blob}" -gt 900000 ]; then echo "::error::findings too large for a job output"; exit 1; fi
+          echo "findings=$blob" >> "$GITHUB_OUTPUT"
+          rm -f "$P/findings.json"
+
+  file:
+    needs: [context, scan]
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - name: Mint a GitHub App token (this repo only, advisories included, never Workflows)
+        if: inputs.app_id != ''
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+        run: python3 -m nightshift app-token --advisories --github-env "$GITHUB_ENV"
+      - name: File private advisories
+        env:
+          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          FINDINGS: ${{ needs.scan.outputs.findings }}
+          SHA: ${{ needs.context.outputs.sha }}
+          BASE: ${{ needs.context.outputs.base }}
+        run: python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-env FINDINGS

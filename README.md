@@ -172,6 +172,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `review` | `reuse_on_update: true` | Keep a passed verdict when update-branch only merged main (see Merge modes) |
+| `redteam` | `enabled: false` | `enabled`, `schedule` (`0 5 * * *`), `min_severity` (`high`), `claude_token_secret` (default the security token), `model`. See Review rules and the security gate |
 | `reduce` | `enabled: false` | `enabled`, `schedule` (`30 6 * * *`, no minute in common with `planner.schedule`), `window_hours` (48). Needs `planner.enabled`. See Reduce |
 | `security` | `enabled: false` | `enabled` (adds the required check `review / security`), `claude_token_secret` (default `review_token_secret`), `model`, `paths` (always reviewed, as are `risk.approve_paths`), `always` (review every PR). See Review rules |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
@@ -208,6 +209,8 @@ outsider cannot forge attempt counts, unblock an issue or steer work.
 | `handoff-data` | PR body | The agent's hand-off, read when the PR merges |
 | `handoff-done` | merged PR | Hand-offs went out (makes the step idempotent) |
 | `plan` | night-log issue | A planner run: lane, `complete`, `docs_sha`; a reduce run has `lane: reduce` and `prs` |
+| `redteam` | night-log issue | A red-team scan: `sha` (the commit it reached), `base`, `filed` |
+| `redteam-finding` | draft security advisory | The finding's fingerprint `fp` and `sha`, so it is filed once |
 
 **Hand-off.** When a PR merges, the picker posts a hand-off comment on every open issue whose `Blocked by`
 line lists the merged issue (for PRs merged in the last 72 hours). The comment gives the interface as built
@@ -303,7 +306,7 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 | `start` / `pause` | Set `AGENTS_ENABLED` to `true` / `false` (the kill switch); `pause` also cancels lane runs in flight (`--no-cancel` to let them finish) |
 | `freeze` / `resume` | Pause (and cancel) and move every ready issue to `human` + `frozen`; `resume` undoes it and starts |
 | `take N` / `retry N` | Take a ticket yourself, or put it back in the queue with fresh attempts (same as the comment commands) |
-| `app manifest` / `app check` | Print the GitHub App to create; mint a token locally and show its login and permissions |
+| `app manifest` / `app check` / `app installations` | Print the GitHub App to create; mint a token locally and show its login and permissions; list every account and repo the App is installed on (suspended or not) with the App's newest comment in each, using read-only tokens |
 | `roadmap` | Create or refresh the roadmap issue: tickets by wave with status, a Blocked-by mermaid graph, counts per lane. The planner and every merge refresh it too. `plan --show` prints it without writing. |
 | `digest` | `--weekly` reports the last 7 days (the generated workflow also runs it on `digest.weekly_schedule`). Summarise the last `--hours 24`: merged, closed with reasons, stuck, cost per lane. `--post` puts it on the night log; `--webhook-env VAR` also sends it to the Slack or Discord webhook URL in `$VAR`. The generated `night-shift-digest.yml` runs it every morning. |
 | `lint` | Check ready issues against the ticket guide |
@@ -341,6 +344,18 @@ code), and must answer every `security: true` rule hit. It calls Claude only whe
 touches `security.paths` or `risk.approve_paths`, or `security.always` is on; otherwise it passes at once. A
 high or critical finding fails it, and the picker closes the PR as `security_failed`. After enabling it, run
 `gh nightshift init --regenerate` and `gh nightshift setup`.
+
+**The red-team scan.** With `redteam: {enabled: true}`, `night-shift-redteam.yml` runs once a day
+(`redteam.schedule`, default `0 5 * * *` UTC) and reads main the way an attacker would. It is incremental: a
+`redteam` marker on the night log records the commit each scan reached, so the next one reads only what changed
+since then (a quiet night skips without calling Claude), and dispatching it with `full` rescans the whole tree.
+The `security: true` rules run over that range and become its must-check list. Three jobs keep the usual split:
+`context` (GITHUB_TOKEN) picks the range and runs the rules, `scan` (the Claude token only, read-only tools)
+returns findings, and `file` (the PAT, or an App token minted with one extra permission) files each new finding at
+`redteam.min_severity` (`high`) or above as a **draft private security advisory**, which only repo admins and
+the advisory's collaborators can read. Findings never appear in a log, an artifact or the night log (which gets
+counts and advisory links only), and a fingerprint (title and file) keeps a finding from being filed twice. It
+needs `Repository security advisories: Read and write` on the PAT, or the same permission approved on the App.
 
 ## Merge modes
 
@@ -416,7 +431,8 @@ rules add up, `default: approve` and `codeowners: true` win), `digest` and `plan
 A GitHub App gives the night shift its own `<app>[bot]` identity and tokens that expire after an hour.
 
 1. `gh nightshift app manifest` prints the App to create: Contents, Issues and Pull requests read/write,
-   Actions, Checks and Commit statuses read, no Workflows, no webhook. Create it, install it on this repository only, and generate a
+   Actions, Checks and Commit statuses read, Repository security advisories read/write (only the red-team
+   filing job asks for it), no Workflows, no webhook. Create it, install it on this repository only, and generate a
    private key.
 2. `gh nightshift init --app-id <id> --app-key-file key.pem` (or add `auth: {mode: app, app_id: <id>}` to the
    config, run `init --regenerate` and `gh secret set NIGHT_SHIFT_APP_KEY < key.pem`).

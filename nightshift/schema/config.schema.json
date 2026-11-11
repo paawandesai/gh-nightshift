@@ -436,6 +436,39 @@
         }
       }
     },
+    "redteam": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Scheduled red-team scan: a read-only attacker's pass over what changed on main since the last scan, filed as draft private security advisories (the PAT or App needs Repository security advisories: write)",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "default false"
+        },
+        "schedule": {
+          "type": "string",
+          "description": "5-field cron (UTC), default \"0 5 * * *\""
+        },
+        "min_severity": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "description": "file findings at this severity or above (default high); lower ones are only counted"
+        },
+        "claude_token_secret": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$",
+          "description": "Claude token for the scan; default security.claude_token_secret, then review_token_secret"
+        },
+        "model": {
+          "type": "string",
+          "description": "default: security.model, then models.review"
+        }
+      }
+    },
     "auth": {
       "type": "object",
       "additionalProperties": false,
