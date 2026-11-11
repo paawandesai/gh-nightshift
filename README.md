@@ -351,11 +351,19 @@ high or critical finding fails it, and the picker closes the PR as `security_fai
 since then (a quiet night skips without calling Claude), and dispatching it with `full` rescans the whole tree.
 The `security: true` rules run over that range and become its must-check list. Three jobs keep the usual split:
 `context` (GITHUB_TOKEN) picks the range and runs the rules, `scan` (the Claude token only, read-only tools)
-returns findings, and `file` (the PAT, or an App token minted with one extra permission) files each new finding at
-`redteam.min_severity` (`high`) or above as a **draft private security advisory**, which only repo admins and
-the advisory's collaborators can read. Findings never appear in a log, an artifact or the night log (which gets
-counts and advisory links only), and a fingerprint (title and file) keeps a finding from being filed twice. It
-needs `Repository security advisories: Read and write` on the PAT, or the same permission approved on the App.
+returns findings encrypted with its Claude token, and `file` (the PAT, or an App token minted with one extra
+permission) decrypts them inside a pipe and files each new finding at `redteam.min_severity` (`high`) or above:
+
+- on a **public** repo, as a **draft private security advisory**, which only repo admins and the advisory's
+  collaborators can read. The night log only says the scan ran: not even a count, which would tell an attacker
+  that main has an open hole. This needs `Repository security advisories: Read and write` on the PAT (whose
+  account must be a repo admin or security manager) or approved on the App;
+- on a **private** repo (GitHub has no advisories there), as an issue labelled `security` and `human`, which only
+  repo members can see and agents never pick up. The night log gets counts and issue links.
+
+Findings never appear in a log or an artifact, a fingerprint (title and file) keeps a finding from being filed
+twice, and a scan that fails or is cut short records nothing, so the next one covers the same range again. The
+scan needs `bot_login` in the config. Dispatches from another branch are skipped.
 
 ## Merge modes
 

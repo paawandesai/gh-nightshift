@@ -25,9 +25,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   installed on, whether it is suspended, and when the App last commented in each repo (read-only tokens).
 - Red-team scan (`redteam.enabled`): a daily, incremental, read-only attacker's pass over what changed on main
   since the last scan, with the `security: true` review rules as its must-check list. New findings at
-  `redteam.min_severity` (high) or above become draft private security advisories; nothing about a finding is
-  written to a log, an artifact or the night log. The PAT (or App) needs Repository security advisories:
-  Read and write; `check-pat` and `doctor` check it. Run `gh nightshift init --regenerate`.
+  `redteam.min_severity` (high) or above become draft private security advisories on public repos and
+  `security` + `human` issues on private ones; findings leave the scan job encrypted and are never written to a
+  log or artifact. On public repos the PAT (an admin or security manager) or App needs Repository security
+  advisories: Read and write; `check-pat` and `doctor` check it. Run `gh nightshift init --regenerate`.
 - Cross-lane reduce (`reduce.enabled`): a scheduled planner run in a new `reduce` mode reads the agent PRs merged
   in the last `reduce.window_hours`, their tickets' `## Interface` sections, the agents' hand-offs and the open
   tickets that consume them, and drafts fixes for problems no single PR review can see (contract mismatches,

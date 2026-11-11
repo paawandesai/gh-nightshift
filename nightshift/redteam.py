@@ -10,17 +10,21 @@ together. It reuses the other two ideas:
   scanner's must-check list.
 
 Three jobs, as in the planner: `context` (GITHUB_TOKEN, read-only) decides whether to run and writes the
-context; `scan` (Claude token only, read-only tools) returns findings; `file` (PAT, or an App token that also
-holds Repository security advisories: write) files each new finding at or above `redteam.min_severity` as a
-DRAFT repository security advisory, which only admins and the advisory's collaborators can see. Nothing about a
-finding is posted anywhere public: the night log gets counts and the commit range only.
+context; `scan` (Claude token only, read-only tools) returns findings, encrypted with that token before they
+leave the job (a job output is printed in the next job's log, so it must never hold plaintext); `file` (PAT, or
+an App token that also holds Repository security advisories: write) decrypts them inside a pipe and files each
+new finding at or above `redteam.min_severity`:
 
-Dedupe: each advisory's description carries a `redteam-finding` marker with a fingerprint (title + file), and
-only advisories authored by a trusted login count.
+- public repo: a DRAFT repository security advisory, which only admins and the advisory's collaborators see;
+  nothing about any finding (not even a count) is posted publicly;
+- private repo (GitHub offers no advisories there): an issue labelled `security` and `human`, which only repo
+  members can see and agents never pick up.
+
+Dedupe: each advisory or issue carries a `redteam-finding` marker with a fingerprint (title + file), and only
+ones authored by a trusted login count, so an outsider's private vulnerability report cannot suppress a finding.
 """
 from __future__ import annotations
 
-import base64
 import gzip
 import hashlib
 import json
@@ -38,6 +42,7 @@ SEVERITIES = ("low", "medium", "high", "critical")
 MAX_FINDINGS = 20
 MAX_LIST = 300  # files listed in the context
 MAX_LOG = 100   # commit subjects listed in the context
+MAX_DIFF = 400_000  # bytes of the range's diff handed to the scanner
 FIELD_CAP = {"title": 200, "location": 300, "evidence": 4000, "attack_path": 4000, "fix": 3000, "cwe": 40}
 
 REDTEAM_SCHEMA = {
@@ -52,10 +57,6 @@ REDTEAM_SCHEMA = {
             "attack_path": {"type": "string"},
             "fix": {"type": "string"}},
             "required": ["title", "severity", "location", "evidence", "attack_path", "fix"]}},
-        "rule_answers": {"type": "array", "items": {"type": "object", "properties": {
-            "key": {"type": "string"}, "answer": {"type": "string", "enum": ["yes", "no"]},
-            "why": {"type": "string"}}, "required": ["key", "answer", "why"]}},
-        "notes": {"type": "string"},
     },
     "required": ["findings"],
 }
@@ -123,8 +124,19 @@ def _fenced(text: str) -> list[str]:
     return fence(text)
 
 
+def range_diff(git: Git, sc: Scope) -> str:
+    """The range's diff for an incremental scan (the scan job has no history to compute it), capped."""
+    if not sc.base:
+        return ""
+    text = git(["-c", "core.quotePath=false", "diff", "-U5", *review_rules.DIFF_FLAGS[:1], "--no-ext-diff",
+                "--no-textconv", f"{sc.base}..{sc.head}"])
+    if len(text) > MAX_DIFF:
+        text = text[:MAX_DIFF] + "\n... (diff truncated: read the files in scope directly)\n"
+    return text
+
+
 def context(gh: GH, cfg: Config, git: Git, root: Path, sc: Scope, rules: list[review_rules.Rule]) -> tuple[str, dict]:
-    """(context markdown, rule items {"items": [...]} the scanner must answer)."""
+    """(context markdown, rule items {"items": [...]} the scanner must check)."""
     security_rules = [r for r in rules if r.security]
     hits = review_rules.scan(security_rules, root, sc.changed)
     listed = review_rules.items(hits, review_rules.MAX_HITS)
@@ -148,21 +160,26 @@ def context(gh: GH, cfg: Config, git: Git, root: Path, sc: Scope, rules: list[re
 
 # --- findings -----------------------------------------------------------------------------
 
-def encode(data: dict) -> str:
-    """Findings travel between jobs as a job output (never an artifact or a log line, which a public repo would
-    expose): gzip + base64, one line."""
-    return base64.b64encode(gzip.compress(json.dumps(data, separators=(",", ":")).encode())).decode()
+def encode(data: dict) -> bytes:
+    """The gzip'd document, as the scan job compresses Claude's output before encrypting it (tests use this)."""
+    return gzip.compress(json.dumps(data, separators=(",", ":")).encode())
 
 
-def decode(blob: str) -> dict:
+def decode(raw: bytes) -> dict:
+    """The scan's findings from gzip'd Claude output (the `structured_output` wrapper or the bare document).
+    Anything else, including a Claude error result, is refused, so a failed scan never records progress."""
     try:
-        data = json.loads(gzip.decompress(base64.b64decode(blob.strip(), validate=True)))
-    except (ValueError, OSError) as err:
-        raise ValueError(f"findings are not a valid encoded document: {err}") from err
-    if isinstance(data, dict) and isinstance(data.get("structured_output"), dict):
-        data = data["structured_output"]
+        data = json.loads(gzip.decompress(raw))
+    except (ValueError, OSError, EOFError) as err:
+        raise ValueError(f"findings are not a valid document: {err}") from err
     if not isinstance(data, dict):
         raise ValueError("findings must be a JSON object")
+    if data.get("is_error") or str(data.get("subtype") or "success") != "success":
+        raise ValueError(f"the scan did not finish ({data.get('subtype') or 'error'})")
+    if "structured_output" in data or data.get("type") == "result":
+        data = data.get("structured_output")
+    if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
+        raise ValueError("the scan returned no findings list")
     return data
 
 
@@ -185,21 +202,25 @@ def fingerprint(f: dict) -> str:
     return hashlib.sha256(f"{title}\n{path}".encode()).hexdigest()[:16]
 
 
-def existing_fingerprints(gh: GH) -> set[str]:
-    """Fingerprints of advisories a trusted login filed, in any state (draft, published, closed)."""
+LABEL = "security"
+
+
+def existing_fingerprints(gh: GH, public: bool) -> set[str]:
+    """Fingerprints of advisories (public repo) or issues (private repo) a trusted login filed, in any state."""
     seen: set[str] = set()
-    # The endpoint pages by cursor, not page number; the newest 100 advisories cover any realistic backlog.
-    for adv in gh.get(gh.r("security-advisories"), {"sort": "created", "direction": "desc", "per_page": 100}) or []:
-        author = ((adv.get("author") or {}).get("login")) or ""
-        if author not in gh.trusted:
-            continue
-        for m in ns.trusted([{"id": 0, "user": {"login": author}, "body": adv.get("description") or ""}],
-                            gh.trusted, "redteam-finding"):
-            seen.add(str(m.get("fp")))
+    if public:
+        # The endpoint pages by cursor, not page number; the newest 100 advisories cover any realistic backlog.
+        docs = [{"id": 0, "user": a.get("author") or {}, "body": a.get("description") or ""}
+                for a in gh.get(gh.r("security-advisories"), {"sort": "created", "direction": "desc", "per_page": 100}) or []]
+    else:
+        docs = [{"id": i["number"], "user": i.get("user") or {}, "body": i.get("body") or ""}
+                for i in gh.issues([LABEL], state="all")]
+    for m in ns.trusted(docs, gh.trusted, "redteam-finding"):
+        seen.add(str(m.get("fp")))
     return seen
 
 
-def advisory_body(f: dict, fp: str, head: str, base: str, repo: str) -> dict:
+def _description(f: dict, fp: str, head: str, base: str) -> str:
     rng = f"{base[:12]}..{head[:12]}" if base else f"baseline at {head[:12]}"
 
     def block(title: str, text: str) -> list[str]:
@@ -211,8 +232,12 @@ def advisory_body(f: dict, fp: str, head: str, base: str, repo: str) -> dict:
             + (f"  \n**CWE:** {ns.defang(f['cwe']).replace('`', '')}" if f["cwe"] else ""), "",
             *block("Evidence", f["evidence"]), *block("Attack path", f["attack_path"]), *block("Suggested fix", f["fix"]),
             ns.marker("redteam-finding", fp=fp, sha=head)]
-    return {"summary": ns.defang(f["title"])[:1024], "description": "\n".join(desc), "severity": f["severity"],
-            "vulnerabilities": [{"package": {"ecosystem": "other", "name": repo}}]}
+    return "\n".join(desc)
+
+
+def advisory_body(f: dict, fp: str, head: str, base: str, repo: str) -> dict:
+    return {"summary": ns.defang(f["title"])[:1024], "description": _description(f, fp, head, base),
+            "severity": f["severity"], "vulnerabilities": [{"package": {"ecosystem": "other", "name": repo}}]}
 
 
 @dataclass
@@ -223,7 +248,7 @@ class FileResult:
     failed: list[str] = field(default_factory=list)
 
 
-def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str) -> FileResult:
+def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public: bool) -> FileResult:
     floor = SEVERITIES.index(cfg.redteam_min_severity)
     result = FileResult()
     found = findings_of(data)
@@ -232,9 +257,9 @@ def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str) -> File
     if not keep:
         return result
     try:
-        seen = existing_fingerprints(gh)
+        seen = existing_fingerprints(gh, public)
     except GHError as err:
-        result.failed.append(f"cannot list advisories: {err}")
+        result.failed.append(f"cannot list earlier findings: {err}")
         return result
     for f in keep:
         fp = fingerprint(f)
@@ -242,20 +267,31 @@ def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str) -> File
             result.duplicates += 1
             continue
         try:
-            adv = gh.post(gh.r("security-advisories"), advisory_body(f, fp, head, base, gh.repo)) or {}
+            if public:
+                adv = gh.post(gh.r("security-advisories"), advisory_body(f, fp, head, base, gh.repo)) or {}
+                where = f"{adv.get('ghsa_id') or '(draft)'} {adv.get('html_url', '')}"
+            else:
+                title = f"[{f['severity']}] {ns.defang(f['title'])}"[:250]
+                issue = gh.create_issue(title, _description(f, fp, head, base), [LABEL, cfg.label("human")]) or {}
+                where = f"#{issue.get('number', '?')}"
         except GHError as err:
             result.failed.append(f"{f['severity']}: {err}")
             continue
         seen.add(fp)
-        result.filed.append(f"{f['severity']} {adv.get('ghsa_id') or '(draft)'} {adv.get('html_url', '')}".strip())
+        result.filed.append(f"{f['severity']} {where}".strip())
     return result
 
 
-def summary(result: FileResult, head: str, base: str, cfg: Config) -> str:
-    """Night-log text: counts and private advisory links only, never a finding's content."""
+def summary(result: FileResult, head: str, base: str, cfg: Config, public: bool) -> str:
+    """Night-log text. Public repo: only that the scan ran (even a count would tell an attacker that main has an
+    unpatched hole, and where to look); admins see the drafts under Security > Advisories. Private repo: counts
+    and issue links."""
+    if public:
+        return ("**Night shift red-team scan** done. Any findings are draft advisories under Security > Advisories."
+                + ("\n\nSome findings could not be filed (see the workflow log)." if result.failed else ""))
     rng = f"`{base[:12]}..{head[:12]}`" if base else f"baseline at `{head[:12]}`"
     lines = [f"**Night shift red-team scan** ({rng})", ""]
-    lines.append(f"- {len(result.filed)} new private advisory draft(s) at {cfg.redteam_min_severity} or above"
+    lines.append(f"- {len(result.filed)} new `{LABEL}` issue(s) at {cfg.redteam_min_severity} or above"
                  + (":" if result.filed else ""))
     lines += [f"  - {x}" for x in result.filed]
     if result.duplicates:

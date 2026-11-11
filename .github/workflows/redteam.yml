@@ -1,8 +1,10 @@
 # gh-nightshift: the red-team scan. A read-only attacker's pass over what changed on main since the last scan.
 #   context  (GITHUB_TOKEN, read)   decide whether to scan; run the security rules; write the scan context
-#   scan     (Claude token only)    read-only Claude run -> findings, passed on as a job output (never an
-#                                   artifact or a log line: on a public repo both are readable by anyone)
-#   file     (PAT or App token)     file new findings as DRAFT private security advisories; record the commit
+#   scan     (Claude token only)    read-only Claude run -> findings, ENCRYPTED with the Claude token and passed on
+#                                   as a job output (a job output is printed in the next job's log, and logs and
+#                                   artifacts of a public repo are readable by anyone, so plaintext never leaves)
+#   file     (PAT or App token)     decrypt inside a pipe; file new findings as draft private security advisories
+#                                   (public repo) or `security` + `human` issues (private repo); record the commit
 name: night-shift-redteam
 
 on:
@@ -78,6 +80,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          REF_NAME: ${{ github.ref_name }}
           FULL: ${{ inputs.full }}
         run: |
           set --
@@ -118,20 +121,22 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
           MODEL: ${{ vars.REDTEAM_MODEL || inputs.model }}
-        # Findings stay out of the log: only the exit code and sizes are printed.
+        # Findings stay out of the log: only the exit code and sizes are printed, and what leaves the job is
+        # AES-256 encrypted with the Claude token (a masked secret the file job also holds).
         run: |
           set -uo pipefail
           if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::red-team Claude token is empty"; exit 1; fi
           P="$RUNNER_TEMP/redteam"
+          trap 'rm -f "$P/findings.json"' EXIT
           claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
             --model "$MODEL" --max-turns 120 --add-dir "$P" --allowedTools "Read,Grep,Glob" \
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$P/findings.json" 2> /dev/null
           rc=$?; echo "claude exit code: $rc, output $(wc -c < "$P/findings.json") bytes"
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
-          blob=$(gzip -c "$P/findings.json" | base64 -w0)
-          if [ "${#blob}" -gt 900000 ]; then echo "::error::findings too large for a job output"; exit 1; fi
-          echo "findings=$blob" >> "$GITHUB_OUTPUT"
-          rm -f "$P/findings.json"
+          sealed=$(gzip -c "$P/findings.json" \
+            | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:CLAUDE_CODE_OAUTH_TOKEN | base64 | tr -d '\n')
+          if [ -z "$sealed" ] || [ "${#sealed}" -gt 900000 ]; then echo "::error::could not seal the findings"; exit 1; fi
+          echo "findings=$sealed" >> "$GITHUB_OUTPUT"
 
   file:
     needs: [context, scan]
@@ -153,10 +158,14 @@ jobs:
           APP_ID: ${{ inputs.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
         run: python3 -m nightshift app-token --advisories --github-env "$GITHUB_ENV"
-      - name: File private advisories
+      - name: File findings privately
         env:
           GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
-          FINDINGS: ${{ needs.scan.outputs.findings }}
+          SEALED: ${{ needs.scan.outputs.findings }}   # ciphertext only; the log shows it, which is fine
+          SEAL_KEY: ${{ secrets.claude_token }}       # only to decrypt; this job never runs Claude
           SHA: ${{ needs.context.outputs.sha }}
           BASE: ${{ needs.context.outputs.base }}
-        run: python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-env FINDINGS
+        run: |
+          set -euo pipefail
+          printf '%s' "$SEALED" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:SEAL_KEY \
+            | python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file -

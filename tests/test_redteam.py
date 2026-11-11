@@ -74,10 +74,11 @@ class RedteamCase(CliTestCase):
         outputs = Path(gh_out).read_text() if os.path.exists(gh_out) else ""
         return rc, text, out_dir, outputs
 
-    def publish(self, data, sha=None, base="", env=None, fake=None, extra=()):
-        blob = redteam.encode(data) if data is not None else ""
-        os.environ["FINDINGS"] = blob if env is None else env
-        return self.run_cli("redteam", "publish", "--sha", sha or self.first, "--base", base, *extra, fake=fake)
+    def publish(self, data, sha=None, base="", raw=None, fake=None, extra=()):
+        path = os.path.join(self.root, "findings.gz")
+        Path(path).write_bytes(redteam.encode(data) if raw is None else raw)
+        return self.run_cli("redteam", "publish", "--sha", sha or self.first, "--base", base, "--findings-file", path,
+                            *extra, fake=fake)
 
 
 class ScopeTests(RedteamCase):
@@ -155,6 +156,10 @@ class ScopeTests(RedteamCase):
 
 
 class PublishTests(RedteamCase):
+    def setUp(self):
+        super().setUp()
+        self.fake.repo_settings["private"] = False
+
     def test_files_new_findings_as_draft_advisories_and_records_the_commit(self):
         low = {**FINDING, "title": "Verbose error", "severity": "low", "location": "api/app.py:2"}
         rc, text = self.publish({"findings": [FINDING, low]})
@@ -169,10 +174,27 @@ class PublishTests(RedteamCase):
         log = self.fake.comments[1][-1]["body"]
         marks = ns.trusted([{"id": 1, **self.fake.comments[1][-1]}], "night-bot", "redteam")
         self.assertEqual(marks[0].data["sha"], self.first)
-        self.assertIn("1 new private advisory draft(s) at high or above", log)
-        self.assertIn("1 below high (not filed", log)
-        for secret in ("zip", "curl", "Command injection", "Verbose"):  # nothing about a finding goes public
+        self.assertIn("red-team scan** done", log)
+        for secret in ("zip", "curl", "Command injection", "Verbose", "high", "1 ", "GHSA"):  # not even a count
             self.assertNotIn(secret, log)
+        self.assertNotIn("zip", text)
+        self.assertNotIn("Command injection", text)
+
+    def test_private_repo_files_security_issues_and_reports_counts(self):
+        self.fake.repo_settings["private"] = True
+        low = {**FINDING, "title": "Verbose error", "severity": "low", "location": "api/app.py:2"}
+        rc, _ = self.publish({"findings": [FINDING, low]})
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.fake.advisories, [])
+        made = [i for n, i in self.fake.issues.items() if n != 1]
+        self.assertEqual(len(made), 1)
+        self.assertEqual(self.fake.label_names(made[0]["number"]), {"security", "human"})
+        self.assertEqual(made[0]["title"], "[high] Command injection in export")
+        log = self.fake.comments[1][-1]["body"]
+        self.assertIn("1 new `security` issue(s) at high or above", log)
+        self.assertIn("1 below high", log)
+        rc, _ = self.publish({"findings": [FINDING]})  # filed once
+        self.assertEqual(len([n for n in self.fake.issues if n != 1]), 1)
 
     def test_same_finding_is_filed_once_even_when_its_line_moves(self):
         self.publish({"findings": [FINDING]})
@@ -180,7 +202,7 @@ class PublishTests(RedteamCase):
         rc, text = self.publish({"findings": [moved]})
         self.assertEqual(rc, 0)
         self.assertEqual(len(self.fake.advisories), 1)
-        self.assertIn("1 already filed earlier", self.fake.comments[1][-1]["body"])
+        self.assertEqual(len(ns.trusted([{"id": 1, **c} for c in self.fake.comments[1]], "night-bot", "redteam")), 2)
 
     def test_untrusted_advisory_does_not_suppress_a_finding(self):
         fp = redteam.fingerprint(redteam.findings_of({"findings": [FINDING]})[0])
@@ -195,6 +217,7 @@ class PublishTests(RedteamCase):
         self.assertIn("Repository security advisories", text)
         self.assertEqual(ns.trusted([{"id": 1, **c} for c in self.fake.comments[1]], "night-bot", "redteam"), [])
         self.assertIn("could not be filed", self.fake.comments[1][-1]["body"])
+        self.assertNotIn("Command injection", text)
 
     def test_no_findings_still_records_the_commit(self):
         rc, _ = self.publish({"findings": []})
@@ -203,19 +226,22 @@ class PublishTests(RedteamCase):
         self.assertEqual(len(ns.trusted([{"id": 1, **c} for c in self.fake.comments[1]], "night-bot", "redteam")), 1)
 
     def test_claude_wrapper_and_shell_encoding_are_accepted(self):
-        raw = json.dumps({"type": "result", "structured_output": {"findings": [FINDING]}}).encode()
-        blob = base64.b64encode(gzip.compress(raw)).decode()  # what `gzip -c | base64 -w0` produces
-        rc, _ = self.publish(None, env=blob)
+        raw = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                          "structured_output": {"findings": [FINDING]}}).encode()
+        rc, _ = self.publish(None, raw=gzip.compress(raw))  # what `gzip -c` of Claude's output produces
         self.assertEqual(rc, 0)
         self.assertEqual(len(self.fake.advisories), 1)
 
     def test_bad_inputs_are_refused_without_writes(self):
         rc, _ = self.publish({"findings": []}, sha="HEAD")
         self.assertEqual(rc, 2)
-        rc, _ = self.publish(None, env="not base64!")
-        self.assertEqual(rc, 2)
-        rc, _ = self.publish(None, env="")
-        self.assertEqual(rc, 1)
+        for raw in (b"not gzip", b"", gzip.compress(b"[]"), gzip.compress(b'{"type":"result","subtype":"error_max_turns",'
+                                                                         b'"is_error":true}'),
+                    gzip.compress(b'{"type":"result","subtype":"success","is_error":false}'),
+                    gzip.compress(b'{"findings": "none"}')):
+            rc, text = self.publish(None, raw=raw)
+            self.assertEqual(rc, 1, raw)
+            self.assertIn("recording nothing", text)
         self.assertEqual(self.fake.writes(), [])
 
     def test_model_text_is_capped_and_defanged(self):
@@ -231,9 +257,12 @@ class PublishTests(RedteamCase):
     def test_dry_run_files_nothing(self):
         def seed(f):
             f.add_issue(number=1, title="Night-shift log", labels=["night-log"])
+            f.repo_settings["private"] = False
 
-        os.environ["FINDINGS"] = redteam.encode({"findings": [FINDING]})
-        text, dry = self.assert_dry_run(["redteam", "publish", "--sha", self.first], seed, exact=False)
+        path = os.path.join(self.root, "findings.gz")
+        Path(path).write_bytes(redteam.encode({"findings": [FINDING]}))
+        text, dry = self.assert_dry_run(["redteam", "publish", "--sha", self.first, "--findings-file", path], seed,
+                                        exact=False)
         self.assertEqual(dry.advisories, [])
         self.assertIn("security-advisories", text)
 
@@ -372,3 +401,57 @@ class AppInstallationsTests(unittest.TestCase):
         request, _ = self.fake(perms={"metadata": "read", "contents": "write"})
         with self.assertRaisesRegex(app.AppError, "write"):
             app.installations("1", "KEY", request=request, sign=lambda m, k: b"s")
+
+
+class SealTests(unittest.TestCase):
+    def test_workflow_never_passes_plaintext_between_jobs(self):
+        text = (Path(__file__).parent.parent / ".github/workflows/redteam.yml").read_text()
+        scan, file_job = text.split("\n  scan:")[1].split("\n  file:")
+        self.assertIn("openssl enc -aes-256-cbc", scan)
+        self.assertIn("trap 'rm -f", scan)
+        self.assertIn("openssl enc -d -aes-256-cbc", file_job)
+        self.assertIn("--findings-file -", file_job)
+        self.assertNotIn("FINDINGS:", file_job)
+
+    @unittest.skipUnless(subprocess.run(["which", "openssl"], capture_output=True).returncode == 0, "no openssl")
+    def test_seal_round_trip_matches_the_workflow(self):
+        doc = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                          "structured_output": {"findings": [FINDING]}})
+        env = {**os.environ, "K": "sk-test-token"}
+        sealed = subprocess.run(
+            "gzip -c | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:K | base64 | tr -d '\\n'",
+            shell=True, input=doc.encode(), env=env, capture_output=True, check=True).stdout
+        self.assertNotIn(b"Command", base64.b64decode(sealed))
+        raw = subprocess.run("base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:K",
+                             shell=True, input=sealed, env=env, capture_output=True, check=True).stdout
+        self.assertEqual(redteam.decode(raw)["findings"][0]["title"], FINDING["title"])
+        wrong = subprocess.run("base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:K",
+                               shell=True, input=sealed, env={**env, "K": "other"}, capture_output=True)
+        self.assertTrue(wrong.returncode != 0 or not wrong.stdout.startswith(b"\x1f\x8b"))
+
+
+class GuardTests(RedteamCase):
+    def test_dispatch_from_another_branch_is_skipped(self):
+        os.environ["REF_NAME"] = "feature"
+        _, text, _, outputs = self.context()
+        self.assertIn("runs on main only", text)
+        self.assertEqual(outputs, "run=false\n")
+
+    def test_doctor_needs_bot_login_and_model_is_validated(self):
+        cfg = write_config(self.tempdir(), redteam={"enabled": True})
+        root = Path(self.tempdir())
+        self.assertTrue(any(c.level == FAIL and "bot_login" in c.what for c in rules_checks(root, cfg)))
+        with self.assertRaisesRegex(ConfigError, "redteam.model"):
+            write_config(self.tempdir(), redteam={"model": "opus # x"})
+
+    def test_check_pat_probes_advisories_and_admin_on_public_repos_only(self):
+        from nightshift.doctor import WARN, access_checks
+
+        self.fake.repo_settings.update({"private": False, "permissions": {"admin": False}})
+        checks = access_checks(self.fake.gh(), advisories=True)
+        self.assertTrue(any(c.level == WARN and "security manager" in c.what for c in checks))
+        self.assertTrue(any("security-advisories" in p for m, p, b in self.fake.calls))
+        self.fake.calls.clear()
+        self.fake.repo_settings["private"] = True
+        access_checks(self.fake.gh(), advisories=True)
+        self.assertFalse(any("security-advisories" in p for m, p, b in self.fake.calls))

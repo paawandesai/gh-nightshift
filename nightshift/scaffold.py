@@ -30,6 +30,7 @@ LABEL_COLORS = {
     "model:haiku": ("c2e0c6", "Use the fast, cheap model for this ticket"),
     "review-error": ("e99695", "The review gate itself failed; attempt not counted"),
     "night-log": ("000000", "Running log of night-shift activity"),
+    "security": ("b60205", "Red-team finding (private repos); agents skip it"),
     "needs-approval": ("d4c5f9", "Green, waiting for one human approval (risk tiers)"),
     "roadmap": ("0052cc", "The night-shift roadmap: waves, dependencies, status per lane"),
     "frozen": ("bfdadc", "Taken off the night shift by `gh nightshift freeze`"),

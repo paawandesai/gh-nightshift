@@ -84,6 +84,11 @@ def access_checks(gh: GH, advisories: bool = False) -> list[Check]:
     list the repo, gets 404 (or 403) here instead of failing later inside `pick` with a bare Not Found."""
     out: list[Check] = []
     main = "main"
+    if advisories:
+        try:
+            advisories = not repo_private(gh)  # private repos get `security` issues, not advisories
+        except GHError:
+            advisories = False  # the first probe below reports an unreadable repo
     for suffix, what, fix in ACCESS_PROBES + ((ADVISORIES_PROBE,) if advisories else ()):
         try:
             data = gh.get(gh.r(suffix.format(main=main)))
@@ -95,8 +100,15 @@ def access_checks(gh: GH, advisories: bool = False) -> list[Check]:
                               f"edit the PAT: add {gh.repo} under {fix}")]
             out.append(Check(FAIL, f"the PAT cannot read {what} on {gh.repo} (HTTP {err.status})",
                              f"edit the PAT: set {fix}"))
+    if advisories and not out and not repo_private(gh) and not ((gh.get(gh.r("")) or {}).get("permissions") or {}).get("admin"):
+        out.append(Check(WARN, f"the PAT's account is not an admin of {gh.repo}: filing a security advisory needs an "
+                               "admin or security manager", "make the account a security manager, or use App mode"))
     return out or [Check(OK, "PAT can read the repo, contents, issues, pull requests, Actions and commit statuses "
                              + ("and security advisories " if advisories else "") + f"of {gh.repo}")]
+
+
+def repo_private(gh: GH) -> bool:
+    return bool((gh.get(gh.r("")) or {}).get("private", False))
 
 
 def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
@@ -209,9 +221,13 @@ def rules_checks(root: Path, cfg: Config) -> list[Check]:
         if not caller.is_file():
             out.append(Check(FAIL, "redteam.enabled is true but night-shift-redteam.yml is missing",
                              "run `gh nightshift init --regenerate`"))
-        who = "the App" if cfg.auth_mode == "app" else "AGENT_PAT"
-        out.append(Check(WARN, f"the red-team scan files draft advisories: {who} needs Repository security advisories: "
-                               "Read and write (check-pat verifies it in every lane run)",
+        if not cfg.bot_login and not cfg.trusted_logins:
+            out.append(Check(FAIL, "redteam.enabled needs bot_login (or trusted_logins): the scan's context job runs on "
+                                   "GITHUB_TOKEN, which cannot read GET /user, so it cannot tell which markers to trust",
+                             f"set bot_login in {CONFIG_PATH}"))
+        who = "the App" if cfg.auth_mode == "app" else "AGENT_PAT (whose account must be a repo admin or security manager)"
+        out.append(Check(WARN, f"on a public repo the red-team scan files draft advisories: {who} needs Repository "
+                               "security advisories: Read and write. On a private repo it files `security` issues instead",
                          "App: approve the new permission on the App's installation; PAT: edit it in Developer settings"))
     return out
 

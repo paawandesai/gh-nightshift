@@ -129,20 +129,36 @@ def installations(app_id: str, key_pem: str, request: Callable[..., Any] | None 
     app = request("GET", "/app", token) or {}
     login = f"{app.get('slug', '')}[bot]"
     out = []
-    for inst in request("GET", "/app/installations?per_page=100", token) or []:
+    found: list[dict] = []
+    for page in range(1, 11):
+        batch = request("GET", f"/app/installations?per_page=100&page={page}", token) or []
+        found += batch
+        if len(batch) < 100:
+            break
+    for inst in found:
         account = inst.get("account") or {}
         row = {"account": account.get("login", "?"), "type": account.get("type", "?"),
                "selection": inst.get("repository_selection", "?"), "created": inst.get("created_at", ""),
                "suspended": inst.get("suspended_at") or "", "repos": []}
-        if not row["suspended"]:
-            data = request("POST", f"/app/installations/{inst['id']}/access_tokens", token,
-                           {"permissions": dict(READ_ONLY)}) or {}
+        if not row["suspended"] and inst.get("id"):
+            try:
+                data = request("POST", f"/app/installations/{inst['id']}/access_tokens", token,
+                               {"permissions": dict(READ_ONLY)}) or {}
+            except AppError as err:
+                row["error"] = str(err)
+                out.append(row)
+                continue
             perms = data.get("permissions") or {}
             if any(v != "read" for v in perms.values()):
                 raise AppError("the read-only listing token came back with write permissions")
             itoken = data.get("token") or ""
-            listing = request("GET", "/installation/repositories?per_page=100", itoken) or {}
-            for repo in listing.get("repositories") or []:
+            repos: list[dict] = []
+            for page in range(1, 11):
+                listing = request("GET", f"/installation/repositories?per_page=100&page={page}", itoken) or {}
+                repos += listing.get("repositories") or []
+                if len(listing.get("repositories") or []) < 100:
+                    break
+            for repo in repos:
                 name = repo.get("full_name", "?")
                 try:
                     comments = request("GET", f"/repos/{name}/issues/comments?sort=created&direction=desc&per_page=100",

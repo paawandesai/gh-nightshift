@@ -479,6 +479,12 @@ def cmd_redteam(ctx: Ctx) -> int:
             ctx.say("skip: AGENTS_ENABLED is not true")
             write_outputs(a.github_output, {"run": "false"})
             return 0
+        ref = os.environ.get("REF_NAME", "")
+        if ref and ref != cfg.main_branch:
+            ctx.say(f"skip: the red-team scan runs on {cfg.main_branch} only (dispatched on {ref}); its progress "
+                    "marker must follow main")
+            write_outputs(a.github_output, {"run": "false"})
+            return 0
         git = git_in(str(ctx.root))
         sc = redteam.scope(git, Path(ctx.root), redteam.last_scan(gh, cfg), full=a.full)
         if sc.skip:
@@ -495,7 +501,9 @@ def cmd_redteam(ctx: Ctx) -> int:
         out.mkdir(parents=True, exist_ok=True)
         (out / "context.md").write_text(text, encoding="utf-8")
         (out / "rules.json").write_text(json.dumps(listed), encoding="utf-8")
-        (out / "prompt.md").write_text(prompts.render("redteam", {"CONTEXT_FILE": str(out / "context.md")}, ctx.root),
+        (out / "diff.patch").write_text(redteam.range_diff(git, sc), encoding="utf-8")
+        (out / "prompt.md").write_text(prompts.render("redteam", {"CONTEXT_FILE": str(out / "context.md"),
+                                                                  "DIFF_FILE": str(out / "diff.patch")}, ctx.root),
                                        encoding="utf-8")
         (out / "schema.json").write_text(prompts.schema_json("redteam"), encoding="utf-8")
         write_outputs(a.github_output, {"run": "true", "sha": sc.head, "base": sc.base})
@@ -505,24 +513,25 @@ def cmd_redteam(ctx: Ctx) -> int:
     # publish
     if not re.fullmatch(r"[0-9a-f]{40}", a.sha) or not re.fullmatch(r"([0-9a-f]{40})?", a.base):
         raise ConfigError("--sha must be a full commit SHA and --base empty or one")
-    blob = os.environ.get(a.findings_env, "")
+    raw = (sys.stdin.buffer.read() if a.findings_file == "-" else Path(a.findings_file).read_bytes())
     try:
-        data = redteam.decode(blob) if blob.strip() else {}
+        data = redteam.decode(raw)
     except ValueError as err:
-        raise ConfigError(str(err)) from err
-    if not blob.strip():
-        ctx.say("::warning::the scan returned no findings document; recording nothing")
+        # Never record progress for a scan that did not finish: the next run covers this range again.
+        ctx.say(f"::error::{err}; recording nothing")
         return 1
-    result = redteam.file_findings(gh, cfg, data, a.sha, a.base)
-    for line in result.failed:
-        ctx.say(f"::error::could not file an advisory ({line}); the PAT or App needs Repository security "
-                "advisories: Read and write")
-    text = redteam.summary(result, a.sha, a.base, cfg)
-    ctx.say(text)
+    public = not (gh.get(gh.r("")) or {}).get("private", True)
+    result = redteam.file_findings(gh, cfg, data, a.sha, a.base, public)
+    for line in result.failed:  # the reason only: never the finding
+        ctx.say(f"::error::could not file a finding ({line}); "
+                + ("the PAT or App needs Repository security advisories: Read and write, and the PAT's account must be "
+                   "a repo admin or security manager" if public else "the PAT or App needs Issues: Read and write"))
+    text = redteam.summary(result, a.sha, a.base, cfg, public)
     # The scan only counts as done when every finding is filed; otherwise the next run covers this range again
-    # (fingerprints keep it from filing the same advisory twice).
-    marker = "" if result.failed else ns.marker("redteam", sha=a.sha, base=a.base, filed=len(result.filed)) + "\n"
+    # (fingerprints keep it from filing the same one twice).
+    marker = "" if result.failed else ns.marker("redteam", sha=a.sha, base=a.base) + "\n"
     gh.comment(log, marker + text)
+    ctx.say("filed" if not result.failed else "some findings could not be filed")
     return 1 if result.failed else 0
 
 
@@ -768,6 +777,8 @@ def cmd_app(ctx: Ctx, request=None) -> int:
                 "comment the App posted among each repo's latest 100 comments.")
         for r in rows:
             state = f"SUSPENDED since {r['suspended']}" if r["suspended"] else f"{r['selection']} repositories"
+            if r.get("error"):
+                state += f" (could not list its repositories: {r['error']})"
             ctx.say("", f"{r['account']} ({r['type']}), installed {r['created'][:10] or '?'}, {state}")
             for repo in r["repos"]:
                 ctx.say(f"  {repo['name']}{' (private)' if repo['private'] else ''}: "
@@ -1108,8 +1119,9 @@ def parser() -> argparse.ArgumentParser:
     c = rsub.add_parser("publish", parents=[sub_common], help="file findings as draft private security advisories")
     c.add_argument("--sha", required=True, help="the commit the scan reached")
     c.add_argument("--base", default="", help="the commit it started from (empty for a baseline scan)")
-    c.add_argument("--findings-env", default="FINDINGS", metavar="VAR",
-                   help="env var holding the encoded findings (never a file or argument, which logs could show)")
+    c.add_argument("--findings-file", default="-", metavar="PATH",
+                   help="gzip'd scan output; '-' (default) reads stdin, where the workflow pipes the decrypted findings. "
+                        "--dry-run prints the full advisory bodies, so never use it in a public CI log")
 
     s = sub.add_parser("audit", parents=[common], help="sample merged agent PRs and measure quality")
     s.add_argument("--sample", type=int, default=25)

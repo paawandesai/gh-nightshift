@@ -400,6 +400,8 @@ def parse(data: dict) -> Config:
         raise ConfigError(f"redteam.schedule {cfg.redteam_schedule!r} is not a 5-field cron expression")
     if cfg.redteam_min_severity not in ("low", "medium", "high", "critical"):
         raise ConfigError("redteam.min_severity must be low, medium, high or critical")
+    if cfg.redteam_model and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", cfg.redteam_model):
+        raise ConfigError("redteam.model must be a model name or alias (letters, digits, . _ -)")
     if cfg.redteam_token_secret and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cfg.redteam_token_secret):
         raise ConfigError("redteam.claude_token_secret must be a secret name (A-Z, 0-9, _)")
     if not 1 <= cfg.reduce_window_hours <= 168:

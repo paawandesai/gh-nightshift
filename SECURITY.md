@@ -232,12 +232,16 @@ check even if the reviewer said pass. Findings on a PR are posted as PR comments
 fails), so on a public repo they are public; they describe unmerged code that the gate has just kept out of main.
 
 **The red-team scan** is different: it looks at code already on main, so its findings are live vulnerabilities.
-They are never written where a public repo would show them. The scan job has the Claude token only and hands its
-findings to the filing job as a gzip+base64 job output (not an artifact, and Claude's output is never printed);
-the filing job (PAT or App token) creates draft private security advisories, and the night log gets only counts
-and advisory links. Advisory text is the model's and is fenced and defanged. Only advisories authored by a
-trusted login count for deduplication, and the scan's progress marker is trusted only from the PAT's login. A
-scan whose filing fails records nothing, so the next scan covers the same range again.
+They are never written where a public repo would show them. The scan job has the Claude token only; Claude's
+output is never printed, and it leaves the job gzip'd and AES-256 encrypted with that token (a job output is
+printed in the log of the job that uses it, and every log and artifact of a public repo is readable by anyone).
+The filing job receives the same Claude token only as the decryption key (it never runs Claude), decrypts inside
+a pipe, and creates draft private security advisories on a public repo, posting only "the scan ran" on the night
+log, or `security` + `human` issues on a private repo, where the repo's visibility already limits them to
+members. Finding text is the model's and is fenced and defanged. Only advisories or issues authored by a trusted
+login count for deduplication (an outsider's private vulnerability report cannot suppress a finding), and the
+scan's progress marker is trusted only from the PAT's login. A scan that fails, is cut short or cannot file
+records nothing, so the next scan covers the same range again.
 
 ## Auto-merge
 
