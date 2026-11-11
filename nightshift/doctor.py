@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
 
-from . import scaffold
+from . import review_rules, scaffold
 from .config import CONFIG_PATH, Config, ConfigError, load
 from .gh import GH, GHError
 from .repo_setup import existing_secrets, get_variable
@@ -151,6 +151,7 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
     for name in ("night-shift-review.yml",):
         if not (root / ".github/workflows" / name).is_file():
             out.append(Check(FAIL, f".github/workflows/{name} is missing", "run `gh nightshift init --regenerate`"))
+    out += rules_checks(root, cfg)
     ci = root / ".github/workflows" / cfg.ci_workflow
     if not ci.is_file():
         out.append(Check(FAIL, f"CI workflow .github/workflows/{cfg.ci_workflow} not found: every lane would wait",
@@ -170,6 +171,27 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
                                "ignores hand-offs, needs and notes posted by the others",
                          f"list every PAT's login under trusted_logins in {CONFIG_PATH}"))
     return cfg, out
+
+
+def rules_checks(root: Path, cfg: Config) -> list[Check]:
+    """The review rules file parses, and the security gate is wired into the review caller."""
+    out = []
+    try:
+        rules = review_rules.load(root)
+    except review_rules.RulesError as err:
+        return [Check(FAIL, f"{err}: every review would error until it is fixed", f"fix {review_rules.RULES_PATH}")]
+    if rules:
+        sec = sum(r.security for r in rules)
+        out.append(Check(OK, f"{review_rules.RULES_PATH}: {len(rules)} rule(s), {sec} security rule(s)"))
+    if cfg.security_enabled:
+        review = root / ".github/workflows/night-shift-review.yml"
+        if review.is_file() and "security: true" not in review.read_text(encoding="utf-8"):
+            out.append(Check(FAIL, "security.enabled is true but night-shift-review.yml does not run the security gate",
+                             "run `gh nightshift init --regenerate`"))
+        if not any(r.security for r in rules) and not cfg.security_trigger_paths and not cfg.security_always:
+            out.append(Check(WARN, "security.enabled is true but nothing triggers it: no security rule, security path "
+                                   "or security.always", f"add `security: true` rules to {review_rules.RULES_PATH}"))
+    return out
 
 
 def remote_checks(gh: GH, cfg: Config) -> list[Check]:

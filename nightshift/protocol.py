@@ -13,7 +13,7 @@ Types
   need      {"from": waiting issue, "to": new or existing issue, "lane": its lane}
   handoff   {"from": merged issue, "to": dependent issue, "pr": merged PR}  (step 3a)
   note      {"from": sender issue, "to": receiver issue}                     (step 3c)
-  pr        {"reason": verdict_passed|verdict_failed|checks_failed|conflict|stale|superseded|manual,
+  pr        {"reason": verdict_passed|verdict_failed|security_failed|checks_failed|conflict|stale|superseded|manual,
              "pr": n, "issue": n}                                             (audit add-on D)
   handoff-data  in the body of a PR the PAT opened: the agent's `handoff` output, read at merge time
   handoff-done  on a merged PR once its hand-offs went out (idempotence)
@@ -31,7 +31,7 @@ MARKER_RE = re.compile(r"<!--\s*ns:(\{.*?\})\s*-->", re.S)
 TYPES = {"attempt", "infra", "blocked", "waiting", "need", "handoff", "note", "pr", "handoff-done",
          "handoff-data", "note-sent", "fix-attempt", "fix-infra", "plan", "budget", "digest", "roadmap",
          "take", "retry", "approval"}
-PR_REASONS = ("verdict_passed", "verdict_failed", "checks_failed", "conflict", "stale", "superseded", "manual")
+PR_REASONS = ("verdict_passed", "verdict_failed", "security_failed", "checks_failed", "conflict", "stale", "superseded", "manual")
 
 # Markers written by the original hackathon kit; still counted so a repo can migrate mid-flight.
 LEGACY = {"attempt": "<!-- agent-attempt -->", "infra": "<!-- agent-infra -->", "blocked": "<!-- agent-blocked -->"}

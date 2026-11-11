@@ -439,6 +439,25 @@ def cmd_lint(ctx: Ctx) -> int:
     return 1 if bad else 0
 
 
+def cmd_rules(ctx: Ctx) -> int:
+    """Run the review rules in this checkout over the current branch's diff, as the review gate would."""
+    from . import review_rules
+    from .review_tools import git_in
+
+    git = git_in(str(ctx.root))
+    try:
+        rules = review_rules.load(ctx.root)
+        base = git(["merge-base", ctx.args.base, "HEAD"]).strip()
+        diff = git(["diff", f"{base}..HEAD"])
+    except (review_rules.RulesError, RuntimeError) as err:
+        ctx.say(str(err))
+        return 2
+    hits = review_rules.scan(rules, ctx.root, diff)
+    ctx.say(f"{len(rules)} rule(s) in {review_rules.RULES_PATH}, {len(hits)} hit(s) in {ctx.args.base}...HEAD", "")
+    ctx.out.write(review_rules.render(hits, review_rules.MAX_HITS))
+    return 0
+
+
 # --- planner --------------------------------------------------------------------------
 
 def run_claude(prompt: str, schema: str, model: str, add_dir: str, run=subprocess.run) -> dict:
@@ -777,16 +796,20 @@ def cmd_review_inputs(ctx: Ctx) -> int:
     from .review_tools import git_in, write_inputs
 
     a = ctx.args
-    values = write_inputs(ctx.gh, git_in(a.pr_dir), a.base_ref, a.head_ref, a.out_dir)
+    values = write_inputs(ctx.gh, git_in(a.pr_dir), a.base_ref, a.head_ref, a.out_dir,
+                          rules_root=a.rules_root, pr_dir=a.pr_dir)
     write_outputs(a.github_output, values)
     ctx.say(json.dumps(values))
     return 0
 
 
 def cmd_review_report(ctx: Ctx) -> int:
-    from .review_tools import render_report
+    from .review_tools import render_report, render_security_report
 
-    verdict, comment = render_report(ctx.args.result, ctx.args.overlap)
+    if ctx.args.security:
+        verdict, comment = render_security_report(ctx.args.result, ctx.args.rules)
+    else:
+        verdict, comment = render_report(ctx.args.result, ctx.args.overlap, ctx.args.rules)
     Path(ctx.args.out).write_text(comment, encoding="utf-8")
     write_outputs(ctx.args.github_output, {"verdict": verdict})
     ctx.say(f"verdict={verdict}")
@@ -891,6 +914,8 @@ def parser() -> argparse.ArgumentParser:
         if name in ("pause", "freeze"):
             s.add_argument("--no-cancel", action="store_true", help="let runs already in flight finish")
     sub.add_parser("lint", parents=[common], help="check ready issues against the ticket guide")
+    s = sub.add_parser("rules", parents=[common], help="run .night-shift/review-rules.yml over this branch's diff")
+    s.add_argument("--base", default="origin/main", help="compare against this ref (default origin/main)")
     sub.add_parser("roadmap", parents=[common], help="create or refresh the roadmap issue")
     s = sub.add_parser("audit-log", parents=[common], help="export every agent PR: lane, outcome, model, prompt, cost")
     s.add_argument("--since", default="", help="only PRs created on or after this date (YYYY-MM-DD)")
@@ -968,18 +993,21 @@ def parser() -> argparse.ArgumentParser:
     for flag in ("--issue", "--attempt-comment", "--fail-sha", "--result", "--bundle", "--prompt-version"):
         s.add_argument(flag, default="")
     s = sub.add_parser("prompt", parents=[common])
-    s.add_argument("name", choices=["worker", "review", "planner"])
+    s.add_argument("name", choices=list(prompts.PROMPTS))
     s.add_argument("--set", action="append", metavar="KEY=VALUE")
     s = sub.add_parser("schema", parents=[common])
-    s.add_argument("name", choices=["worker", "review", "planner"])
+    s.add_argument("name", choices=list(prompts.SCHEMAS))
     s = sub.add_parser("review-inputs", parents=[common])
     for flag in ("--pr-dir", "--base-ref", "--head-ref", "--out-dir"):
         s.add_argument(flag, required=True)
+    s.add_argument("--rules-root", help="base-branch checkout holding .night-shift/review-rules.yml and the config")
     s.add_argument("--github-output")
     s = sub.add_parser("review-report", parents=[common])
     s.add_argument("--result", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--overlap", type=int, default=0, help="files changed by both the PR and main (review-inputs)")
+    s.add_argument("--rules", help="rule_hits.json (or security_hits.json) from review-inputs")
+    s.add_argument("--security", action="store_true", help="render the security reviewer's result")
     s.add_argument("--github-output")
     return p
 
@@ -987,7 +1015,7 @@ def parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "init": cmd_init, "setup": cmd_setup, "join": cmd_join, "doctor": cmd_doctor, "status": cmd_status,
     "stats": cmd_stats, "start": cmd_switch, "pause": cmd_switch, "freeze": cmd_switch, "resume": cmd_switch,
-    "lint": cmd_lint, "plan": cmd_plan, "roadmap": cmd_roadmap, "digest": cmd_digest,
+    "lint": cmd_lint, "rules": cmd_rules, "plan": cmd_plan, "roadmap": cmd_roadmap, "digest": cmd_digest,
     "config": cmd_config, "audit-log": cmd_audit_log, "app": cmd_app, "app-token": cmd_app_token,
     "take": cmd_take_retry, "retry": cmd_take_retry, "command": cmd_command,
     "audit": cmd_audit, "lane-config": cmd_lane_config,

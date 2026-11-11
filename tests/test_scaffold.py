@@ -238,7 +238,7 @@ class RunnerTests(unittest.TestCase):
 
 class ReusableWorkflowRunnerTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[1] / ".github" / "workflows"
-    AGENT_JOBS = {"lane.yml": {"agent"}, "planner.yml": {"draft"}, "review.yml": {"verdict"}}
+    AGENT_JOBS = {"lane.yml": {"agent"}, "planner.yml": {"draft"}, "review.yml": {"verdict", "security"}}
 
     def test_every_job_takes_its_runner_from_an_input(self):
         for name in ("lane.yml", "planner.yml", "review.yml", "commands.yml", "digest.yml"):

@@ -9,6 +9,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Repo review rules: `.night-shift/review-rules.yml` (read from the base branch, protected from agents) holds
+  repo-specific checks of four kinds (`regex`, `python-call`, `python-decorator`, `path`). The review job runs
+  them deterministically over the PR's added and changed lines and hands every hit to the reviewer, which must
+  answer each one; an unanswered hit or a `no` fails the review. `gh nightshift rules` shows the hits for the
+  current branch, and `doctor` validates the file.
+- An optional security gate (`security.enabled`): a second read-only reviewer, required check
+  `review / security`, started by `security: true` rule hits, `security.paths`, `risk.approve_paths` or
+  `security.always`. High or critical findings fail it; the picker closes such PRs as `security_failed`.
+
 - `runners.github` and `runners.agent` in the config choose the runners the reusable workflows use (default
   `ubuntu-latest`), so lanes can run on self-hosted machines. The jobs that hold the PAT or the App key and the
   jobs that run Claude (agent, planner draft, review) get separate labels, and the config refuses label sets

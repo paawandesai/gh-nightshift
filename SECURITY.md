@@ -191,6 +191,22 @@ prompt says to treat the PR's contents, including any `CLAUDE.md` in it, as mate
 GitHub token in the job is used only by the script steps, never by Claude's step. The review workflow
 itself lives under `.github/`, which agents cannot change.
 
+**Review rules.** `.night-shift/review-rules.yml` is read from the base checkout, never from the PR, and sits
+under `.night-shift/`, a built-in protected path, so an agent cannot add, weaken or delete the rules that judge
+its own PR. The runner is deterministic and stdlib only: it parses the base branch's rules, reads the PR's files
+(skipping symlinks, files outside the checkout and files over 1 MB) and never executes PR code. Snippets it
+quotes are code under review; backticks are replaced so a snippet cannot close its code span. A hit the reviewer
+leaves unanswered or answers `no` fails the review whatever verdict the reviewer gave, and more hits than the
+cap (60) fail it too.
+
+**The security gate** (`security.enabled`) is a second job in `review.yml` with the same isolation: base
+checkout as working directory, PR mounted read-only, `Read,Grep,Glob` only, no PAT. It receives one Claude
+token, `security.claude_token_secret` (default: the review token), never a PAT; the config refuses a secret name
+used both ways. It calls Claude only when a `security: true` rule hits, the PR touches `security.paths` or
+`risk.approve_paths`, or `security.always` is on, and otherwise passes. A high or critical finding fails the
+check even if the reviewer said pass. Findings on a PR are posted as PR comments (and on the issue when it
+fails), so on a public repo they are public; they describe unmerged code that the gate has just kept out of main.
+
 ## Auto-merge
 
 The picker merges a lane's PR itself (squash, via the PAT) when it is green. It does not use GitHub's
@@ -207,7 +223,9 @@ auto-merge. The risk is that a wrong but plausible change lands on main overnigh
   re-checked before it can merge, so CI tests what will land. `doctor` fails when `strict` is off in strict
   mode.
 - **The review gate,** an independent Claude run on the base branch's rules. It also checks whether main
-  changed under the PR.
+  changed under the PR, and must answer every hit of the repo's own review rules.
+- **The security gate** (optional, `review / security`): a second read-only reviewer that looks only for
+  exploitable changes, started by security rules or security paths.
 - **Measure the gate.** `gh nightshift audit` samples merged agent PRs and reruns their tests with the
   implementation reverted. `gh nightshift stats --audit audit.csv` estimates the review gate's catch rate,
   with the stated assumptions. LLM labels are not ground truth; a human should label the sample.

@@ -8,8 +8,10 @@ import subprocess
 from pathlib import Path
 from collections.abc import Callable
 
+from . import review_rules
+from .config import Config, ConfigError, load as load_config
 from .gh import GH
-from .rules import BRANCH_RE
+from .rules import BRANCH_RE, path_is_protected
 
 GitRunner = Callable[[list[str]], str]
 MAX_OVERLAP_DIFF = 40_000
@@ -54,10 +56,47 @@ def drift_report(git: GitRunner, base_ref: str) -> tuple[str, str, list[str]]:
     return pr_diff, "\n".join(lines) + "\n", overlap
 
 
-def write_inputs(gh: GH, git: GitRunner, base_ref: str, head_ref: str, out_dir: str) -> dict[str, str]:
+def security_trigger(cfg: Config | None, hits: list[review_rules.Hit], changed: list[str]) -> list[str]:
+    """Why the security reviewer must run (empty: it need not)."""
+    if cfg is None:
+        return []
+    reasons = ["`security.always` is on"] if cfg.security_always else []
+    reasons += [f"security rule `{h.rule.id}` matched {h.path}" + (f":{h.line}" if h.line else "")
+                for h in hits if h.rule.security]
+    paths = cfg.security_trigger_paths
+    reasons += [f"{p} is under a security path" for p in changed if paths and path_is_protected(p, paths)]
+    return reasons
+
+
+def write_rules(rules_root: str | None, pr_dir: str, diff: str, out: Path) -> dict[str, str]:
+    """Run the base branch's review rules over the PR and write what the reviewers need."""
+    cfg = None
+    rules: list[review_rules.Rule] = []
+    if rules_root:
+        try:
+            cfg = load_config(rules_root)
+        except ConfigError:
+            cfg = None  # no or broken config: the rules still run, the security gate has no paths
+        rules = review_rules.load(rules_root)
+    hits = review_rules.scan(rules, pr_dir, diff)
+    cap = review_rules.MAX_HITS
+    sec = [h for h in hits if h.rule.security]
+    (out / "rules.md").write_text(review_rules.render(hits, cap), encoding="utf-8")
+    (out / "security_rules.md").write_text(review_rules.render(sec, cap, "Security rules"), encoding="utf-8")
+    (out / "rule_hits.json").write_text(json.dumps(review_rules.items(hits, cap)), encoding="utf-8")
+    (out / "security_hits.json").write_text(json.dumps(review_rules.items(sec, cap)), encoding="utf-8")
+    reasons = security_trigger(cfg, hits, sorted(review_rules.changed_lines(diff)))
+    (out / "security_trigger.md").write_text(
+        "# Why the security review ran\n\n" + "".join(f"- {r}\n" for r in reasons[:50]), encoding="utf-8")
+    return {"rule_hits": str(len(hits)), "security": "true" if reasons else "false"}
+
+
+def write_inputs(gh: GH, git: GitRunner, base_ref: str, head_ref: str, out_dir: str,
+                 rules_root: str | None = None, pr_dir: str = ".") -> dict[str, str]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     diff, drift, overlap = drift_report(git, base_ref)
+    rule_values = write_rules(rules_root, pr_dir, diff, out)
     (out / "diff.patch").write_text(diff, encoding="utf-8")
     (out / "drift.md").write_text(drift, encoding="utf-8")
     m = BRANCH_RE.match(head_ref)
@@ -68,22 +107,45 @@ def write_inputs(gh: GH, git: GitRunner, base_ref: str, head_ref: str, out_dir: 
     else:
         text = "No linked issue: this PR fixes failing CI on main.\n"
     (out / "issue.md").write_text(text, encoding="utf-8")
-    return {"issue": issue, "overlap": str(len(overlap))}
+    return {"issue": issue, "overlap": str(len(overlap)), **rule_values}
 
 
-def render_report(result_path: str, overlap: int = 0) -> tuple[str, str]:
+def _load_json(path: str | None) -> dict:
+    if not path:
+        return {}
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _structured(result_path: str) -> dict:
+    out = _load_json(result_path).get("structured_output") or {}
+    return ns.defang(out) if isinstance(out, dict) else {}  # the reviewer read agent-written code
+
+
+def _rule_lines(listed: dict, answers: object, security_only: bool = False) -> list[str]:
+    given = {str(a.get("key", "")): a for a in (answers if isinstance(answers, list) else []) if isinstance(a, dict)}
+    lines = []
+    for item in listed.get("items") or []:
+        if security_only and not item.get("security"):
+            continue
+        a = given.get(str(item.get("key", ""))) or {}
+        mark = "✅" if a.get("answer") == "yes" else "❌"
+        lines.append(f"- {mark} `{item.get('key', '')}`: {a.get('evidence', '(not answered)')}")
+    return lines
+
+
+def render_report(result_path: str, overlap: int = 0, rules_path: str | None = None) -> tuple[str, str]:
     """(verdict, comment markdown). verdict is pass, fail or error (the reviewer itself broke).
     `overlap` is the mechanical count of files both this PR and main changed since the merge base: when it is
     above 0, a pass needs the reviewer to state that the PR is still correct against current main (add-on B)."""
-    try:
-        data = json.loads(Path(result_path).read_text(encoding="utf-8"))
-        out = data.get("structured_output") or {}
-        out = ns.defang(out) if isinstance(out, dict) else {}  # the reviewer read agent-written code
-    except (OSError, json.JSONDecodeError, AttributeError):
-        out = {}
+    out = _structured(result_path)
     verdict = out.get("verdict") if out.get("verdict") in {"pass", "fail"} else "error"
     if verdict == "error":
         return verdict, "Review run failed to produce a verdict; see the job log. The attempt is not counted.\n"
+    listed = _load_json(rules_path)
     lines = [f"### Night-shift review: **{verdict}**", ""]
     for a in out.get("answers") or []:
         q = str(a.get("question", ""))
@@ -103,6 +165,47 @@ def render_report(result_path: str, overlap: int = 0) -> tuple[str, str]:
             lines += ["", "Verdict changed to **fail**: main changed files this PR touches and the reviewer did not "
                           "confirm the PR is still correct against current main."]
         lines[0] = f"### Night-shift review: **{verdict}**"
+    if listed.get("items") or listed.get("total"):
+        lines += ["", "**Repo review rules**"] + _rule_lines(listed, out.get("rule_answers"))
+        problems = review_rules.check_answers(listed, out.get("rule_answers"))
+        if problems and verdict == "pass":
+            verdict = "fail"
+            lines += ["", "Verdict changed to **fail**: " + "; ".join(problems)]
+        lines[0] = f"### Night-shift review: **{verdict}**"
     if out.get("fixes"):
         lines += ["", f"**Fixes needed:** {out['fixes']}"]
+    return verdict, "\n".join(lines) + "\n"
+
+
+BLOCKING = {"high", "critical"}
+
+
+def render_security_report(result_path: str, rules_path: str | None = None) -> tuple[str, str]:
+    """(verdict, comment) for the security reviewer: fail on a `fail`, an unanswered or `no` security rule
+    item, or any high or critical finding, whatever verdict the reviewer gave."""
+    out = _structured(result_path)
+    verdict = out.get("verdict") if out.get("verdict") in {"pass", "fail"} else "error"
+    if verdict == "error":
+        return verdict, "Security review failed to produce a verdict; see the job log. The attempt is not counted.\n"
+    listed = _load_json(rules_path)
+    findings = [f for f in out.get("findings") or [] if isinstance(f, dict)]
+    lines = ["### Night-shift security review: **pass**", ""]
+    if findings:
+        lines.append("**Findings**")
+        for f in findings:
+            lines.append(f"- **{f.get('severity', '?')}** {f.get('title', '')} ({f.get('location', '')}): "
+                         f"{f.get('evidence', '')} Attack path: {f.get('attack_path', '')}")
+    else:
+        lines.append("No findings.")
+    if listed.get("items") or listed.get("total"):
+        lines += ["", "**Security rules**"] + _rule_lines(listed, out.get("rule_answers"), security_only=True)
+    problems = review_rules.check_answers(listed, out.get("rule_answers"), security_only=True)
+    blocking = [f for f in findings if f.get("severity") in BLOCKING]
+    if verdict == "pass" and (problems or blocking):
+        verdict = "fail"
+        why = problems + [f"{len(blocking)} high or critical finding(s)"] * bool(blocking)
+        lines += ["", "Verdict changed to **fail**: " + "; ".join(why)]
+    if out.get("fixes"):
+        lines += ["", f"**Fixes needed:** {out['fixes']}"]
+    lines[0] = f"### Night-shift security review: **{verdict}**"
     return verdict, "\n".join(lines) + "\n"

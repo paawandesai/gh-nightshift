@@ -1,7 +1,11 @@
 # gh-nightshift: the independent review gate for agent PRs (head branch agent/...).
 # A separate Claude run with read-only tools answers one yes/no question per failure type, plus whether
-# main moved under the PR in anything it touches (audit add-on B). The `verdict` job fails on "fail",
+# main moved under the PR in anything it touches (audit add-on B), plus one answer per hit of the repo's own
+# review rules (.night-shift/review-rules.yml on the base branch). The `verdict` job fails on "fail",
 # which blocks the merge; the picker then closes the PR with reason `verdict_failed`.
+# The optional `security` job is a second read-only reviewer that looks only for exploitable changes. It
+# calls Claude only when a security rule, a security path or security.always triggers it; a failure closes
+# the PR with reason `security_failed`.
 #
 # Trust boundary: the prompt and the reviewer's working directory (CLAUDE.md, .claude/, .night-shift/)
 # come from the BASE branch. The PR's code is mounted read-only as material under review.
@@ -29,8 +33,23 @@ on:
         type: string
         required: false
         default: ""
+      security:
+        description: >-
+          Run the security gate (required check `review / security`). It calls Claude only when a PR hits a
+          `security: true` rule in .night-shift/review-rules.yml, touches security.paths or risk.approve_paths,
+          or security.always is on; otherwise it passes at once
+        type: boolean
+        required: false
+        default: false
+      security_model:
+        type: string
+        required: false
+        default: ""
     secrets:
       claude_token:
+        required: false
+      security_claude_token:
+        description: Claude token for the security reviewer; the review token is used when this is empty
         required: false
 
 permissions:
@@ -88,7 +107,7 @@ jobs:
           echo "::add-mask::${AUTH#AUTHORIZATION: basic }"
           git -C pr -c "http.https://github.com/.extraheader=$AUTH" fetch -q origin "$BASE_REF"
           python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
-            --out-dir "$WORK" --github-output "$GITHUB_OUTPUT"
+            --out-dir "$WORK" --rules-root base --github-output "$GITHUB_OUTPUT"
 
       # Node for Claude Code, in case a self-hosted runner has none.
       - uses: actions/setup-node@v4
@@ -113,7 +132,8 @@ jobs:
           if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::The review Claude token (review_token_secret, default CLAUDE_TOKEN_REVIEW) is empty"; exit 1; fi
           # Prompt: base branch's .night-shift/prompts/review.md if present, else gh-nightshift's default.
           PROMPT="$(python3 -m nightshift prompt review --root . --set ISSUE_FILE="$WORK/issue.md" \
-            --set DIFF_FILE="$WORK/diff.patch" --set DRIFT_FILE="$WORK/drift.md" --set PR_DIR="$PR_DIR")"
+            --set DIFF_FILE="$WORK/diff.patch" --set DRIFT_FILE="$WORK/drift.md" --set RULES_FILE="$WORK/rules.md" \
+            --set PR_DIR="$PR_DIR")"
           SCHEMA="$(python3 -m nightshift schema review)"
           # Read-only: in -p runs, any tool not allowed here is denied.
           claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" --max-turns 30 --model "$REVIEW_MODEL" \
@@ -121,7 +141,7 @@ jobs:
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$WORK/review.json" 2> "$WORK/review.stderr"
           echo "claude exit code: $?"
           python3 -m nightshift review-report --result "$WORK/review.json" --out "$WORK/comment.md" \
-            --overlap "${{ steps.gather.outputs.overlap || 0 }}" \
+            --overlap "${{ steps.gather.outputs.overlap || 0 }}" --rules "$WORK/rule_hits.json" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Post review and set verdict
@@ -146,6 +166,116 @@ jobs:
 
       - name: Mark a review gate that broke before the reviewer answered
         # e.g. the gather step failed: not a verdict on the code, so the picker refunds the attempt.
+        if: failure() && steps.review.outputs.verdict == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=review-error" >/dev/null || true
+
+  security:
+    if: inputs.security && startsWith(github.head_ref, 'agent/')
+    runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
+    timeout-minutes: 25
+    env:
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_REF: ${{ github.head_ref }}
+      BASE_REF: ${{ github.base_ref }}
+      PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
+      PYTHONSAFEPATH: "1"
+    steps:
+      - name: Check out base (trusted)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - name: Check out PR head (under review)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out gh-nightshift scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+
+      - name: Gather ticket, diff and security rule hits
+        id: gather
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/review"; mkdir -p "$WORK"
+          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::${AUTH#AUTHORIZATION: basic }"
+          git -C pr -c "http.https://github.com/.extraheader=$AUTH" fetch -q origin "$BASE_REF"
+          python3 -m nightshift review-inputs --pr-dir pr --base-ref "origin/$BASE_REF" --head-ref "$HEAD_REF" \
+            --out-dir "$WORK" --rules-root base --github-output "$GITHUB_OUTPUT"
+
+      - name: Nothing to review
+        if: steps.gather.outputs.security != 'true'
+        run: echo "No security rule, security path or security.always applies to this PR; passing."
+
+      - uses: actions/setup-node@v4
+        if: steps.gather.outputs.security == 'true'
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        if: steps.gather.outputs.security == 'true'
+        run: |
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
+
+      - name: Security review
+        id: review
+        if: steps.gather.outputs.security == 'true'
+        working-directory: base
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.security_claude_token || secrets.claude_token }}
+          SECURITY_MODEL: ${{ inputs.security_model || inputs.model || vars.REVIEW_MODEL || 'opus' }}
+        run: |
+          set -uo pipefail
+          WORK="$RUNNER_TEMP/review"; PR_DIR="$GITHUB_WORKSPACE/pr"
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::The security reviewer's Claude token (security.claude_token_secret, else review_token_secret) is empty"; exit 1; fi
+          PROMPT="$(python3 -m nightshift prompt security --root . --set ISSUE_FILE="$WORK/issue.md" \
+            --set DIFF_FILE="$WORK/diff.patch" --set RULES_FILE="$WORK/security_rules.md" \
+            --set TRIGGER_FILE="$WORK/security_trigger.md" --set PR_DIR="$PR_DIR")"
+          SCHEMA="$(python3 -m nightshift schema security)"
+          # Read-only, like the review gate: in -p runs, any tool not allowed here is denied.
+          claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" --max-turns 40 --model "$SECURITY_MODEL" \
+            --add-dir "$WORK" "$PR_DIR" --allowedTools "Read,Grep,Glob" \
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$WORK/security.json" 2> "$WORK/security.stderr"
+          echo "claude exit code: $?"
+          python3 -m nightshift review-report --security --result "$WORK/security.json" --out "$WORK/security.md" \
+            --rules "$WORK/security_hits.json" --github-output "$GITHUB_OUTPUT"
+
+      - name: Post security review and set verdict
+        if: steps.gather.outputs.security == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERDICT: ${{ steps.review.outputs.verdict }}
+          ISSUE: ${{ steps.gather.outputs.issue }}
+        run: |
+          set -uo pipefail
+          WORK="$RUNNER_TEMP/review"
+          jq -n --rawfile b "$WORK/security.md" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$PR/comments" --input - >/dev/null || true
+          if [ "$VERDICT" = "error" ]; then
+            gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=review-error" >/dev/null || true
+            echo "::error::Security review run failed (not a verdict on the code)"; exit 1
+          fi
+          if [ "$VERDICT" != "pass" ] && [ -n "$ISSUE" ]; then
+            jq -n --rawfile b "$WORK/security.md" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$ISSUE/comments" --input - >/dev/null || true
+          fi
+          if [ "$VERDICT" != "pass" ]; then echo "::error::Security verdict: $VERDICT"; exit 1; fi
+
+      - name: Mark a security gate that broke before the reviewer answered
         if: failure() && steps.review.outputs.verdict == ''
         env:
           GH_TOKEN: ${{ github.token }}

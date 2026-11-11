@@ -171,6 +171,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
+| `security` | `enabled: false` | `enabled` (adds the required check `review / security`), `claude_token_secret` (default `review_token_secret`), `model`, `paths` (always reviewed, as are `risk.approve_paths`), `always` (review every PR). See Review rules |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
 | `extends` | | `owner/repo` with an org-wide `.night-shift/config.yml` (see Org-wide config) |
 | `runners` | `ubuntu-latest` | `github` (jobs holding the PAT or App key: pick, publish, planner context and create, commands, digest) and `agent` (jobs that run Claude: the lane agent, planner draft and reviewer): a runner label or a list. Each needs a label the other lacks, and self-hosted runners for the two must be separate machines (see SECURITY.md); `init --regenerate` writes them into the callers |
@@ -230,7 +231,7 @@ as a failed attempt.
 issues, for example "I added helper X you can reuse". Notes are quoted and never change state.
 
 **PR reason codes.** Every agent PR that closes without merging gets a `pr` marker with one of
-`verdict_failed`, `checks_failed`, `conflict`, `stale` (no checks after `stale_minutes`) or `superseded`
+`verdict_failed`, `security_failed`, `checks_failed`, `conflict`, `stale` (no checks after `stale_minutes`) or `superseded`
 (its issue closed, or a newer attempt replaced it). A closed PR with no marker counts as `manual`.
 Merged PRs get `verdict_passed`. `gh nightshift stats` reports these codes.
 
@@ -287,9 +288,38 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 | `roadmap` | Create or refresh the roadmap issue: tickets by wave with status, a Blocked-by mermaid graph, counts per lane. The planner and every merge refresh it too. `plan --show` prints it without writing. |
 | `digest` | `--weekly` reports the last 7 days (the generated workflow also runs it on `digest.weekly_schedule`). Summarise the last `--hours 24`: merged, closed with reasons, stuck, cost per lane. `--post` puts it on the night log; `--webhook-env VAR` also sends it to the Slack or Discord webhook URL in `$VAR`. The generated `night-shift-digest.yml` runs it every morning. |
 | `lint` | Check ready issues against the ticket guide |
+| `rules` | Run `.night-shift/review-rules.yml` over this branch's diff and print the hits the reviewer would get (`--base origin/main`) |
 | `audit-log` | Export every agent PR: lane, issue, outcome, reason code, model, prompt version, cost (`--since`, `--format csv\|jsonl`, `--out`) |
 | `config pull` | Copy the org-wide base config from the `extends:` repo into `.night-shift/base.yml` |
 | `audit` | Sample merged agent PRs (`--sample 25 --seed 1`), collect evidence, optionally rerun tests (`--test-cmd`), and report rates (`--report CSV`; `--label-llm CSV` pre-fills LLM labels, which are not ground truth) |
+
+## Review rules and the security gate
+
+The review gate's six questions apply to every PR alike. `.night-shift/review-rules.yml` adds checks tuned to
+your repo: each rule selects code a PR adds or changes and asks one yes/no question about it, phrased so that
+"yes" means the concern is handled. The rules run deterministically (stdlib regex and Python `ast`, no PR code
+executed), so the same diff always gets the same checklist, and the reviewer must answer every hit. A hit left
+unanswered or answered `no` fails the review. The file is read from the base branch and is a protected path,
+so agents cannot change the rules that judge them. An annotated example is
+[`examples/review-rules.yml`](examples/review-rules.yml).
+
+| Kind | Selects |
+|---|---|
+| `regex` | Added lines matching `pattern` (`unless`: skip files that match another regex) |
+| `python-call` | Added or changed calls whose dotted name matches `pattern` (`subprocess.run`, `cur.execute`) |
+| `python-decorator` | Added or changed functions with a decorator matching `pattern`; with `requires`, only those lacking a decorator matching `requires` (a route without its auth wrapper) |
+| `path` | Every changed, added or deleted file under `paths` / matching `glob` |
+
+Every rule may narrow itself with `paths` and `glob`, and has a `severity` (`low` to `critical`). Run
+`gh nightshift rules` on a branch to see the checklist a PR would get, and `doctor` to validate the file.
+
+**The security gate.** With `security: {enabled: true}`, a second read-only reviewer runs as the required check
+`review / security`. It looks only for changes that make the application exploitable (missing or misplaced
+authorisation, injection, traversal, SSRF, open redirects, secrets, and how the change combines with existing
+code), and must answer every `security: true` rule hit. It calls Claude only when a security rule hits, the PR
+touches `security.paths` or `risk.approve_paths`, or `security.always` is on; otherwise it passes at once. A
+high or critical finding fails it, and the picker closes the PR as `security_failed`. After enabling it, run
+`gh nightshift init --regenerate` and `gh nightshift setup`.
 
 ## Merge modes
 
