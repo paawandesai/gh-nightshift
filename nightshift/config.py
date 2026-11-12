@@ -411,6 +411,20 @@ def parse(data: dict) -> Config:
     unknown = sorted(set(cfg.planner_id_prefixes) - set(names))
     if unknown:
         raise ConfigError(f"planner.id_prefixes names unknown lane(s): {', '.join(unknown)}")
+    # A lane's fallback must not be another lane's, the planner's or a reviewer's token, and the reviewers judge
+    # the lanes' work, so they must not run on a lane owner's token (security review M9).
+    lane_tokens = {lane.token_secret: lane.name for lane in lanes}
+    for lane in lanes:
+        fb = lane.fallback_token_secret
+        if fb and (lane_tokens.get(fb, lane.name) != lane.name or fb in {cfg.review_token_secret, cfg.security_token,
+                                                                        cfg.planner_token_secret}):
+            raise ConfigError(f"lane {lane.name}: fallback_token_secret {fb} is another lane's, the planner's or a "
+                              "reviewer's token")
+    for who, secret in (("review_token_secret", cfg.review_token_secret),
+                        ("security.claude_token_secret", cfg.security_token)):
+        if secret in lane_tokens:
+            raise ConfigError(f"{who} {secret} is also a lane's Claude token: the reviewer must not share a token "
+                              "with the lanes it reviews")
     # A Claude token secret that is also a PAT secret would hand the PAT to the agent job.
     pats = {"AGENT_PAT"} | {lane.agent_pat_secret for lane in lanes}  # AGENT_PAT is always passed as fallback
     claude = claude_secrets(cfg) | {cfg.planner_token_secret, cfg.review_token_secret, cfg.security_token,

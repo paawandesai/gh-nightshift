@@ -448,7 +448,8 @@ def ci_template(cfg: Config) -> str:
     return ("# Starter CI written by `gh nightshift init` because none existed. The night shift requires the `test`\n"
             "# job to pass on every PR and on main. Edit freely; keep the job id `test`.\n"
             f"name: CI\non:\n{triggers}permissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
-            "    steps:\n      - uses: actions/checkout@v4\n" + "\n".join(steps) + "\n")
+            "    steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n"
+            + "\n".join(steps) + "\n")
 
 
 # --- stack detection -------------------------------------------------------------------

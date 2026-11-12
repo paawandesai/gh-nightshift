@@ -82,14 +82,14 @@ jobs:
       PYTHONSAFEPATH: "1"
     steps:
       - name: Check out base (trusted)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base
           persist-credentials: false
 
       - name: Check out PR head (under review)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           path: pr
@@ -97,7 +97,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out gh-nightshift scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
@@ -129,7 +129,7 @@ jobs:
           jq -n --rawfile b "$RUNNER_TEMP/review/reuse.md" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$PR/comments" --input - >/dev/null || true
 
       # Node for Claude Code, in case a self-hosted runner has none.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.gather.outputs.reuse == ''
         with:
           node-version: 22
@@ -138,7 +138,7 @@ jobs:
       - name: Install Claude Code
         if: steps.gather.outputs.reuse == ''
         run: |
-          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
       - name: Review
@@ -209,14 +209,14 @@ jobs:
       PYTHONSAFEPATH: "1"
     steps:
       - name: Check out base (trusted)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base
           persist-credentials: false
 
       - name: Check out PR head (under review)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           path: pr
@@ -224,7 +224,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out gh-nightshift scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
@@ -257,14 +257,14 @@ jobs:
         if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security != 'true'
         run: echo "No security rule, security path or security.always applies to this PR; passing."
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security == 'true'
         with:
           node-version: 22
       - name: Install Claude Code
         if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security == 'true'
         run: |
-          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
       - name: Security review

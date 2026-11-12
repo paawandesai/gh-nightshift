@@ -753,7 +753,7 @@ class GitHubApp(unittest.TestCase):
         with self.assertRaises(app.AppError):
             app.mint("o/r", "", "KEY", request=api, sign=fake_sign)
 
-    def test_github_env_masks_the_token(self):
+    def test_github_output_masks_the_token(self):
         from contextlib import redirect_stdout
 
         from nightshift import app
@@ -761,9 +761,9 @@ class GitHubApp(unittest.TestCase):
         env = Path(tempfile.mkdtemp()) / "env"
         buf = io.StringIO()
         with redirect_stdout(buf):
-            app.write_github_env(str(env), {"token": "ghs_secret", "login": "x[bot]"})
+            app.write_github_output(str(env), {"token": "ghs_secret", "login": "x[bot]"})
         self.assertEqual(buf.getvalue(), "::add-mask::ghs_secret\n")
-        self.assertEqual(env.read_text(), "NIGHT_SHIFT_APP_TOKEN=ghs_secret\nNIGHT_SHIFT_LOGIN=x[bot]\n")
+        self.assertEqual(env.read_text(), "token=ghs_secret\nlogin=x[bot]\n")
 
     def test_app_mode_callers_pass_exactly_two_secrets_per_lane_and_no_pat(self):
         import re
@@ -817,10 +817,10 @@ class GitHubApp(unittest.TestCase):
         with mock.patch.object(app, "http", FakeAppAPI()), mock.patch.object(app, "openssl_sign", fake_sign), \
                 mock.patch.dict(os.environ, {"APP_ID": "4242", "APP_PRIVATE_KEY": "KEY"}):
             out = io.StringIO()
-            rc = cli.main(["app-token", "--root", str(root), "--repo", "o/r", "--github-env", str(env_file)], out=out)
+            rc = cli.main(["app-token", "--root", str(root), "--repo", "o/r", "--github-output", str(env_file)], out=out)
         self.assertEqual(rc, 0)
         self.assertNotIn("ghs_secret", out.getvalue())
-        self.assertIn("NIGHT_SHIFT_APP_TOKEN=ghs_secret", env_file.read_text())
+        self.assertIn("token=ghs_secret", env_file.read_text())
         with mock.patch.dict(os.environ, {"GH_TOKEN": "ghs_secret", "NIGHT_SHIFT_APP_TOKEN": "ghs_secret",
                                           "NIGHT_SHIFT_LOGIN": "night-shift-o[bot]"}):
             args = cli.parser().parse_args(["status", "--root", str(root), "--repo", "o/r"])

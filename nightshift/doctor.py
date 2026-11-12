@@ -159,9 +159,11 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
         if f"@{cfg.tool_ref}" not in text:
             out.append(Check(WARN, f"caller workflow is not pinned to tool_ref {cfg.tool_ref}",
                              "run `gh nightshift init --regenerate`"))
-        elif not re.fullmatch(r"v\d+(\.\d+)*|[0-9a-f]{40}", cfg.tool_ref):
-            out.append(Check(WARN, f"workflows follow gh-nightshift@{cfg.tool_ref}, a moving branch",
-                             "pin tool_ref to a release tag or commit SHA in .night-shift/config.yml"))
+        elif not re.fullmatch(r"[0-9a-f]{40}", cfg.tool_ref):
+            moving = "a tag, which can be moved" if re.fullmatch(r"v\d+(\.\d+)*", cfg.tool_ref) else "a moving branch"
+            out.append(Check(WARN, f"workflows follow gh-nightshift@{cfg.tool_ref}, {moving}",
+                             "pin tool_ref to the release's 40-character commit SHA in .night-shift/config.yml "
+                             "(`gh nightshift init` writes it), then `gh nightshift init --regenerate`"))
         elif sum(c.level == FAIL for c in out) == fails_before:
             out.append(Check(OK, f"caller workflow has one job per lane with explicit secrets, pinned @{cfg.tool_ref}"))
     for name in ("night-shift-review.yml",):

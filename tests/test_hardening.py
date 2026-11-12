@@ -471,3 +471,34 @@ class TaskFileAuthors(unittest.TestCase):
         head = scaffold.template("night-shift-ticket.md").split("---")[1]
         self.assertIn('labels: ["proposed"]', head)
         self.assertNotIn("night-safe", head)
+
+
+class SupplyChain(unittest.TestCase):
+    """M5: actions pinned to commit SHAs, a pinned Claude Code default, and no App token in GITHUB_ENV."""
+
+    def test_every_action_is_pinned_to_a_commit_sha(self):
+        from nightshift import scaffold
+
+        cfg = loads(CONFIG)
+        texts = {name: workflow(name) for name in os.listdir(os.path.join(ROOT, ".github", "workflows"))}
+        texts["scaffold lane"] = scaffold.lane_workflow(cfg)
+        for name, text in texts.items():
+            for ref in re.findall(r"uses: ([\w.-]+/[\w./-]+@\S+)", text):
+                if "/.github/workflows/" in ref:
+                    continue  # the tool_ref pin (H1), which doctor checks
+                with self.subTest(workflow=name, ref=ref):
+                    self.assertRegex(ref, r"@[0-9a-f]{40}$")
+
+    def test_claude_code_default_is_a_fixed_version(self):
+        for name in ("lane.yml", "review.yml", "planner.yml", "redteam.yml"):
+            text = workflow(name)
+            with self.subTest(workflow=name):
+                self.assertNotIn("'latest'", text)
+                self.assertIn("vars.CLAUDE_CODE_VERSION || '2.1.", text)
+
+    def test_app_token_never_goes_to_github_env(self):
+        for name in os.listdir(os.path.join(ROOT, ".github", "workflows")):
+            text = workflow(name)
+            with self.subTest(workflow=name):
+                self.assertNotIn("GITHUB_ENV", text)
+                self.assertNotIn("env.NIGHT_SHIFT_APP_TOKEN", text)

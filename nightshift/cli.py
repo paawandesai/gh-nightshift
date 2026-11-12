@@ -105,7 +105,7 @@ class Ctx:
                 self._gh.trusted_extra = {self.cfg.bot_login, *self.cfg.trusted_logins} - {""}
             except ConfigError:
                 pass  # init, before a config exists
-            # App installation tokens cannot call GET /user; the mint step exports the App's bot login.
+            # App installation tokens cannot call GET /user; the mint step outputs the App's bot login.
             app_login = os.environ.get("NIGHT_SHIFT_LOGIN", "")
             app_token = os.environ.get("NIGHT_SHIFT_APP_TOKEN", "")
             if app_login and app_token and os.environ.get("GH_TOKEN") == app_token:
@@ -270,6 +270,28 @@ def write_files(ctx: Ctx, files: dict[str, str], overwrite: bool) -> list[str]:
     return out
 
 
+def pin_tool_ref(ctx: Ctx, ref: str) -> tuple[str, str]:
+    """(sha, label): a tag or branch resolved to its commit SHA, so a moved tag cannot change the code that runs
+    with the PAT (H1). The label (the tag) becomes a comment. Unresolvable: keep the ref and warn."""
+    if re.fullmatch(r"[0-9a-f]{40}", ref):
+        return ref, ""
+    if ctx.args.files_only:  # --files-only touches no GitHub at all
+        ctx.say(f"note: --files-only leaves tool_ref at {ref}; pin its commit SHA in the config before going live.")
+        return ref, ""
+    try:
+        commit = ctx.gh.get_or_none(f"repos/{scaffold.TOOL_REPO}/commits/{ref}")
+    except (GHError, OSError) as err:
+        commit, why = None, str(err)
+    else:
+        why = "not found"
+    sha = (commit or {}).get("sha", "")
+    if re.fullmatch(r"[0-9a-f]{40}", sha):
+        return sha, ref
+    ctx.say(f"warning: could not resolve {scaffold.TOOL_REPO}@{ref} to a commit ({why}); tool_ref stays {ref}. "
+            "Pin its commit SHA in the config before going live (`gh nightshift doctor` warns until you do).")
+    return ref, ""
+
+
 def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=None) -> int:
     a = ctx.args
     cfg_path = ctx.root / CONFIG_PATH
@@ -287,10 +309,13 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
             ctx.say(f"note: --tool-ref ignored; the config pins {cfg.tool_ref}. Edit tool_ref in {CONFIG_PATH}, "
                     "then run `gh nightshift init --regenerate`.")
     else:
-        data = build_config(ctx.root, ask, a.lanes, a.yes, ctx.out, a.tool_ref or DEFAULT_TOOL_REF, a)
+        sha, label = pin_tool_ref(ctx, a.tool_ref or DEFAULT_TOOL_REF)
+        data = build_config(ctx.root, ask, a.lanes, a.yes, ctx.out, sha, a)
         if getattr(a, "template", None):
             data = scaffold.apply_template(data, a.template)
         text = scaffold.config_yaml(data)
+        if label:
+            text = re.sub(r"^tool_ref: (\S+)$", lambda m: f"{m.group(0)}  # {label}", text, count=1, flags=re.M)
         cfg = loads(text)  # validates what we are about to write
     ctx.say(*write_files(ctx, scaffold.files(cfg, text, ctx.root), overwrite=a.force))
     if getattr(a, "template", None):
@@ -753,7 +778,7 @@ def cmd_take_retry(ctx: Ctx) -> int:
 
 
 def cmd_app_token(ctx: Ctx) -> int:
-    """(workflow) Mint a down-scoped installation token for this repo and expose it to later steps of this job."""
+    """(workflow) Mint a down-scoped installation token for this repo and expose it as this step's outputs."""
     from . import app
 
     try:
@@ -762,7 +787,7 @@ def cmd_app_token(ctx: Ctx) -> int:
     except app.AppError as err:
         ctx.say(f"::error::GitHub App token: {err}")
         return 1
-    app.write_github_env(ctx.args.github_env, result)
+    app.write_github_output(ctx.args.github_output, result)
     ctx.say(f"App token minted for {ctx.repo} as {result['login'] or 'the App'} "
             f"(permissions: {', '.join(f'{k}={v}' for k, v in sorted(result['permissions'].items()))})")
     return 0
@@ -1159,7 +1184,7 @@ def parser() -> argparse.ArgumentParser:
     m.add_argument("--app-id", default="")
     m.add_argument("--key-file", default="", help="private key .pem (default: $APP_PRIVATE_KEY)")
     s = sub.add_parser("app-token", parents=[common])
-    s.add_argument("--github-env", required=True)
+    s.add_argument("--github-output", required=True)
     s.add_argument("--advisories", action="store_true", help="also ask for Repository security advisories: write")
     s = sub.add_parser("command", parents=[common])
     for flag in ("--author", "--body", "--issue"):

@@ -173,6 +173,30 @@ class InitToolRef(unittest.TestCase):
         self.assertIn("lane.yml@v0.1.0", text)
         self.assertEqual(load(root).tool_ref, "v0.1.0")
 
+    def test_init_pins_the_tags_commit_sha(self):
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        out = io.StringIO()
+        rc = cli.main(["init", "--root", root, "--repo", "o/r", "--lanes", "api", "--yes", "--skip-secrets",
+                       "--tool-ref", "v0.1.0"], transport=FakeGitHub(), out=out)
+        self.assertEqual(rc, 0, out.getvalue())
+        sha = "0" * 40
+        self.assertIn(f"lane.yml@{sha}", Path(root, ".github/workflows/night-shift.yml").read_text())
+        self.assertIn(f"tool_ref: \"{sha}\"  # v0.1.0", Path(root, CONFIG_PATH).read_text())  # all digits: quoted
+        self.assertEqual(load(root).tool_ref, sha)
+
+    def test_init_keeps_an_unknown_ref_and_warns(self):
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        out = io.StringIO()
+        rc = cli.main(["init", "--root", root, "--repo", "o/r", "--lanes", "api", "--yes", "--skip-secrets",
+                       "--tool-ref", "v9.9.9"], transport=FakeGitHub(), out=out)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("could not resolve", out.getvalue())
+        self.assertEqual(load(root).tool_ref, "v9.9.9")
+
 
 class InitTests(CliTestCase):
     def test_init_yes_lanes_with_git_remote(self):

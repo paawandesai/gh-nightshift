@@ -78,10 +78,10 @@ jobs:
       issue: ${{ steps.ctx.outputs.issue }}
       prs: ${{ steps.ctx.outputs.prs }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
@@ -102,7 +102,7 @@ jobs:
         run: |
           python3 -m nightshift plan context --mode "$MODE" --docs "$DOCS" --lane "$LANE" \
             --out-dir "$RUNNER_TEMP/plan" --github-output "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.ctx.outputs.run == 'true'
         with:
           name: plan-context
@@ -115,22 +115,22 @@ jobs:
     runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: plan-context
           path: ${{ runner.temp }}/plan
       # Node for Claude Code, in case a self-hosted runner has none.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       # Claude Code goes into this job's temp directory, which the runner empties before every job, so
       # nothing a run leaves behind on a self-hosted machine is what the next job executes as `claude`.
       - name: Install Claude Code
         run: |
-          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
       - name: Draft tickets (read-only)
         env:
@@ -145,7 +145,7 @@ jobs:
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$P/plan.json" 2> "$P/claude.stderr"
           rc=$?; echo "claude exit code: $rc"; tail -n 20 "$P/claude.stderr" || true
           exit "$rc"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: plan-draft
           path: ${{ runner.temp }}/plan/plan.json
@@ -156,28 +156,31 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
           path: .nightshift-tool
           persist-credentials: false
       - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        id: app
         if: inputs.app_id != ''
         env:
           APP_ID: ${{ inputs.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
+        run: python3 -m nightshift app-token --github-output "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: plan-draft
           path: ${{ runner.temp }}/plan
       - name: Validate and create issues
         env:
-          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.agent_pat }}
+          NIGHT_SHIFT_APP_TOKEN: ${{ steps.app.outputs.token }}
+          NIGHT_SHIFT_LOGIN: ${{ steps.app.outputs.login }}
           LANE: ${{ needs.context.outputs.lane }}
           ISSUE: ${{ needs.context.outputs.issue }}
           MODE: ${{ needs.context.outputs.mode }}

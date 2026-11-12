@@ -86,24 +86,25 @@ jobs:
       max_turns: ${{ steps.lane.outputs.max_turns }}
     steps:
       - name: Check out the repository (default branch)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.MAIN_BRANCH }}
           persist-credentials: false
 
       - name: Check out gh-nightshift scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
           path: .nightshift-tool
           persist-credentials: false
       - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        id: app
         if: inputs.app_id != ''
         env:
           APP_ID: ${{ inputs.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
+        run: python3 -m nightshift app-token --github-output "$GITHUB_OUTPUT"
 
       - name: Check lane token exists
         env:
@@ -120,13 +121,17 @@ jobs:
       - name: Check the PAT (account, no Workflows scope)
         if: inputs.app_id == ''
         env:
-          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.agent_pat }}
+          NIGHT_SHIFT_APP_TOKEN: ${{ steps.app.outputs.token }}
+          NIGHT_SHIFT_LOGIN: ${{ steps.app.outputs.login }}
         run: python3 -m nightshift check-pat
 
       - name: Pick next issue
         id: pick
         env:
-          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.agent_pat }}
+          NIGHT_SHIFT_APP_TOKEN: ${{ steps.app.outputs.token }}
+          NIGHT_SHIFT_LOGIN: ${{ steps.app.outputs.login }}
           AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
           FIX_LANE: ${{ vars.FIX_LANE }}
           ONLY_LANE: ${{ inputs.only_lane }}
@@ -137,7 +142,9 @@ jobs:
         id: prep
         if: steps.pick.outputs.mode != 'skip'
         env:
-          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.agent_pat }}
+          NIGHT_SHIFT_APP_TOKEN: ${{ steps.app.outputs.token }}
+          NIGHT_SHIFT_LOGIN: ${{ steps.app.outputs.login }}
           MODE: ${{ steps.pick.outputs.mode }}
           ISSUE: ${{ steps.pick.outputs.issue }}
           FAIL_SHA: ${{ steps.pick.outputs.fail_sha }}
@@ -146,7 +153,7 @@ jobs:
           python3 -m nightshift task --lane "$LANE" --mode "$MODE" --issue "$ISSUE" --fail-sha "$FAIL_SHA" \
             --run-url "$RUN_URL" --out-dir "$RUNNER_TEMP/task" --github-output "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.pick.outputs.mode != 'skip'
         with:
           name: task-${{ inputs.lane }}
@@ -178,19 +185,19 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.MAIN_BRANCH }}
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: task-${{ inputs.lane }}
           path: ${{ runner.temp }}/task
 
       # Node for Claude Code, set up before the lane's own setup so a Node version the lane picks wins.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
@@ -215,7 +222,7 @@ jobs:
       # nothing a run leaves behind on a self-hosted machine is what the next job executes as `claude`.
       - name: Install Claude Code
         run: |
-          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
       - name: Run agent
@@ -344,7 +351,7 @@ jobs:
             echo "token guard: clean"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: out-${{ inputs.lane }}
@@ -360,27 +367,28 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/.nightshift-tool
       PYTHONSAFEPATH: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.MAIN_BRANCH }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Check out gh-nightshift scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
           path: .nightshift-tool
           persist-credentials: false
       - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        id: app
         if: inputs.app_id != ''
         env:
           APP_ID: ${{ inputs.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
+        run: python3 -m nightshift app-token --github-output "$GITHUB_OUTPUT"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: out-${{ inputs.lane }}
@@ -388,7 +396,9 @@ jobs:
 
       - name: Validate, open PR, report
         env:
-          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.agent_pat }}
+          NIGHT_SHIFT_APP_TOKEN: ${{ steps.app.outputs.token }}
+          NIGHT_SHIFT_LOGIN: ${{ steps.app.outputs.login }}
           MODE: ${{ needs.pick.outputs.mode }}
           ISSUE: ${{ needs.pick.outputs.issue }}
           BRANCH: ${{ needs.pick.outputs.branch }}
