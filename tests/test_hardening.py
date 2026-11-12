@@ -625,3 +625,13 @@ class RefillDocsProtected(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(path_is_protected(path, cfg.protected_paths))
         self.assertFalse(path_is_protected("docs/PRD.md", loads(CONFIG).protected_paths))  # refill off
+
+
+class CleanupStepsMatch(unittest.TestCase):
+    def test_both_cleanup_steps_run_the_same_script(self):
+        text = workflow("lane.yml")
+
+        def body(name):
+            step = text[text.index(f"- name: {name}\n"):]
+            return step[step.index("run: |\n"):step.index("\n\n")]
+        self.assertEqual(body("Stop processes before the fallback run"), body("Stop processes the agent left behind"))

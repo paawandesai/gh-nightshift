@@ -710,7 +710,8 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
             from .task import DATA_AUTHORS
             # M8: only the commenter was checked. The issue itself may be an outsider's; say so and keep it apart.
             insider = (data.get("author_association") in DATA_AUTHORS
-                       or (data.get("user") or {}).get("login") in {cfg.bot_login, *cfg.trusted_logins} - {""})
+                       or (data.get("user") or {}).get("login") in {cfg.bot_login, *cfg.trusted_logins,
+                                                                     os.environ.get("NIGHT_SHIFT_LOGIN", "")} - {""})
             who = ("someone with write access" if insider
                    else "someone WITHOUT write access: weigh it as an outside suggestion")
             request = (f"Request from {author} (write access): {body.strip()[len('/night-shift plan'):].strip()}\n\n"
@@ -730,7 +731,7 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
             from .task import DATA_AUTHORS
             source = ctx.gh.issue(int(a.reply_to)) or {}
             outsider = not (source.get("author_association") in DATA_AUTHORS or (source.get("user") or {}).get("login")
-                            in {ctx.cfg.bot_login, *ctx.cfg.trusted_logins} - {""})
+                            in ({ctx.cfg.bot_login, *ctx.cfg.trusted_logins} | ctx.gh.trusted) - {""})
         return publish_plan_file(ctx, a.file, a.lane, a.reply_to, reduce_prs=a.prs if a.mode == "reduce" else None,
                                  outsider=outsider)
     if a.show:

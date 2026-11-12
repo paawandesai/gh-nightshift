@@ -135,7 +135,7 @@ class Config:
         if self.planner_refill_below > 0:
             # M8: the planner files tickets from these on a timer, unattended. A folder entry may lack its slash.
             for doc in self.planner_docs:
-                extra += [doc] if doc.endswith("/") or "." in doc.rsplit("/", 1)[-1] else [doc, doc.rstrip("/") + "/"]
+                extra += [doc] if doc.endswith("/") else [doc, doc + "/"]
         return BUILTIN_PROTECTED + [p for p in self.extra_protected + extra if p not in BUILTIN_PROTECTED]
 
     @property
