@@ -220,8 +220,9 @@ these comments in its task file, in a section marked trusted.
 
 **Needs a decision.** When a review fails because the ticket itself keeps the code from passing (it fixes a
 signature that a repo rule or the security review forbids), the next attempt reports `decision` instead of
-trying the same contract again: the issue gets `needs-human`, is not retried, and the agent files a
-`proposed` follow-up saying how the ticket should change. The planner also sees the repo review rules, so it
+trying the same contract again: the issue gets `needs-human` and is not retried, the attempt is not counted,
+and the agent files a `proposed` follow-up saying how the ticket should change (even if an earlier attempt
+already filed follow-ups). The planner also sees the repo review rules, so it
 should not write such tickets in the first place.
 
 **Waiting on another lane (needs).** An agent that hits something another lane owns and that does not exist

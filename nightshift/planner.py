@@ -457,11 +457,14 @@ def context(gh: GH, cfg: Config, mode: str, docs: list[str] | None = None, lane:
         out += ["## Repo review rules (every agent PR is checked against these; the ticket's `do` and `interface` "
                 "must let the code satisfy each rule that will select it, or the PR fails review. If a doc's contract "
                 "conflicts with a rule, defer that requirement as a product decision instead of ticketing it)"]
-        for r in rules[:50]:
+        shown = 50
+        for r in rules[:shown]:
             where = ", ".join(r.paths) or "any path"
             where += f" ({r.glob})" if r.glob else ""
             tag = f"{'security, ' if r.security else ''}{r.severity}"
             out.append(f"- `{ns.one_line(r.id, 80)}` [{tag}] on {ns.one_line(where, 200)}: {ns.one_line(r.question, 300)}")
+        if len(rules) > shown:
+            out.append(f"- ({len(rules) - shown} more rule(s) not shown; see .night-shift/review-rules.yml)")
         out.append("")
     out += ["## Existing issues (do not duplicate; you may depend on them by number)"]
     for i in sorted(issues, key=lambda i: i["number"])[-300:]:

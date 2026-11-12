@@ -567,7 +567,7 @@ def plan_context(ctx: Ctx, mode: str, docs: list[str] | None, lane: str, out_dir
 
     try:
         rules = review_rules.load(ctx.root)
-    except review_rules.RulesError as err:
+    except (review_rules.RulesError, OSError, UnicodeDecodeError) as err:
         ctx.say(f"::warning::{review_rules.RULES_PATH} is invalid, planning without it: {err}")
         rules = []
     (out_dir / "context.md").write_text(planner.context(ctx.gh, cfg, mode, docs, lane, request, rules),

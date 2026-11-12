@@ -227,6 +227,10 @@ class Context(unittest.TestCase):
         self.assertIn("- `money-needs-owner-check` [security, high] on api/ (*.py): Does this check the caller owns it?",
                       text)
         self.assertNotIn("Repo review rules", planner.context(gh, loads(CONFIG), "prd"))
+        many = [Rule(id=f"r{i}", kind="path", question="q\n## Injected heading", paths=["x/"]) for i in range(60)]
+        text = planner.context(gh, loads(CONFIG), "prd", rules=many)
+        self.assertIn("10 more rule(s) not shown", text)
+        self.assertNotIn("\n## Injected heading", text)
 
     def test_write_permission_check(self):
         f = FakeGitHub()

@@ -795,6 +795,20 @@ class PlanTests(CliTestCase):
         outputs = Path(gh_out).read_text() if os.path.exists(gh_out) else ""
         return rc, text, out_dir, outputs
 
+    def test_plan_context_lists_rules_and_survives_a_bad_rules_file(self):
+        rules = Path(self.root) / ".night-shift" / "review-rules.yml"
+        rules.parent.mkdir(parents=True, exist_ok=True)
+        rules.write_text("version: 1\nrules:\n  - id: shell-call\n    kind: path\n    paths: [api/]\n"
+                         "    question: Is the command a fixed list?\n", encoding="utf-8")
+        rc, _, out_dir, _ = self.context("gap")
+        self.assertEqual(rc, 0)
+        self.assertIn("`shell-call`", (Path(out_dir) / "context.md").read_text())
+        rules.write_bytes(b"\xff\xfe not utf-8")
+        rc, text, out_dir, _ = self.context("gap")
+        self.assertEqual(rc, 0)
+        self.assertIn("planning without it", text)
+        self.assertNotIn("Repo review rules", (Path(out_dir) / "context.md").read_text())
+
     def test_refill_skips_when_lanes_full(self):
         for n, lane in ((10, "api"), (11, "api"), (12, "web"), (13, "web")):
             self.fake.add_issue(number=n, title=f"t{n}", labels=[f"lane:{lane}", "night-safe"])

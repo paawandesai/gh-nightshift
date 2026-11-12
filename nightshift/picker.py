@@ -232,7 +232,7 @@ class Picker:
             # Parallel lanes editing the same lines is not the agent's failure.
             self.refund_last_attempt(issue, f"PR #{num} hit a merge conflict with main")
         hint = (" If the ticket itself keeps the code from passing a repo rule or the security review, the next "
-                "attempt reports `decision` and asks a person." if reason in {"verdict_failed", "security_failed"} else "")
+                "attempt should report `decision` and ask a person." if reason in {"verdict_failed", "security_failed"} else "")
         self.gh.comment(issue, f"Night shift: PR #{num} was closed ({why}). "
                                f"See the review comments on it before retrying.{hint}")
 
