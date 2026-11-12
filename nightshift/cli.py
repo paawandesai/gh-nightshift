@@ -913,7 +913,8 @@ def cmd_digest(ctx: Ctx) -> int:
 def cmd_lane_config(ctx: Ctx) -> int:
     lane = ctx.cfg.lane(ctx.args.lane)
     values = {"postgres_image": lane.postgres_image, "setup_action": lane.setup_action,
-              "max_turns": str(ctx.cfg.max_turns), "test_command": lane.test_command}
+              "max_turns": str(ctx.cfg.max_turns), "test_command": lane.test_command,
+              "sudo": "true" if lane.sudo else "false"}
     write_outputs(ctx.args.github_output, values)
     ctx.say(json.dumps(values))
     return 0

@@ -45,9 +45,15 @@ class Workflows(unittest.TestCase):
                 self.assertRegex(workflow(name), r'PYTHONSAFEPATH: "1"')
 
     def test_read_only_claude_steps_deny_write_and_network_tools(self):
-        for name in ("review.yml", "planner.yml"):
+        for name in ("review.yml", "planner.yml", "redteam.yml"):
+            text = workflow(name)
             with self.subTest(name=name):
-                self.assertIn('--disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"', workflow(name))
+                self.assertIn('--disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,'
+                              'Read(//proc/**),Read(//sys/**)"', text)
+                # M4: no Claude token in Claude's environment; it is read from fd 3 and checked in the output.
+                self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN: ${{", text)
+                self.assertEqual(text.count("env -u TOKEN claude -p"), text.count("claude -p"))
+                self.assertEqual(text.count("if leaks "), text.count("claude -p"))
 
     def test_review_base_fetch_authenticates_without_persisting_the_token(self):
         # Seen live: on a private repo the credential-less checkout made `git fetch origin main` die with exit 128.
@@ -74,7 +80,17 @@ class Workflows(unittest.TestCase):
         agent = text[text.index("\n  agent:"):text.index("\n  publish:")]
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN: ${{", agent)
         self.assertIn("export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3", agent)
-        self.assertIn("env -u LANE_CLAUDE_TOKEN -u LANE_CLAUDE_FALLBACK claude -p", agent)
+        self.assertIn("env -u LANE_CLAUDE_TOKEN claude -p", agent)
+        self.assertIn("env -u LANE_CLAUDE_FALLBACK claude -p", agent)
+        # M9: the first attempt's step never holds the fallback token; the fallback step holds only that one.
+        first = agent[agent.index("- name: Run agent\n"):agent.index("- name: Run agent (fallback token)")]
+        second = agent[agent.index("- name: Run agent (fallback token)"):agent.index("- name: Stop processes")]
+        self.assertNotIn("secrets.claude_token_fallback }}", first)
+        self.assertIn("secrets.claude_token_fallback != ''", first)
+        self.assertNotIn("secrets.claude_token }}", second)
+        self.assertIn("if: steps.agent.outputs.fallback == 'true'", second)
+        # H5: leftover processes are stopped before anything is packaged or checked.
+        self.assertLess(agent.index("- name: Stop processes"), agent.index("- name: Package commits"))
         # The guard runs after the commits are packaged and before anything is uploaded.
         self.assertLess(agent.index("- name: Package commits"), agent.index("- name: Token guard"))
         self.assertLess(agent.index("- name: Token guard"), agent.rindex("actions/upload-artifact"))
@@ -383,13 +399,16 @@ class AgentRunScript(unittest.TestCase):
         fi
         """)
 
-    def script(self):
+    @staticmethod
+    def step(name):
         text = workflow("lane.yml")
-        step = text[text.index("- name: Run agent"):]
-        body = step[step.index("run: |\n") + len("run: |\n"):step.index("\n      - name: Package commits")]
-        return textwrap.dedent(body)
+        step = text[text.index(f"- name: {name}\n"):]
+        body = step[step.index("run: |\n") + len("run: |\n"):]
+        return textwrap.dedent(body[:body.index("\n\n")])
 
     def run_agent(self, token, fallback, half="", rc=0):
+        """Runs `Run agent`, then `Run agent (fallback token)` when the first step's output asks for it, each with
+        only its own step's secret, the way Actions would."""
         tmp = tempfile.mkdtemp()
         repo, bin_dir, task = (os.path.join(tmp, d) for d in ("repo", "bin", "task"))
         for d in (repo, bin_dir, task):
@@ -404,20 +423,27 @@ class AgentRunScript(unittest.TestCase):
                                                      "--allow-empty", "-m", "base"],
                      ["update-ref", "refs/remotes/origin/main", "HEAD"]):
             subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
-        calls, leak = os.path.join(tmp, "calls"), os.path.join(tmp, "leak")
-        run = subprocess.run(["bash", "-e", "-c", self.script()], cwd=repo, capture_output=True, text=True,
-                             env={**env, "RUNNER_TEMP": tmp, "MAIN_BRANCH": "main", "BRANCH": "agent/api/issue-1",
-                                  "LANE_CLAUDE_TOKEN": token, "LANE_CLAUDE_FALLBACK": fallback,
-                                  "TOKEN_IN_ENV": "false", "MODEL": "sonnet", "MAX_TURNS": "80",
-                                  "PERMISSION_FLAGS": "", "NS_CALLS": calls, "NS_ENVLEAK": leak,
-                                  "NS_GOOD": self.GOOD, "NS_HALF": half})
-        self.assertEqual(run.returncode, rc, run.stderr)  # the step fails exactly when the last claude run did
+        calls, leak, gh_out = (os.path.join(tmp, f) for f in ("calls", "leak", "gh_output"))
+        Path(calls).touch()
+        common = {**env, "RUNNER_TEMP": tmp, "MAIN_BRANCH": "main", "BRANCH": "agent/api/issue-1",
+                  "TOKEN_IN_ENV": "false", "MODEL": "sonnet", "MAX_TURNS": "80", "PERMISSION_FLAGS": "",
+                  "NS_CALLS": calls, "NS_ENVLEAK": leak, "NS_GOOD": self.GOOD, "NS_HALF": half, "GITHUB_OUTPUT": gh_out}
+        run = subprocess.run(["bash", "-e", "-c", self.step("Run agent")], cwd=repo, capture_output=True, text=True,
+                             env={**common, "LANE_CLAUDE_TOKEN": token, "HAS_FALLBACK": "true" if fallback else "false"})
+        log = run.stdout
+        outputs = Path(gh_out).read_text() if os.path.exists(gh_out) else ""
+        if "fallback=true" in outputs.splitlines():
+            self.assertEqual(run.returncode, 0, run.stderr)
+            run = subprocess.run(["bash", "-e", "-c", self.step("Run agent (fallback token)")], cwd=repo,
+                                 capture_output=True, text=True, env={**common, "LANE_CLAUDE_FALLBACK": fallback})
+            log += run.stdout
+        self.assertEqual(run.returncode, rc, run.stderr)  # the job fails exactly when the last claude run did
         for secret in (token, fallback):
             if secret:
-                self.assertNotIn(secret, run.stdout + run.stderr)
+                self.assertNotIn(secret, log + run.stderr)
         used = Path(calls).read_text().split()
         self.assertEqual(set(Path(leak).read_text().split()), {"0"})  # claude never sees either secret's variable
-        return used, json.loads(Path(tmp, "out", "result.json").read_text()), run.stdout, sorted(os.listdir(Path(tmp, "out")))
+        return used, json.loads(Path(tmp, "out", "result.json").read_text()), log, sorted(os.listdir(Path(tmp, "out")))
 
     def test_working_token_runs_once(self):
         used, result, log, _ = self.run_agent(self.GOOD, self.LIMITED)
@@ -502,3 +528,56 @@ class SupplyChain(unittest.TestCase):
             with self.subTest(workflow=name):
                 self.assertNotIn("GITHUB_ENV", text)
                 self.assertNotIn("env.NIGHT_SHIFT_APP_TOKEN", text)
+
+
+class LeftoverProcesses(unittest.TestCase):
+    """H5: the cleanup step ends what the agent started and nothing that ran before it."""
+
+    def test_new_processes_end_and_old_ones_stay(self):
+        text = workflow("lane.yml")
+        step = text[text.index("- name: Stop processes the agent left behind\n"):]
+        script = textwrap.dedent(step[step.index("run: |\n") + len("run: |\n"):step.index("\n\n")])
+        tmp = tempfile.mkdtemp()
+        old = subprocess.Popen(["sleep", "30"])
+        new = subprocess.Popen(["sleep", "30"])
+        try:
+            # A `ps` that lists only these two as this user's processes, so the test can never end anything else.
+            Path(tmp, "ps").write_text(textwrap.dedent(f"""\
+                #!/bin/bash
+                if [ "$1" = "-u" ]; then printf '%s\\n' {old.pid} {new.pid}; else exec /bin/ps "$@"; fi
+                """))
+            os.chmod(Path(tmp, "ps"), 0o755)
+            run = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
+                                 env={"PATH": f"{tmp}:{os.environ['PATH']}", "BEFORE": f"1 {old.pid}"})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(new.wait(timeout=5), -9)
+            self.assertIsNone(old.poll())
+        finally:
+            for proc in (old, new):
+                proc.kill()
+                proc.wait()
+
+
+class ReviewerTokenGuard(unittest.TestCase):
+    """M4: the `leaks` check the review, planner and red-team steps run over Claude's output."""
+
+    def test_finds_the_token_and_its_base64_form_only(self):
+        import base64
+
+        text = workflow("review.yml")
+        start = text.index("          leaks() {")
+        func = textwrap.dedent(text[start:text.index("\n", text.index("grep -qaF", start))])
+        token = "sk-ant-oat01-" + "Zx9" * 20
+        tmp = tempfile.mkdtemp()
+        files = {"plain": f'{{"evidence": "{token}"}}', "b64": base64.b64encode(token.encode()).decode(),
+                 "clean": '{"verdict": "pass"}'}
+        for name, body in files.items():
+            Path(tmp, name).write_text(body)
+        for name, hit in (("plain", True), ("b64", True), ("clean", False)):
+            with self.subTest(name=name):
+                run = subprocess.run(["bash", "-c", f'{func}\nleaks "$1"', "x", str(Path(tmp, name))],
+                                     env={"PATH": os.environ["PATH"], "TOKEN": token}, capture_output=True, text=True)
+                self.assertEqual(run.returncode == 0, hit, run.stderr)
+        run = subprocess.run(["bash", "-c", f'{func}\nleaks "$1"', "x", str(Path(tmp, "plain"))],
+                             env={"PATH": os.environ["PATH"], "TOKEN": "short"}, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1)  # no real token: nothing to guard

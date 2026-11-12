@@ -82,6 +82,7 @@ lanes:
     claude_token_secret: CLAUDE_TOKEN_BOB
     agent_pat_secret: AGENT_PAT_BOB   # optional: PRs credited to Bob; falls back to AGENT_PAT
     budget_usd_per_night: 20          # optional: stop picking for the night at this API-equivalent spend
+    sudo: false                       # optional: the agent runs without sudo or Docker (setup still has them)
     setup:
       commands: [cd web && npm ci]
       action: .night-shift/actions/web-setup

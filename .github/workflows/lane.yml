@@ -84,6 +84,9 @@ jobs:
       postgres_image: ${{ steps.lane.outputs.postgres_image }}
       setup_action: ${{ steps.lane.outputs.setup_action }}
       max_turns: ${{ steps.lane.outputs.max_turns }}
+      sudo: ${{ steps.lane.outputs.sudo }}
+      task_artifact: ${{ steps.task_upload.outputs.artifact-id }}
+      out_artifact: ${{ steps.prep.outputs.out_artifact }}
     steps:
       - name: Check out the repository (default branch)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -152,11 +155,15 @@ jobs:
         run: |
           python3 -m nightshift task --lane "$LANE" --mode "$MODE" --issue "$ISSUE" --fail-sha "$FAIL_SHA" \
             --run-url "$RUN_URL" --out-dir "$RUNNER_TEMP/task" --github-output "$GITHUB_OUTPUT"
+          # Every lane runs in the same workflow run and can list its artifacts. The agent's output goes under a
+          # name no other lane can guess before it exists, and publish downloads it by the id the upload returned.
+          echo "out_artifact=out-$LANE-$GITHUB_RUN_ATTEMPT-$(openssl rand -hex 12)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: task_upload
         if: steps.pick.outputs.mode != 'skip'
         with:
-          name: task-${{ inputs.lane }}
+          name: task-${{ inputs.lane }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/task
           retention-days: 3
 
@@ -167,6 +174,8 @@ jobs:
     timeout-minutes: 50
     permissions:
       contents: read
+    outputs:
+      out_artifact: ${{ steps.out_upload.outputs.artifact-id }}
     env:
       BRANCH: ${{ needs.pick.outputs.branch }}
       DATABASE_URL: ${{ needs.pick.outputs.postgres_image != '' && 'postgres://postgres:postgres@localhost:5432' || '' }}
@@ -193,7 +202,8 @@ jobs:
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: task-${{ inputs.lane }}
+          artifact-ids: ${{ needs.pick.outputs.task_artifact }}
+          merge-multiple: true
           path: ${{ runner.temp }}/task
 
       # Node for Claude Code, set up before the lane's own setup so a Node version the lane picks wins.
@@ -225,10 +235,44 @@ jobs:
           npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
-      - name: Run agent
+      # Taken after setup, so the cleanup step below stops only what the agent started.
+      - name: Note running processes
+        id: procs
+        run: echo "pids=$(ps -u "$(id -u)" -o pid= | tr -s ' \n' ' ')" >> "$GITHUB_OUTPUT"
+
+      # Lane option `sudo: false`. Setup ran with sudo; the agent does not get it, so it cannot become root and read
+      # the runner's own tokens from memory. GitHub-hosted runners only: on a self-hosted machine this would be a
+      # lasting change, so there it is the machine owner's job to run the agent user without sudo.
+      - name: Remove sudo before the agent runs
+        if: needs.pick.outputs.sudo == 'false'
         env:
+          HAS_SERVICE: ${{ needs.pick.outputs.postgres_image != '' }}
+          RUNNER_KIND: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_KIND" != "github-hosted" ]; then
+            echo "::warning::sudo: false is applied only on GitHub-hosted runners; run self-hosted agent runners as a user without sudo"
+            exit 0
+          fi
+          # The docker group is root by another name. A lane with a database keeps it (the runner stops the
+          # service container through it after the job).
+          if [ "$HAS_SERVICE" != "true" ] && [ -S /var/run/docker.sock ]; then
+            sudo chown root:root /var/run/docker.sock && sudo chmod 600 /var/run/docker.sock
+          elif [ "$HAS_SERVICE" = "true" ]; then
+            echo "::warning::postgres_image keeps Docker access, which is root-equivalent; sudo is still removed"
+          fi
+          sudo find /etc/sudoers.d -type f -delete
+          sudo -k
+          if sudo -n true 2> /dev/null; then echo "::error::sudo still works after removing /etc/sudoers.d"; exit 1; fi
+          echo "sudo removed for the rest of this job"
+
+      - name: Run agent
+        id: agent
+        env:
+          # Only the lane's own token is here. The fallback token gets its own step, which runs only when this one
+          # could not start, so a run that does not need it never holds it.
           LANE_CLAUDE_TOKEN: ${{ secrets.claude_token }}
-          LANE_CLAUDE_FALLBACK: ${{ secrets.claude_token_fallback }}
+          HAS_FALLBACK: ${{ secrets.claude_token_fallback != '' }}
           # 'true' puts the token back in Claude's environment (for Claude Code versions without
           # CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR). Tests and tools the agent runs can then read it.
           TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
@@ -248,51 +292,88 @@ jobs:
             'node_modules/' '.DS_Store' > "$RUNNER_TEMP/agent-excludes"
           git config core.excludesFile "$RUNNER_TEMP/agent-excludes"
           git switch -c "$BRANCH"
+          if [ -z "$LANE_CLAUDE_TOKEN" ]; then
+            echo "fallback=true" >> "$GITHUB_OUTPUT"; echo "no lane token; the fallback step runs"; exit 0
+          fi
           PROMPT="$(sed "s|__TASK_FILE__|$RUNNER_TEMP/task/task.md|g" "$RUNNER_TEMP/task/prompt.md")"
           # Claude reads the token from a pipe (file descriptor 3), not from its environment, so the commands it
           # runs (tests, package scripts, `env`) do not inherit it. This stops accidental leaks; an agent that
           # sets out to find its own token still can, which is what the token guard below is for.
-          # The step runs under `bash -e`: a failing claude must not end it before the fallback gets its turn, so
-          # its exit code is kept in RC and returned at the end.
-          RC=0
-          run_claude() {  # $1: the Claude token for this attempt
-            if [ "$TOKEN_IN_ENV" = "true" ]; then
-              export CLAUDE_CODE_OAUTH_TOKEN="$1"; exec 3< /dev/null
-            else
-              export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$1")
-            fi
-            # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
-            env -u LANE_CLAUDE_TOKEN -u LANE_CLAUDE_FALLBACK claude -p "$PROMPT" --output-format json \
-              --json-schema "$(cat "$RUNNER_TEMP/task/schema.json")" \
-              --model "$MODEL" --max-turns "$MAX_TURNS" $PERMISSION_FLAGS > "$OUT/result.json" 2> "$OUT/claude.stderr" \
-              && RC=0 || RC=$?
-            echo "claude exit code: $RC (model $MODEL)"
-            exec 3<&-
-            unset CLAUDE_CODE_OAUTH_TOKEN
-          }
-          # Same rule as the publish job's infra-error: no structured output and fewer than 2 turns means the run
-          # never really started (usage limit, expired or revoked token, outage).
-          never_started() {
-            local turns
-            turns="$(jq -r 'if (.structured_output | type) == "object" then 99 else (.num_turns // 0) end' \
-              "$OUT/result.json" 2>/dev/null || echo 0)"
-            [ "${turns:-0}" -lt 2 ] && [ "$(git rev-list --count "origin/$MAIN_BRANCH..HEAD")" -eq 0 ]
-          }
-          if [ -n "$LANE_CLAUDE_TOKEN" ]; then
-            run_claude "$LANE_CLAUDE_TOKEN"
-            if [ -n "$LANE_CLAUDE_FALLBACK" ] && never_started; then
-              echo "::warning::The lane's Claude token did not start a run (usage limit or sign-in); retrying with its fallback token"
-              mv "$OUT/claude.stderr" "$OUT/claude.primary.stderr"
-              git checkout -q -- . 2>/dev/null || true
-              run_claude "$LANE_CLAUDE_FALLBACK"
-              echo "claude token: fallback"
-            fi
+          if [ "$TOKEN_IN_ENV" = "true" ]; then
+            export CLAUDE_CODE_OAUTH_TOKEN="$LANE_CLAUDE_TOKEN"; exec 3< /dev/null
           else
-            run_claude "$LANE_CLAUDE_FALLBACK"
-            echo "claude token: fallback"
+            export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$LANE_CLAUDE_TOKEN")
+          fi
+          # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
+          env -u LANE_CLAUDE_TOKEN claude -p "$PROMPT" --output-format json \
+            --json-schema "$(cat "$RUNNER_TEMP/task/schema.json")" \
+            --model "$MODEL" --max-turns "$MAX_TURNS" $PERMISSION_FLAGS > "$OUT/result.json" 2> "$OUT/claude.stderr" \
+            && RC=0 || RC=$?  # the step runs under `bash -e`: keep the exit code instead of stopping here
+          exec 3<&-
+          unset CLAUDE_CODE_OAUTH_TOKEN
+          echo "claude exit code: $RC (model $MODEL)"
+          # Same rule as the publish job's infra-error: no structured output and fewer than 2 turns means the run
+          # never really started (usage limit, expired or revoked token, outage). Both inputs are the agent's, so an
+          # agent can force the fallback run; it cannot reach the fallback token from here.
+          TURNS="$(jq -r 'if (.structured_output | type) == "object" then 99 else (.num_turns // 0) end' \
+            "$OUT/result.json" 2> /dev/null || echo 0)"
+          if [ "$HAS_FALLBACK" = "true" ] && [ "${TURNS:-0}" -lt 2 ] && \
+             [ "$(git rev-list --count "origin/$MAIN_BRANCH..HEAD")" -eq 0 ]; then
+            echo "::warning::The lane's Claude token did not start a run (usage limit or sign-in); retrying with its fallback token"
+            mv "$OUT/claude.stderr" "$OUT/claude.primary.stderr"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           tail -n 50 "$OUT/claude.stderr" || true
           exit "$RC"
+
+      - name: Run agent (fallback token)
+        if: steps.agent.outputs.fallback == 'true'
+        env:
+          LANE_CLAUDE_FALLBACK: ${{ secrets.claude_token_fallback }}
+          TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
+          MODEL: ${{ needs.pick.outputs.model || 'sonnet' }}
+          MAX_TURNS: ${{ needs.pick.outputs.max_turns || '80' }}
+          PERMISSION_FLAGS: ${{ vars.CLAUDE_PERMISSION_FLAGS || '--dangerously-skip-permissions' }}
+        run: |
+          set -uo pipefail
+          OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
+          if [ -z "$LANE_CLAUDE_FALLBACK" ]; then echo "::error::The lane has no Claude token that works"; exit 1; fi
+          git checkout -q -- . 2> /dev/null || true
+          PROMPT="$(sed "s|__TASK_FILE__|$RUNNER_TEMP/task/task.md|g" "$RUNNER_TEMP/task/prompt.md")"
+          if [ "$TOKEN_IN_ENV" = "true" ]; then
+            export CLAUDE_CODE_OAUTH_TOKEN="$LANE_CLAUDE_FALLBACK"; exec 3< /dev/null
+          else
+            export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$LANE_CLAUDE_FALLBACK")
+          fi
+          # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
+          env -u LANE_CLAUDE_FALLBACK claude -p "$PROMPT" --output-format json \
+            --json-schema "$(cat "$RUNNER_TEMP/task/schema.json")" \
+            --model "$MODEL" --max-turns "$MAX_TURNS" $PERMISSION_FLAGS > "$OUT/result.json" 2> "$OUT/claude.stderr" \
+            && RC=0 || RC=$?  # the step runs under `bash -e`: keep the exit code instead of stopping here
+          exec 3<&-
+          echo "claude exit code: $RC (model $MODEL)"
+          echo "claude token: fallback"
+          tail -n 50 "$OUT/claude.stderr" || true
+          exit "$RC"
+
+      # Anything the agent left running (a server, a background job) could rewrite the commits or the result while
+      # they are packaged and checked. Every process of this user that was not there before the agent ran is ended.
+      - name: Stop processes the agent left behind
+        if: always()
+        env:
+          BEFORE: ${{ steps.procs.outputs.pids }}
+        run: |
+          KEEP=" ${BEFORE} "
+          P=$$
+          while [ -n "$P" ] && [ "$P" -gt 1 ]; do KEEP="$KEEP $P "; P="$(ps -o ppid= -p "$P" | tr -d ' ')"; done
+          for ROUND in 1 2 3; do
+            for PID in $(ps -u "$(id -u)" -o pid=); do
+              case "$KEEP" in *" $PID "*) continue ;; esac
+              kill -9 "$PID" 2> /dev/null || true
+            done
+            echo "cleanup round $ROUND done"
+          done
 
       - name: Package commits
         if: always()
@@ -352,9 +433,10 @@ jobs:
           fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: out_upload
         if: always()
         with:
-          name: out-${{ inputs.lane }}
+          name: ${{ needs.pick.outputs.out_artifact }}
           path: ${{ runner.temp }}/out
           retention-days: 3
 
@@ -388,10 +470,14 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
         run: python3 -m nightshift app-token --github-output "$GITHUB_OUTPUT"
 
+      # By the id the agent job's upload returned, never by name: another lane could upload under a name first.
+      # No id (the agent job failed before uploading) means nothing to download; publish reports the failure.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.agent.outputs.out_artifact != ''
         continue-on-error: true
         with:
-          name: out-${{ inputs.lane }}
+          artifact-ids: ${{ needs.agent.outputs.out_artifact }}
+          merge-multiple: true
           path: ${{ runner.temp }}/out
 
       - name: Validate, open PR, report

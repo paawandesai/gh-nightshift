@@ -969,7 +969,7 @@ class WorkflowCommandTests(CliTestCase):
         rc, text = self.run_cli("lane-config", "--lane", "api", "--github-output", self.gh_out)
         self.assertEqual(rc, 0)
         expected = {"postgres_image": "postgres:16", "setup_action": ".github/actions/api-setup", "max_turns": "120",
-                    "test_command": "pytest"}
+                    "test_command": "pytest", "sudo": "true"}
         self.assertEqual(self.outputs(), expected)
         self.assertEqual(json.loads(text), expected)
         self.assertEqual(self.fake.calls, [])

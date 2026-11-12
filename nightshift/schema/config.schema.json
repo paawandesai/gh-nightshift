@@ -245,6 +245,10 @@
             "type": "string",
             "description": "Start this Postgres image as a service in the lane's agent job (DATABASE_URL is set)."
           },
+          "sudo": {
+            "type": "boolean",
+            "description": "false: remove the runner's sudo rights (and, without postgres_image, its Docker access) after the lane's setup and before the agent runs, so the agent cannot become root and read the runner's own tokens. Default true."
+          },
           "setup": {
             "type": "object",
             "additionalProperties": false,

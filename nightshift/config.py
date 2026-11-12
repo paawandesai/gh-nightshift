@@ -41,6 +41,7 @@ class Lane:
     setup_action: str = ""
     postgres_image: str = ""
     budget_usd_per_night: float = 0.0  # 0 = no cap
+    sudo: bool = True  # False: the agent step runs without sudo (setup commands still have it)
 
     @property
     def label(self) -> str:
@@ -279,7 +280,7 @@ def parse(data: dict) -> Config:
                           escalate_model=raw.get("escalate_model", ""), paths=raw.get("paths", []),
                           description=raw.get("description", ""), test_command=raw.get("test_command", ""),
                           setup_commands=cmds, setup_action=(setup.get("action") or "").removeprefix("./"),
-                          postgres_image=raw.get("postgres_image", ""),
+                          postgres_image=raw.get("postgres_image", ""), sudo=raw.get("sudo", True) is not False,
                           budget_usd_per_night=float(raw.get("budget_usd_per_night", 0) or 0)))
     names = [lane.name for lane in lanes]
     if len(set(names)) != len(names):

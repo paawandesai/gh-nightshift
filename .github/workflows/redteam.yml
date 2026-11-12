@@ -119,27 +119,36 @@ jobs:
       - name: Scan (read-only)
         id: scan
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          TOKEN: ${{ secrets.claude_token }}
+          TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
           MODEL: ${{ vars.REDTEAM_MODEL || inputs.model }}
         # Findings stay out of the log: only the exit code is printed. What leaves the job is the result fields
         # only, gzip'd, zero-padded to a fixed 64 KiB (so its size does not say whether anything was found) and
         # AES-256 encrypted with the Claude token (a masked secret the file job also holds).
         run: |
           set -uo pipefail
-          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::red-team Claude token is empty"; exit 1; fi
+          if [ -z "$TOKEN" ]; then echo "::error::red-team Claude token is empty"; exit 1; fi
           P="$RUNNER_TEMP/redteam"
           trap 'rm -f "$P/findings.json" "$P/slim.json" "$P/slim.gz"' EXIT
-          claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
+          # M4: the token reaches Claude on a pipe (fd 3), never in its environment, and Read is denied under /proc and
+          # /sys, where this step's own environment block (which holds the token) can be read.
+          token_fd() { if [ "$TOKEN_IN_ENV" = "true" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN"; exec 3< /dev/null; else export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$TOKEN"); fi; }
+          # The token guard: a file that holds the token (or its base64 form) is never posted.
+          leaks() { local t; t="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"; [ "${#t}" -ge 20 ] || return 1
+            grep -qaF -f <(printf '%s\n' "$t"; printf '%s' "$t" | base64 | tr -d '\n'; echo) "$1"; }
+          token_fd
+          env -u TOKEN claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
             --model "$MODEL" --max-turns 120 --add-dir "$P" --allowedTools "Read,Grep,Glob" \
-            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$P/findings.json" 2> /dev/null
-          rc=$?; echo "claude exit code: $rc"
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Read(//proc/**),Read(//sys/**)" > "$P/findings.json" 2> /dev/null
+          rc=$?; exec 3<&-; unset CLAUDE_CODE_OAUTH_TOKEN; echo "claude exit code: $rc"
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          if leaks "$P/findings.json"; then echo "::error::the scan's output held its Claude token; nothing is filed. Rotate the token."; exit 1; fi
           jq -c '{type, subtype, is_error, structured_output}' "$P/findings.json" > "$P/slim.json" 2> /dev/null \
             || { echo "::error::the scan did not return a JSON result"; exit 1; }
           gzip -9 -c "$P/slim.json" > "$P/slim.gz" || { echo "::error::could not compress the findings"; exit 1; }
           if [ "$(wc -c < "$P/slim.gz")" -gt 65536 ]; then echo "::error::the scan output is too large to seal"; exit 1; fi
           truncate -s 65536 "$P/slim.gz"   # zero padding; gzip readers stop at the end of the stream
-          sealed=$(openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:CLAUDE_CODE_OAUTH_TOKEN < "$P/slim.gz" \
+          sealed=$(openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:TOKEN < "$P/slim.gz" \
             | base64 | tr -d '\n') || { echo "::error::could not seal the findings"; exit 1; }
           # 64 KiB sealed is about 87,500 characters, under the 128 KiB limit for one environment variable in the file job.
           if [ "${#sealed}" -lt 80000 ] || [ "${#sealed}" -gt 120000 ]; then echo "::error::could not seal the findings"; exit 1; fi

@@ -134,16 +134,27 @@ jobs:
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
       - name: Draft tickets (read-only)
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          TOKEN: ${{ secrets.claude_token }}
+          TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
           MODEL: ${{ vars.PLANNER_MODEL || inputs.model }}
         run: |
           set -uo pipefail
-          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::planner Claude token is empty"; exit 1; fi
+          if [ -z "$TOKEN" ]; then echo "::error::planner Claude token is empty"; exit 1; fi
           P="$RUNNER_TEMP/plan"
-          claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
+          # M4: the token reaches Claude on a pipe (fd 3), never in its environment, and Read is denied under /proc and
+          # /sys, where this step's own environment block (which holds the token) can be read.
+          token_fd() { if [ "$TOKEN_IN_ENV" = "true" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN"; exec 3< /dev/null; else export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$TOKEN"); fi; }
+          # The token guard: a file that holds the token (or its base64 form) is never posted.
+          leaks() { local t; t="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"; [ "${#t}" -ge 20 ] || return 1
+            grep -qaF -f <(printf '%s\n' "$t"; printf '%s' "$t" | base64 | tr -d '\n'; echo) "$1"; }
+          token_fd
+          env -u TOKEN claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
             --model "$MODEL" --max-turns 60 --add-dir "$P" --allowedTools "Read,Grep,Glob" \
-            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$P/plan.json" 2> "$P/claude.stderr"
-          rc=$?; echo "claude exit code: $rc"; tail -n 20 "$P/claude.stderr" || true
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Read(//proc/**),Read(//sys/**)" > "$P/plan.json" 2> "$P/claude.stderr"
+          rc=$?; exec 3<&-; echo "claude exit code: $rc"; tail -n 20 "$P/claude.stderr" || true
+          if leaks "$P/plan.json"; then
+            rm -f "$P/plan.json"; echo "::error::The planner's output held its Claude token; nothing is filed. Rotate the token."; exit 1
+          fi
           exit "$rc"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
