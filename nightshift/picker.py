@@ -231,8 +231,10 @@ class Picker:
         elif reason == "conflict":
             # Parallel lanes editing the same lines is not the agent's failure.
             self.refund_last_attempt(issue, f"PR #{num} hit a merge conflict with main")
+        hint = (" If the ticket itself keeps the code from passing a repo rule or the security review, the next "
+                "attempt reports `decision` and asks a person." if reason in {"verdict_failed", "security_failed"} else "")
         self.gh.comment(issue, f"Night shift: PR #{num} was closed ({why}). "
-                               "See the review comments on it before retrying.")
+                               f"See the review comments on it before retrying.{hint}")
 
     def merge_body(self, pr: dict, sha: str, m: re.Match | None) -> dict:
         """The squash commit's title and message are written here. GitHub's default message is the list of the

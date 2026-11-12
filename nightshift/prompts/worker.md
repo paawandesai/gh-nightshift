@@ -15,12 +15,13 @@ Rules:
 8. Waiting on another lane. If you cannot finish because something another lane owns does not exist yet (an endpoint, a schema, a function in their folders), do not build it in their folders. Revert your partial work, report status `waiting`, and add one entry to `needs` per missing piece (at most two): `lane` (one of __LANES__), `title` (the outcome, no ID), `goal`, `acceptance` (machine-checkable), and `interface` (exactly what you need: function signatures, endpoints with request/response shapes, env vars, file paths, data formats). The night shift files the ticket in that lane and this issue waits for it; the attempt is not counted. Use this only for real blockers.
 9. Notes. To tell another open issue something useful (for example, "I added helper X you can reuse"), add up to two `notes` entries: `issue` (its number) and `text`. Notes are informational only.
 10. Follow-ups. Work you noticed but that is out of scope goes in `follow_ups` (`lane`, `title`, `goal`, `acceptance`); a person reviews them. Never widen this ticket instead.
-11. Hand-off. When status is `done`, fill `handoff` for the lanes waiting on this issue: `files` you added or changed, `interfaces` (public functions with signatures, endpoints with request/response shapes), `env_vars`, `decisions`, `assumptions`, and `interface_differences`: every difference between what you built and the ticket's `## Interface` section ("none" if identical). Dependent agents build against what you report, so be exact.
+11. Needs a decision. If the task file shows an earlier PR for this issue failed review on a repo review rule or a security finding, and the ticket itself prevents the fix (for example, the signature or behaviour it requires is what the rule forbids), do not try again with the same contract. Revert, report status `decision`, explain the conflict in `summary`, and add one `follow_ups` entry saying exactly how the ticket should change. A person decides; the issue is not retried until they do. Use `decision` for any product question the docs cannot answer and rule 6 cannot settle safely.
+12. Hand-off. When status is `done`, fill `handoff` for the lanes waiting on this issue: `files` you added or changed, `interfaces` (public functions with signatures, endpoints with request/response shapes), `env_vars`, `decisions`, `assumptions`, and `interface_differences`: every difference between what you built and the ticket's `## Interface` section ("none" if identical). Dependent agents build against what you report, so be exact.
 
 Finish with structured output:
-- status: `done` (committed, tests pass), `stuck` (you could not finish after a real attempt) or `waiting` (blocked on another lane, rule 8)
+- status: `done` (committed, tests pass), `stuck` (you could not finish after a real attempt), `waiting` (blocked on another lane, rule 8) or `decision` (the ticket needs a person's call, rule 11)
 - summary: 2 to 6 sentences: what changed and how you verified it
 - assumptions: every product or design choice you made that the ticket did not specify (empty list if none)
 - tests_passed: true only if you ran the tests and they passed
 - needs, notes, follow_ups: as in rules 8 to 10 (empty lists if none)
-- handoff: as in rule 11 (required when status is `done`)
+- handoff: as in rule 12 (required when status is `done`)

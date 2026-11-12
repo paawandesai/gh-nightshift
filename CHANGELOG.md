@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.4] - unreleased
+## [0.2.0] - unreleased
 
 ### Added
 
@@ -36,6 +36,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   until a person promotes it. It skips when only one lane merged and nothing depends on it, or when every PR in
   the window was already reduced. Run `gh nightshift init --regenerate` to add its timer and the planner's new
   `pull-requests: read` permission.
+- The planner sees the repo review rules and writes tickets the code can pass, deferring a doc contract that
+  conflicts with a rule as a product decision.
+- A new agent status, `decision`: when a review failed because the ticket itself keeps the code from passing,
+  the next attempt asks a person (`needs-human`, not retried) instead of trying the same contract again.
+
+## [0.1.4] - 2026-11-10
+
+### Added
 
 - `runners.github` and `runners.agent` in the config choose the runners the reusable workflows use (default
   `ubuntu-latest`), so lanes can run on self-hosted machines. The jobs that hold the PAT or the App key and the

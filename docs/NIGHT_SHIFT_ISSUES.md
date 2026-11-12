@@ -179,6 +179,7 @@ What you will see:
   - appends `#<new>` to this issue's `Blocked by:` line and adds the `waiting` label,
   - posts a comment saying which ticket it waits on.
   The attempt is not counted. The picker resumes the issue once the new ticket closes. If the request would create a dependency cycle, the issue gets `needs-human` instead.
+- **Needs a decision.** If a review failed because the ticket itself keeps the code from passing (for example, it fixes a signature a repo rule or the security review forbids), the next attempt stops and reports `decision`. The issue gets `needs-human` and is not retried; the agent's proposed follow-up says how to change the ticket. Edit the ticket body, then remove `needs-human`.
 - **Notes.** "Night shift note from #12 (lane `x`)". Information from another issue's agent, for example "I added a helper you can reuse". Up to 2 per sending issue. Notes never change what gets picked.
 - **Proposed tickets.** Tickets an agent filed are labelled `proposed` when they need a person first: follow-up work an agent noticed but kept out of scope, and `waiting` requests that do not pass the ticket checks (the body then lists why). The picker skips them. To promote one, read it, fix the body if needed, then **add `night-safe` and remove `proposed`**. A `waiting` request that passes the checks is filed as `night-safe` straight away, or as `human` if it touches protected or contract paths.
 

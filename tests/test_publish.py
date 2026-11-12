@@ -166,6 +166,16 @@ class Failures(Base):
         self.assertEqual(outcome, "stuck")
         self.assertEqual(ns.count(self.f.comments[1], BOT, "attempt"), 1)
 
+    def test_decision_asks_a_person_and_is_not_retried(self):
+        fu = [{"lane": "api", "title": "Add caller_id to transfer", "goal": "owner check", "acceptance": ["test"]}]
+        out = {"status": "decision", "summary": "the ticket's signature has no caller", "assumptions": [],
+               "tests_passed": False, "follow_ups": fu}
+        outcome, _ = self.go(self.result({"structured_output": out, "num_turns": 20}))
+        self.assertIn("needs a decision", outcome)
+        self.assertIn("needs-human", {lb["name"] if isinstance(lb, dict) else lb for lb in self.f.issues[1]["labels"]})
+        self.assertTrue([i for i in self.f.issues.values() if "caller_id" in i["title"]])
+        self.assertIn("needs a decision", self.f.comments[1][-1]["body"])
+
     def test_infra_error_is_refunded(self):
         outcome, _ = self.go(os.path.join(self.tmp, "missing.json"))
         self.assertEqual(outcome, "infra-error (attempt not counted)")

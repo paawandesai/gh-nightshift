@@ -172,7 +172,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `review` | `reuse_on_update: true` | Keep a passed verdict when update-branch only merged main (see Merge modes) |
-| `redteam` | `enabled: false` | `enabled`, `schedule` (`0 5 * * *`), `min_severity` (`high`), `claude_token_secret` (default the security token), `model`. See Review rules and the security gate |
+| `redteam` | `enabled: false` | `enabled`, `schedule` (`0 5 * * *`), `min_severity` (`high`), `claude_token_secret` (default the security token; a dedicated token is recommended, see SECURITY.md), `model`. See Review rules and the security gate |
 | `reduce` | `enabled: false` | `enabled`, `schedule` (`30 6 * * *`, no minute in common with `planner.schedule`), `window_hours` (48). Needs `planner.enabled`. See Reduce |
 | `security` | `enabled: false` | `enabled` (adds the required check `review / security`), `claude_token_secret` (default `review_token_secret`), `model`, `paths` (always reviewed, as are `risk.approve_paths`), `always` (review every PR). See Review rules |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
@@ -209,14 +209,20 @@ outsider cannot forge attempt counts, unblock an issue or steer work.
 | `handoff-data` | PR body | The agent's hand-off, read when the PR merges |
 | `handoff-done` | merged PR | Hand-offs went out (makes the step idempotent) |
 | `plan` | night-log issue | A planner run: lane, `complete`, `docs_sha`; a reduce run has `lane: reduce` and `prs` |
-| `redteam` | night-log issue | A red-team scan: `sha` (the commit it reached), `base`, `filed` |
-| `redteam-finding` | draft security advisory | The finding's fingerprint `fp` and `sha`, so it is filed once |
+| `redteam` | night-log issue | A red-team scan: `sha` (the commit it reached) and `base` |
+| `redteam-finding` | draft security advisory or `security` issue | The finding's fingerprint `fp` (title + file), `wk` (CWE + file) and `sha`, so it is filed once |
 
 **Hand-off.** When a PR merges, the picker posts a hand-off comment on every open issue whose `Blocked by`
 line lists the merged issue (for PRs merged in the last 72 hours). The comment gives the interface as built
 (functions, endpoints), files, env vars, decisions and assumptions from the agent's `handoff` output. It also
 quotes the ticket's `## Interface` section and flags any difference the agent reported. The next agent sees
 these comments in its task file, in a section marked trusted.
+
+**Needs a decision.** When a review fails because the ticket itself keeps the code from passing (it fixes a
+signature that a repo rule or the security review forbids), the next attempt reports `decision` instead of
+trying the same contract again: the issue gets `needs-human`, is not retried, and the agent files a
+`proposed` follow-up saying how the ticket should change. The planner also sees the repo review rules, so it
+should not write such tickets in the first place.
 
 **Waiting on another lane (needs).** An agent that hits something another lane owns and that does not exist
 yet reports `waiting`, with up to 2 `needs`. For each need, the publish job does three things:
@@ -361,9 +367,10 @@ permission) decrypts them inside a pipe and files each new finding at `redteam.m
 - on a **private** repo (GitHub has no advisories there), as an issue labelled `security` and `human`, which only
   repo members can see and agents never pick up. The night log gets counts and issue links.
 
-Findings never appear in a log or an artifact, a fingerprint (title and file) keeps a finding from being filed
-twice, and a scan that fails or is cut short records nothing, so the next one covers the same range again. The
-scan needs `bot_login` in the config. Dispatches from another branch are skipped.
+Findings never appear in a log or an artifact, a fingerprint (title and file, or CWE and file, since the model
+rewords titles) keeps a finding from being filed twice, and a scan that fails or is cut short records nothing, so the next one covers the same range again. The
+scan needs `bot_login` in the config. Dispatches from another branch are skipped. Give the scan its own
+Claude token (`redteam.claude_token_secret`): the encrypted findings in public logs are only as safe as that token.
 
 ## Merge modes
 

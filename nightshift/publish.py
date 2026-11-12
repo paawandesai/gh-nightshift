@@ -10,6 +10,9 @@ Outcomes the agent can report:
   stuck    a real attempt failed -> comment, counts as an attempt
   waiting  blocked on another lane -> one ticket per `needs` entry in that lane (ready if it passes the
            ticket validator, else `proposed`), "Blocked by: #new" appended here, attempt NOT counted
+  decision the ticket cannot pass review as written (its contract conflicts with a repo review rule an earlier
+           attempt failed on, or it needs a product call) -> `needs-human`, never retried automatically; the
+           agent's follow-ups say what to change
 """
 from __future__ import annotations
 
@@ -92,6 +95,9 @@ def _turns(value) -> int:
         return 0
 
 
+STATUSES = ("done", "stuck", "waiting", "decision")
+
+
 def classify(result_path: str | None) -> Result:
     """A run that never really started (no result file, or <2 turns and no structured output: expired
     token, usage limit, outage) is infra-error and gets refunded, not counted."""
@@ -112,7 +118,7 @@ def classify(result_path: str | None) -> Result:
                                     "ticket asked for, then remove the needs-human label.")
     cost, turns = _cost(data.get("total_cost_usd")), _turns(data.get("num_turns"))
     out = data.get("structured_output")
-    if isinstance(out, dict) and out.get("status") in {"done", "stuck", "waiting"}:
+    if isinstance(out, dict) and out.get("status") in STATUSES:
         out = ns.defang(out)  # everything below is re-posted under the bot's trusted login
         assumptions = out.get("assumptions") if isinstance(out.get("assumptions"), list) else []
         # Convert to text, then defang again: a dict or list rendered as text could carry raw markers in keys.
@@ -194,6 +200,12 @@ def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
         outcome = "withheld: Claude token found in the run's output (needs a person)"
         if issue is not None:
             gh.add_labels(int(job.issue), [cfg.label("needs_human")])  # never retried automatically
+
+    if issue is not None and res.status == "decision":
+        # Seen in the sandbox: a ticket fixed a signature that a security rule forbids, and two more attempts
+        # failed the same way before anyone was asked. Stop at the first such failure and ask a person.
+        outcome = "needs a decision: the ticket cannot pass review as written (a person must change it)"
+        gh.add_labels(int(job.issue), [cfg.label("needs_human")])
 
     if issue is not None:
         if not outcome.startswith("PR") and res.status != "waiting":
