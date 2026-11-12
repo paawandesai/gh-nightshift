@@ -15,7 +15,8 @@ from . import schema, yamlish
 CONFIG_PATH = ".night-shift/config.yml"
 # Always protected, whatever the config says: agents may never change their own rules or CI.
 SECURITY_CHECK = "review / security"
-BUILTIN_PROTECTED = [".github/", ".claude/", "CLAUDE.md", "AGENTS.md", ".mcp.json", ".night-shift/"]
+BUILTIN_PROTECTED = [".github/", ".claude/", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENT_RULES.md", ".mcp.json",
+                     ".night-shift/"]
 DEFAULT_LABELS = {
     "ready": "night-safe", "blocked": "blocked", "needs_human": "needs-human", "human": "human",
     "proposed": "proposed", "agent": "agent", "in_progress": "agent:in-progress", "night_log": "night-log",
@@ -66,6 +67,7 @@ class Config:
     timezone: str = "UTC"
     extra_protected: list[str] = field(default_factory=list)
     merge_mode: str = "strict"
+    merge_allow_unenforced: bool = False  # merge even when main does not enforce the required checks (M7)
     labels: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LABELS))
     default_model: str = "sonnet"
     escalate_model: str = "opus"
@@ -304,6 +306,7 @@ def parse(data: dict) -> Config:
         timezone=data.get("timezone", "UTC"),
         extra_protected=data.get("protected_paths", []),
         merge_mode=(data.get("merge") or {}).get("mode", "strict"),
+        merge_allow_unenforced=(data.get("merge") or {}).get("allow_unenforced") is True,
         labels={**DEFAULT_LABELS, **(data.get("labels") or {})},
         default_model=models.get("default", "sonnet"),
         escalate_model=models.get("escalate", "opus"),

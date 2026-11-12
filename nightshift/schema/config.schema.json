@@ -57,6 +57,10 @@
             "strict",
             "queue"
           ]
+        },
+        "allow_unenforced": {
+          "type": "boolean",
+          "description": "true: the picker merges green PRs even when main's branch protection or rulesets do not enforce the required checks (for example a free private repo, which cannot have branch protection). Default false: it refuses and says why."
         }
       }
     },

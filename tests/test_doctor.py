@@ -188,10 +188,17 @@ class DoctorProblemTests(DoctorBase):
         self.assertIn("run `gh nightshift setup`", self.fix_after(text, "main is not protected"))
 
     def test_required_check_missing(self):
-        self.fake.protection["required_status_checks"]["contexts"] = ["test"]
+        self.fake.protection["required_status_checks"]["checks"] = [{"context": "test", "app_id": 15368}]
         rc, text = self.doctor()
         self.assertEqual(rc, 1)
         self.fix_after(text, "required checks missing: review / verdict")
+
+    def test_required_checks_not_bound_to_actions_warn(self):
+        rsc = self.fake.protection["required_status_checks"]
+        rsc["contexts"], rsc["checks"] = [c["context"] for c in rsc.pop("checks")], []
+        rc, text = self.doctor()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("! required checks test, review / verdict can be passed by any app or commit status", text)
 
     def test_missing_secret_fails(self):
         self.fake.secrets.discard("CLAUDE_TOKEN_WEB")

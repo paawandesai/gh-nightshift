@@ -430,8 +430,8 @@ class SetupJoinTests(CliTestCase):
         self.assertEqual(rc, 0)
         body = self.fake.writes("PUT", r"branches/main/protection$")[0][2]
         self.assertEqual(body["required_status_checks"], {"strict": True, "checks": [
-            {"context": "lint", "app_id": 15368}, {"context": "test", "app_id": -1},
-            {"context": "review / verdict", "app_id": -1}]})
+            {"context": "lint", "app_id": 15368}, {"context": "test", "app_id": 15368},
+            {"context": "review / verdict", "app_id": 15368}]})
         self.assertEqual(body["required_pull_request_reviews"], {
             "dismiss_stale_reviews": True, "require_code_owner_reviews": True, "required_approving_review_count": 2,
             "require_last_push_approval": False,
@@ -443,7 +443,8 @@ class SetupJoinTests(CliTestCase):
         self.assertIs(body["enforce_admins"], True)
         for said in ("kept the required checks already there: lint", "added required checks: review / verdict",
                      "kept required pull request reviews (2 approval(s), code owners)", "kept the push restrictions",
-                     "kept required_linear_history", "turned on enforce_admins", "turned off allow_force_pushes"):
+                     "kept required_linear_history", "turned on enforce_admins", "turned off allow_force_pushes",
+                     "bound test to GitHub Actions"):
             self.assertIn(said, text)
 
     def test_setup_changes_nothing_when_the_protection_cannot_be_read(self):

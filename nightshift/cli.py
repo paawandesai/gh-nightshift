@@ -161,6 +161,17 @@ def _pairs(text: str | None) -> dict[str, str]:
 
 # New setups pin the workflows to the release of the extension that wrote them.
 DEFAULT_TOOL_REF = f"v{__version__}"
+# Written into new configs as risk.approve_paths (M6): dependency manifests and lockfiles, package-manager config
+# (registry redirects), and editor, hook and container config. Edit the list in the config to suit the repo.
+DEFAULT_APPROVE_PATHS = (
+    "**/package.json", "**/package-lock.json", "**/npm-shrinkwrap.json", "**/yarn.lock", "**/pnpm-lock.yaml",
+    "**/bun.lockb", "**/requirements*.txt", "**/constraints*.txt", "**/pyproject.toml", "**/setup.py", "**/setup.cfg",
+    "**/poetry.lock", "**/uv.lock", "**/Pipfile", "**/Pipfile.lock", "**/go.mod", "**/go.sum", "**/Cargo.toml",
+    "**/Cargo.lock", "**/Gemfile", "**/Gemfile.lock", "**/mix.exs", "**/mix.lock", "**/composer.json",
+    "**/composer.lock", "**/.npmrc", "**/.yarnrc", "**/.yarnrc.yml", "**/pip.conf", "**/.pypirc", "**/Dockerfile",
+    "**/docker-compose*.yml", "**/compose*.yml", ".devcontainer/", ".vscode/", ".idea/", ".husky/", ".envrc",
+    ".gitattributes", ".gitmodules", ".pre-commit-config.yaml", ".cursor/", ".codex/", "GEMINI.md",
+)
 
 
 def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, out=None,
@@ -248,8 +259,10 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
         bot = getattr(o, "bot_login", None) or q("AGENT_PAT owner's GitHub login (the planner posts as it)", "")
         if bot:
             data["bot_login"] = bot
+    # M6: agent PRs that change what installs or runs code, or what acts on a developer's machine, wait for a person.
+    data["risk"] = {"approve_paths": list(DEFAULT_APPROVE_PATHS)}
     if co_rules:
-        data["risk"] = {"codeowners": True}  # agent PRs touching owned files wait for an owner's approval
+        data["risk"]["codeowners"] = True  # agent PRs touching owned files wait for an owner's approval
     return data
 
 

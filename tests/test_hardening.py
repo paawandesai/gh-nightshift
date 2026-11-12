@@ -581,3 +581,28 @@ class ReviewerTokenGuard(unittest.TestCase):
         run = subprocess.run(["bash", "-c", f'{func}\nleaks "$1"', "x", str(Path(tmp, "plain"))],
                              env={"PATH": os.environ["PATH"], "TOKEN": "short"}, capture_output=True, text=True)
         self.assertEqual(run.returncode, 1)  # no real token: nothing to guard
+
+
+class DefaultApprovePaths(unittest.TestCase):
+    """M6: new configs gate dependency, package-manager and editor/container files behind a person; the built-in
+    protected list covers AGENT_RULES.md and CLAUDE.local.md."""
+
+    def test_globs_match_at_any_depth(self):
+        from nightshift.cli import DEFAULT_APPROVE_PATHS
+
+        paths = list(DEFAULT_APPROVE_PATHS)
+        for path in ("package.json", "web/package-lock.json", "api/requirements-dev.txt", "constraints.txt",
+                     "svc/Cargo.lock", ".npmrc", "web/.npmrc", ".vscode/settings.json", ".devcontainer/devcontainer.json",
+                     "api/Dockerfile", "docker-compose.yml", ".pre-commit-config.yaml", ".husky/pre-commit"):
+            with self.subTest(path=path):
+                self.assertTrue(path_is_protected(path, paths))
+        for path in ("api/app.py", "web/src/package.ts", "docs/requirements.md", "README.md"):
+            with self.subTest(path=path):
+                self.assertFalse(path_is_protected(path, paths))
+
+    def test_agent_rule_files_are_built_in(self):
+        cfg = loads(CONFIG)
+        for path in ("AGENT_RULES.md", "CLAUDE.local.md", "api/CLAUDE.local.md"):
+            with self.subTest(path=path):
+                self.assertTrue(path_is_protected(path, cfg.protected_paths))
+        self.assertFalse(path_is_protected("api/AGENT_RULES.md", cfg.protected_paths))

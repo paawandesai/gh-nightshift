@@ -83,6 +83,7 @@ class Picker:
         self.awaiting_approval: set[int] = set()
         self._cross: dict[tuple[str, int], dict] = {}
         self._files: dict[int, list[str]] = {}
+        self._unenforced: list[str] | None = None
         self._owner_groups: dict[int, list[set[str] | None]] = {}
 
     # --- small helpers -----------------------------------------------------------------
@@ -298,6 +299,14 @@ class Picker:
                 busy = f"PR #{num} in lane {self.lane.name} was behind main; updated, waiting for checks to re-run"
                 continue
             if state == "passed":
+                unenforced = self.unenforced_checks()
+                if unenforced:
+                    print(f"::warning::not merging PR #{num}: {self.cfg.main_branch} does not enforce the required "
+                          f"check(s) {', '.join(unenforced)}, so a PR could merge without them. Run `gh nightshift "
+                          "setup`, or set merge.allow_unenforced: true in .night-shift/config.yml to accept that.")
+                    busy = (f"PR #{num} in lane {self.lane.name} is green but not merged: {self.cfg.main_branch} "
+                            "does not enforce the required checks")
+                    continue
                 why = self.approval_needed(pr, int(m.group(2)) if m else None)
                 if why and not self.approved(pr, sha):
                     self.ask_approval(pr, why)
@@ -318,6 +327,27 @@ class Picker:
             # GitHub closes the linked issue a moment after the merge; picking now could re-pick it.
             busy = f"merged PR #{merged[0]}; the next run continues lane {self.lane.name}"
         return busy
+
+    def unenforced_checks(self) -> list[str]:
+        """M7: required checks that neither main's branch protection nor a ruleset enforces. Read with Contents read
+        (the branch summary and the active rules), once per run. Empty with merge.allow_unenforced."""
+        if self.cfg.merge_allow_unenforced:
+            return []
+        if self._unenforced is None:
+            names: set[str] = set()
+            try:
+                branch = self.gh.get_or_none(self.gh.r(f"branches/{self.cfg.main_branch}")) or {}
+                rsc = (branch.get("protection") or {}).get("required_status_checks") or {}
+                if rsc.get("enforcement_level", "everyone") != "off":
+                    names |= set(rsc.get("contexts") or []) | {c.get("context") for c in rsc.get("checks") or []}
+                for rule in self.gh.get_or_none(self.gh.r(f"rules/branches/{self.cfg.main_branch}")) or []:
+                    if rule.get("type") == "required_status_checks":
+                        params = rule.get("parameters") or {}
+                        names |= {c.get("context") for c in params.get("required_status_checks") or []}
+            except GHError as err:
+                print(f"warning: could not read how {self.cfg.main_branch} enforces checks: {err}")
+            self._unenforced = [c for c in self.cfg.required_checks if c not in names]
+        return self._unenforced
 
     # --- risk tiers (strict mode) -------------------------------------------------------
     def pr_files(self, num: int) -> list[str] | None:

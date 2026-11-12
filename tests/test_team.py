@@ -1051,7 +1051,7 @@ class CodeOwners(unittest.TestCase):
         (root / ".github/CODEOWNERS").write_text(self.CO)
         data = cli.build_config(root, None, "api", True, io.StringIO(), "main", cli.parser().parse_args(["init"]))
         self.assertEqual(data["lanes"][0]["claude_token_secret"], "CLAUDE_TOKEN_ALICE")
-        self.assertEqual(data["risk"], {"codeowners": True})
+        self.assertTrue(data["risk"]["codeowners"])
 
 
 class Templates(unittest.TestCase):
