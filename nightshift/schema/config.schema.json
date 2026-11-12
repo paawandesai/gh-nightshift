@@ -289,6 +289,15 @@
       "pattern": "^[A-Za-z0-9-]+(\\[bot\\])?$",
       "description": "Login of the account that owns the PAT. stats and audit trust only its markers; default: whoever runs them."
     },
+    "cross_repos": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+      },
+      "uniqueItems": true,
+      "description": "Repos (owner/name) whose issues a ticket may depend on with `Blocked by: owner/repo#N`. The picker reads those issues with the PAT and copies their Interface section, so only listed repos are read. Default: none."
+    },
     "trusted_logins": {
       "type": "array",
       "items": {

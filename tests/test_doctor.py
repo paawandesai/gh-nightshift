@@ -298,10 +298,10 @@ class DoctorProblemTests(DoctorBase):
         fix = self.fix_after(text, "PAT has the `workflow` scope")
         self.assertIn("without the Workflows permission", fix)
 
-    def test_classic_pat_without_workflow_warns(self):
+    def test_classic_pat_fails(self):
         rc, text = self.doctor(run=FakeRun(pat=("bot", "repo")))
-        self.assertEqual(rc, 0, text)
-        self.assertIn("classic PAT with scopes repo", text)
+        self.assertEqual(rc, 1, text)
+        self.fix_after(text, "classic PAT with scopes repo")
 
     def test_pat_that_does_not_authenticate_fails(self):
         rc, text = self.doctor(run=FakeRun(pat_rc=1))

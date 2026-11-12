@@ -986,17 +986,25 @@ class CrossRepo(unittest.TestCase):
         self.assertEqual(parse_deps(body, "o/r"), [UNRESOLVED, 3, 4])
         self.assertEqual(parse_cross_deps(body, "o/r"), [("a/b", 9), ("org/api", 12)])
 
+    ALLOWED = TEAM + "cross_repos: [org/api]\n"
+
     def test_waits_for_the_other_repo_then_hands_off_as_data(self):
-        self.assertEqual(picker(self.f).decide()["issue"], "")
+        self.assertEqual(picker(self.f, text=self.ALLOWED).decide()["issue"], "")
         self.f.other_repos["org/api"]["issues"][12]["state"] = "closed"
-        self.assertEqual(picker(self.f).decide()["issue"], "7")
+        self.assertEqual(picker(self.f, text=self.ALLOWED).decide()["issue"], "7")
         hand = ns.trusted(self.f.comments[7], BOT, "handoff")
         self.assertEqual([m.get("from") for m in hand], ["org/api#12"])
         body = [c["body"] for c in self.f.comments[7] if "another repository" in c["body"]][0]
         self.assertIn("GET /v1", body)
         self.assertEqual(len(ns.parse({"body": body, "user": {"login": BOT}})), 1)  # no forged marker
-        picker(self.f).decide()
+        picker(self.f, text=self.ALLOWED).decide()
         self.assertEqual(len(ns.trusted(self.f.comments[7], BOT, "handoff")), 1)  # once
+
+    def test_repo_outside_cross_repos_is_never_read(self):
+        self.f.other_repos["org/api"]["issues"][12]["state"] = "closed"
+        self.assertEqual(picker(self.f).decide()["issue"], "")  # the default allowlist is empty
+        self.assertFalse([c for c in self.f.calls if "org/api" in c[1]])
+        self.assertFalse([c for c in self.f.comments[7] if "another repository" in c["body"]])
 
     def test_unreadable_repo_counts_as_unmet(self):
         self.f.issues[7]["body"] = "Blocked by: secret/repo#1"

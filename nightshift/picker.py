@@ -109,6 +109,10 @@ class Picker:
     def cross_state(self, ref: tuple[str, int]) -> dict:
         """An issue in another repository. The PAT must be able to read it (public, or a token with access);
         if it cannot, the dependency counts as unmet and `status` shows it as waiting."""
+        if ref not in self._cross and ref[0].lower() not in {r.lower() for r in self.cfg.cross_repos}:
+            # M10: the PAT reads (and copies text from) only repos the config names.
+            print(f"::warning::cross-repo dependency {ref[0]}#{ref[1]} is not read: {ref[0]} is not in cross_repos")
+            self._cross[ref] = {"state": "not in cross_repos", "title": "", "body": ""}
         if ref not in self._cross:
             try:
                 data = self.gh.get_or_none(f"repos/{ref[0]}/issues/{ref[1]}") or {}

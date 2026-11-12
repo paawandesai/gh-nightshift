@@ -920,9 +920,26 @@ class PlanTests(CliTestCase):
         self.assertEqual(rc, 0)
         self.assertIn("run=true\nmode=review\nlane=\nissue=5\n", outputs)
         ctx_md = Path(out_dir, "context.md").read_text()
-        self.assertIn("Issue #5: Plan auth", ctx_md)
+        self.assertIn("Issue #5, written by someone WITHOUT write access", ctx_md)  # the fake issue has no association
+        self.assertIn("Plan auth", ctx_md)
         self.assertIn("We need SSO.", ctx_md)
-        self.assertIn("Request from alice: split it up", ctx_md)
+        self.assertIn("Request from alice (write access): split it up", ctx_md)
+
+    def test_review_mode_plan_from_an_outsiders_issue_is_proposed(self):
+        path = Path(self.root, "plan.json")
+        for association, label in (("NONE", "proposed"), ("MEMBER", "night-safe")):
+            plan = {"tickets": [{"key": "T1", "lane": "api", "title": f"Add SSO for {association}", "goal": "g",
+                                 "do": "d", "interface": "i", "acceptance": ["pytest -k sso"], "files": ["api/sso.py"],
+                                 "depends_on": [], "wave": 1}], "coverage": [], "notes": []}
+            path.write_text(json.dumps({"structured_output": plan}))
+            with self.subTest(association=association):
+                issue = self.fake.add_issue(title="Plan auth", body="We need SSO.")
+                issue["author_association"] = association
+                rc, text = self.run_cli("plan", "publish", str(path), "--mode", "review", "--reply-to",
+                                        str(issue["number"]))
+                self.assertEqual(rc, 0, text)
+                made = max(self.fake.issues.values(), key=lambda i: i["number"])
+                self.assertIn(label, [lbl["name"] for lbl in made["labels"]], made)
 
     def test_unknown_mode(self):
         with self.assertRaises(SystemExit):

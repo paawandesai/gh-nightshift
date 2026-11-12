@@ -59,8 +59,8 @@ def pat_checks(token: str, run: Callable = subprocess.run,
         out.append(Check(FAIL, "PAT has the `workflow` scope: agents could change CI and the review gate",
                          "use a fine-grained PAT without the Workflows permission"))
     elif scope_list:
-        out.append(Check(WARN, f"classic PAT with scopes {scopes}: it reaches every repo you can",
-                         "prefer a fine-grained PAT limited to this repo"))
+        out.append(Check(FAIL, f"classic PAT with scopes {scopes}: it reaches every repo you can (M10)",
+                         "use a fine-grained PAT limited to this repo"))
     else:
         out.append(Check(WARN, "fine-grained PAT: GitHub does not expose its permissions, so Workflows cannot be "
                                "checked from here", "confirm in Settings > Developer settings that Workflows is "

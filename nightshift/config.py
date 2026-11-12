@@ -98,6 +98,7 @@ class Config:
     runner_agent: list[str] = field(default_factory=lambda: ["ubuntu-latest"])
     bot_login: str = ""           # the PAT's login; read-only commands (stats, audit) trust markers from it
     trusted_logins: list[str] = field(default_factory=list)  # other PAT logins (per-contributor PATs) to trust
+    cross_repos: list[str] = field(default_factory=list)  # repos whose issues `Blocked by: owner/repo#N` may read
     auth_mode: str = "pat"  # pat | app (GitHub App: an installation token minted in the PAT jobs)
     app_id: str = ""
     app_key_secret: str = "NIGHT_SHIFT_APP_KEY"
@@ -130,6 +131,8 @@ class Config:
     @property
     def protected_paths(self) -> list[str]:
         extra = ["CODEOWNERS", "docs/CODEOWNERS"] if self.risk_codeowners else []  # .github/ is already built in
+        if self.planner_refill_below > 0:
+            extra += self.planner_docs  # M8: the planner files tickets from these on a timer, unattended
         return BUILTIN_PROTECTED + [p for p in self.extra_protected + extra if p not in BUILTIN_PROTECTED]
 
     @property
@@ -334,6 +337,7 @@ def parse(data: dict) -> Config:
         runner_agent=_labels((data.get("runners") or {}).get("agent", "ubuntu-latest"), "runners.agent"),
         bot_login=data.get("bot_login", ""),
         trusted_logins=data.get("trusted_logins", []),
+        cross_repos=data.get("cross_repos", []),
         auth_mode=(data.get("auth") or {}).get("mode", "pat"),
         app_id=str((data.get("auth") or {}).get("app_id", "") or ""),
         app_key_secret=(data.get("auth") or {}).get("private_key_secret", "NIGHT_SHIFT_APP_KEY"),
