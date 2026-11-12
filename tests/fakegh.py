@@ -43,6 +43,7 @@ class FakeGitHub:
         # a test config names is enforced; set enforced_checks to a list (or None for an unprotected branch).
         self.enforced_checks: list | None | str = "all"
         self.branch_rules: list = []
+        self.environments: dict[str, dict] = {}  # name -> {"policy": {...} | None, "secrets": [names]}
         self.runs_by_workflow: dict[str, list[dict]] = {}
         self.cancelled: list[int] = []
         # The public gh-nightshift tool repo and its refs, as `doctor` sees them.
@@ -202,6 +203,11 @@ class FakeGitHub:
             (r"actions/secrets", ("GET", lambda q, b: self._page(q, [{"name": s} for s in sorted(self.secrets)],
                                                                  "secrets"))),
             (r"branches/([^/]+)/protection", ("GET", self._get_protection)),
+            (r"environments/([^/]+)", ("GET", lambda q, b, e: (
+                {"name": e, "deployment_branch_policy": self.environments[e].get("policy")}
+                if e in self.environments else self._missing(e)))),
+            (r"environments/([^/]+)/secrets", ("GET", lambda q, b, e: self._page(
+                q, [{"name": n} for n in self.environments.get(e, {}).get("secrets", [])], "secrets"))),
             (r"branches/([^/]+)", ("GET", self._get_branch)),
             (r"rules/branches/([^/]+)", ("GET", lambda q, b, br: copy.deepcopy(self.branch_rules))),
             (r"branches/([^/]+)/protection", ("PUT", lambda q, b, br: setattr(self, "protection", self._prot(b)))),
@@ -375,6 +381,10 @@ class FakeGitHub:
         if self.protection is None:
             raise GHError("Branch not protected (HTTP 404)", 404)
         return self.protection
+
+    @staticmethod
+    def _missing(what):
+        raise GHError(f"Not Found: {what} (HTTP 404)", 404)
 
     def _get_branch(self, q, b, br):
         if self.enforced_checks == "all":

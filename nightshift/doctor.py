@@ -172,6 +172,12 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
             out.append(Check(FAIL, f".github/workflows/{name} is missing", "run `gh nightshift init --regenerate`"))
     out += rules_checks(root, cfg)
     out += workflow_checks(root, cfg)
+    if not cfg.environment:
+        cred = "App private key" if cfg.auth_mode == "app" else "PAT"
+        out.append(Check(WARN, f"the {cred} is a repository secret: a workflow anyone with write access pushes on any "
+                               "branch can read it (H2)", f"set `environment:` in {CONFIG_PATH}, store the secret in "
+                                                          "that environment limited to the default branch "
+                                                          "(see README, Credentials in an environment)"))
     ci = root / ".github/workflows" / cfg.ci_workflow
     if not ci.is_file():
         out.append(Check(FAIL, f"CI workflow .github/workflows/{cfg.ci_workflow} not found: every lane would wait",
@@ -281,11 +287,17 @@ def remote_checks(gh: GH, cfg: Config) -> list[Check]:
     have = existing_secrets(gh)
     if not have:
         out.append(Check(WARN, "cannot list Actions secrets (needs repo admin)", "run doctor as a repo admin"))
+    in_env: set[str] = set()
+    if cfg.environment:
+        env_checks, in_env = environment_checks(gh, cfg, have)
+        out += env_checks
     for name in cfg.secret_names():
+        if name in in_env:
+            continue
         if have and name not in have:
             out.append(Check(FAIL, f"secret {name} is missing",
                              f"`gh nightshift join --lane <lane>` or `gh secret set {name} -R {gh.repo}`"))
-    if have and all(n in have for n in cfg.secret_names()):
+    if have and all(n in have or n in in_env for n in cfg.secret_names()):
         out.append(Check(OK, f"all {len(cfg.secret_names())} secrets exist"))
     labels = {lbl["name"] for lbl in gh.paginate(gh.r("labels"))}
     missing = [n for n, _, _ in scaffold.labels(cfg) if n not in labels]
@@ -339,6 +351,44 @@ def remote_checks(gh: GH, cfg: Config) -> list[Check]:
         out.append(Check(FAIL, "no open night-log issue", "run `gh nightshift setup`"))
     out += tool_checks(gh, cfg)
     return out
+
+
+def environment_checks(gh: GH, cfg: Config, repo_secrets: set[str]) -> tuple[list[Check], set[str]]:
+    """H2: the environment named in the config exists, only the default branch may use it, and it holds the GitHub
+    credential under the reusable workflows' secret name. Returns the checks and the config secret names it covers."""
+    env, want = cfg.environment, ("APP_PRIVATE_KEY" if cfg.auth_mode == "app" else "AGENT_PAT")
+    try:
+        data = gh.get_or_none(gh.r(f"environments/{env}"))
+    except GHError as err:
+        return [Check(WARN, f"cannot read environment {env} ({err.status or err})", "run doctor as a repo admin")], set()
+    if not data:
+        return [Check(FAIL, f"environment {env} does not exist: the credential jobs would fail",
+                       f"create it in Settings > Environments, or remove `environment` from {CONFIG_PATH}")], set()
+    out: list[Check] = []
+    if not data.get("deployment_branch_policy"):
+        out.append(Check(WARN, f"environment {env} accepts every branch: a workflow pushed on any branch can read "
+                               "its secrets", f"Settings > Environments > {env} > Deployment branches: "
+                                              f"{cfg.main_branch} only"))
+    try:
+        names = {x["name"].upper() for x in gh.paginate(gh.r(f"environments/{env}/secrets"), key="secrets")}
+    except GHError:
+        names = set()
+    if names and want not in names:
+        out.append(Check(FAIL, f"environment {env} has no {want} secret: the credential jobs run without it",
+                         f"gh secret set {want} --env {env} -R {gh.repo}"))
+    elif names:
+        out.append(Check(OK, f"the GitHub credential is environment {env}'s secret {want}"))
+    covered = {cfg.github_secret} if want in names else set()
+    if cfg.github_secret in repo_secrets and covered:
+        out.append(Check(WARN, f"repository secret {cfg.github_secret} still exists next to environment {env}'s copy: "
+                               "any branch's workflow can still read it", f"gh secret delete {cfg.github_secret} "
+                                                                          f"-R {gh.repo}"))
+    own = [lane.name for lane in cfg.lanes if lane.pat_secret]
+    if own and cfg.auth_mode != "app":
+        out.append(Check(WARN, f"lane(s) {', '.join(own)} name their own PAT, but environment {env}'s AGENT_PAT "
+                               "replaces every lane's PAT in the credential jobs", "use one PAT with the environment, "
+                                                                                  "or no environment"))
+    return out, covered
 
 
 def actions_settings_checks(gh: GH) -> list[Check]:

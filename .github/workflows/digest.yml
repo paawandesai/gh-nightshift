@@ -28,6 +28,11 @@ on:
         type: string
         required: false
         default: ""
+      environment:
+        description: GitHub environment for the jobs that hold the PAT or the App key (H2); empty means none
+        type: string
+        required: false
+        default: ""
     secrets:
       agent_pat:
         required: false   # one of agent_pat or app_id + app_private_key
@@ -48,6 +53,9 @@ env:
 jobs:
   digest:
     runs-on: ${{ fromJSON(inputs.runs_on) }}
+    # Environment secrets of the same name replace the caller's: keep the PAT or App key there, limited to
+    # the default branch, so a workflow pushed on another branch cannot read it.
+    environment: ${{ inputs.environment }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

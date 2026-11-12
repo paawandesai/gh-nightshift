@@ -99,6 +99,7 @@ class Config:
     bot_login: str = ""           # the PAT's login; read-only commands (stats, audit) trust markers from it
     trusted_logins: list[str] = field(default_factory=list)  # other PAT logins (per-contributor PATs) to trust
     cross_repos: list[str] = field(default_factory=list)  # repos whose issues `Blocked by: owner/repo#N` may read
+    environment: str = ""  # GitHub environment holding the PAT or App key for the jobs that use it (H2)
     auth_mode: str = "pat"  # pat | app (GitHub App: an installation token minted in the PAT jobs)
     app_id: str = ""
     app_key_secret: str = "NIGHT_SHIFT_APP_KEY"
@@ -338,6 +339,7 @@ def parse(data: dict) -> Config:
         bot_login=data.get("bot_login", ""),
         trusted_logins=data.get("trusted_logins", []),
         cross_repos=data.get("cross_repos", []),
+        environment=data.get("environment", ""),
         auth_mode=(data.get("auth") or {}).get("mode", "pat"),
         app_id=str((data.get("auth") or {}).get("app_id", "") or ""),
         app_key_secret=(data.get("auth") or {}).get("private_key_secret", "NIGHT_SHIFT_APP_KEY"),

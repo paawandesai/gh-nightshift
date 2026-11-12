@@ -298,6 +298,33 @@ class DoctorProblemTests(DoctorBase):
         fix = self.fix_after(text, "PAT has the `workflow` scope")
         self.assertIn("without the Workflows permission", fix)
 
+    def test_no_environment_warns_that_the_pat_is_a_repo_secret(self):
+        rc, text = self.doctor()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("! the PAT is a repository secret", text)
+
+    def test_environment_checks(self):
+        self.write_repo(config_text(self.lanes, self.mode, environment="night-shift"))
+        lane = (self.root / ".github/workflows/night-shift.yml").read_text()
+        self.assertEqual(lane.count("environment: 'night-shift'"), len(self.lanes))
+        rc, text = self.doctor()
+        self.assertEqual(rc, 1)
+        self.fix_after(text, "environment night-shift does not exist")
+        self.fake.environments["night-shift"] = {"policy": None, "secrets": ["AGENT_PAT"]}
+        rc, text = self.doctor()
+        self.assertIn("! environment night-shift accepts every branch", text)
+        self.assertIn("! repository secret AGENT_PAT still exists", text)
+        self.assertNotIn("the PAT is a repository secret", text)
+        self.fake.environments["night-shift"]["policy"] = {"protected_branches": True, "custom_branch_policies": False}
+        self.fake.secrets.discard("AGENT_PAT")
+        rc, text = self.doctor()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("✓ the GitHub credential is environment night-shift's secret AGENT_PAT", text)
+        self.assertNotIn("secret AGENT_PAT is missing", text)
+        self.fake.environments["night-shift"]["secrets"] = ["OTHER"]
+        rc, text = self.doctor()
+        self.fix_after(text, "environment night-shift has no AGENT_PAT secret")
+
     def test_classic_pat_fails(self):
         rc, text = self.doctor(run=FakeRun(pat=("bot", "repo")))
         self.assertEqual(rc, 1, text)
