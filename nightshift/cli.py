@@ -458,6 +458,91 @@ def cmd_rules(ctx: Ctx) -> int:
     return 0
 
 
+# --- red-team scan --------------------------------------------------------------------
+
+def cmd_redteam(ctx: Ctx) -> int:
+    """(workflow) `context`: decide whether to scan and write the scan context; `publish`: file the findings as
+    draft private security advisories and record the commit the scan reached."""
+    from . import redteam, review_rules
+    from .review_tools import git_in
+
+    a, cfg, gh = ctx.args, ctx.cfg, ctx.gh
+    if not gh.trusted:
+        raise SystemExit("this token cannot read GET /user and the config names no bot_login or trusted_logins, "
+                         "so red-team markers cannot be trusted; set bot_login in .night-shift/config.yml")
+    log = gh.night_log(cfg.label("night_log"))
+    if not log:
+        raise SystemExit("the red-team scan records the commit it reached on the night-log issue, and there is none: "
+                         "run `gh nightshift setup`")
+    if a.redteam_action == "context":
+        if os.environ.get("AGENTS_ENABLED", "true").lower() != "true":
+            ctx.say("skip: AGENTS_ENABLED is not true")
+            write_outputs(a.github_output, {"run": "false"})
+            return 0
+        ref = os.environ.get("REF_NAME", "")
+        if ref and ref != cfg.main_branch:
+            ctx.say(f"skip: the red-team scan runs on {cfg.main_branch} only (dispatched on {ref}); its progress "
+                    "marker must follow main")
+            write_outputs(a.github_output, {"run": "false"})
+            return 0
+        git = git_in(str(ctx.root))
+        sc = redteam.scope(git, Path(ctx.root), redteam.last_scan(gh, cfg), full=a.full)
+        if sc.skip:
+            ctx.say(f"skip: {sc.skip}")
+            write_outputs(a.github_output, {"run": "false"})
+            return 0
+        try:
+            rules = review_rules.load(ctx.root)
+        except review_rules.RulesError as err:
+            ctx.say(f"::warning::{review_rules.RULES_PATH} is invalid, scanning without it: {err}")
+            rules = []
+        text, listed = redteam.context(gh, cfg, git, Path(ctx.root), sc, rules)
+        out = Path(a.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "context.md").write_text(text, encoding="utf-8")
+        (out / "rules.json").write_text(json.dumps(listed), encoding="utf-8")
+        (out / "diff.patch").write_text(redteam.range_diff(git, sc), encoding="utf-8")
+        (out / "prompt.md").write_text(prompts.render("redteam", {"CONTEXT_FILE": str(out / "context.md"),
+                                                                  "DIFF_FILE": str(out / "diff.patch")}, ctx.root),
+                                       encoding="utf-8")
+        (out / "schema.json").write_text(prompts.schema_json("redteam"), encoding="utf-8")
+        write_outputs(a.github_output, {"run": "true", "sha": sc.head, "base": sc.base})
+        ctx.say(f"red-team context written ({'since ' + sc.base[:12] if sc.base else 'baseline'}, "
+                f"{len(sc.changed)} file(s))")
+        return 0
+    # publish
+    if not re.fullmatch(r"[0-9a-f]{40}", a.sha) or not re.fullmatch(r"([0-9a-f]{40})?", a.base):
+        raise ConfigError("--sha must be a full commit SHA and --base empty or one")
+    if a.findings_file == "-" and sys.stdin.isatty():
+        raise ConfigError("redteam publish reads the sealed scan output from a pipe; pass --findings-file PATH")
+    raw = (sys.stdin.buffer.read() if a.findings_file == "-" else Path(a.findings_file).read_bytes())
+    try:
+        data = redteam.decode(raw)
+    except ValueError as err:
+        # Never record progress for a scan that did not finish: the next run covers this range again.
+        ctx.say(f"::error::{err}; recording nothing")
+        return 1
+    private = (gh.get(gh.r("")) or {}).get("private")
+    if not isinstance(private, bool):
+        ctx.say("::error::cannot tell whether the repo is public; recording nothing")
+        return 1
+    public = not private
+    result = redteam.file_findings(gh, cfg, data, a.sha, a.base, public)
+    if result.failed and public:
+        # One line, no severity, no count: a public log must not say what the scan found.
+        ctx.say("::error::could not file the red-team results; the PAT or App needs Repository security advisories: "
+                "Read and write, and the PAT's account must be a repo admin or security manager")
+    for line in result.failed if not public else []:  # the reason only: never the finding
+        ctx.say(f"::error::could not file a finding ({line}); the PAT or App needs Issues: Read and write")
+    text = redteam.summary(result, a.sha, a.base, cfg, public)
+    # The scan only counts as done when every finding is filed; otherwise the next run covers this range again
+    # (fingerprints keep it from filing the same one twice).
+    marker = "" if result.failed else ns.marker("redteam", sha=a.sha, base=a.base) + "\n"
+    gh.comment(log, marker + text)
+    ctx.say("done" if not result.failed else "could not finish filing")
+    return 1 if result.failed else 0
+
+
 # --- planner --------------------------------------------------------------------------
 
 def run_claude(prompt: str, schema: str, model: str, add_dir: str, run=subprocess.run) -> dict:
@@ -664,7 +749,8 @@ def cmd_app_token(ctx: Ctx) -> int:
     from . import app
 
     try:
-        result = app.mint(ctx.repo, os.environ.get("APP_ID", ""), os.environ.get("APP_PRIVATE_KEY", ""))
+        result = app.mint(ctx.repo, os.environ.get("APP_ID", ""), os.environ.get("APP_PRIVATE_KEY", ""),
+                          advisories=ctx.args.advisories)
     except app.AppError as err:
         ctx.say(f"::error::GitHub App token: {err}")
         return 1
@@ -687,6 +773,25 @@ def cmd_app(ctx: Ctx, request=None) -> int:
                     "(or set auth: in the config and `gh secret set NIGHT_SHIFT_APP_KEY < key.pem`).")
         return 0
     key = Path(a.key_file).read_text(encoding="utf-8") if a.key_file else os.environ.get("APP_PRIVATE_KEY", "")
+    if a.app_action == "installations":
+        app_id = a.app_id or _cfg_app_id(ctx)
+        try:
+            data = app.installations(app_id, key, **({"request": request} if request else {}))
+        except app.AppError as err:
+            ctx.say(f"FAIL  {err}")
+            return 1
+        rows = data["installations"]
+        ctx.say(f"App {data['slug'] or app_id}: {len(rows)} installation(s). Last comment = the newest issue or PR "
+                "comment the App posted among each repo's latest 100 comments.")
+        for r in rows:
+            state = f"SUSPENDED since {r['suspended']}" if r["suspended"] else f"{r['selection']} repositories"
+            if r.get("error"):
+                state += f" (could not list its repositories: {r['error']})"
+            ctx.say("", f"{r['account']} ({r['type']}), installed {r['created'][:10] or '?'}, {state}")
+            for repo in r["repos"]:
+                ctx.say(f"  {repo['name']}{' (private)' if repo['private'] else ''}: "
+                        f"last comment {repo['last_comment'] or 'none recently'}")
+        return 0
     app_id = a.app_id or ctx.cfg.app_id
     if ctx.gh.dry_run:
         ctx.say(f"[dry-run] would mint an installation token for {ctx.repo} with App {app_id or '?'} "
@@ -702,6 +807,13 @@ def cmd_app(ctx: Ctx, request=None) -> int:
     if result["login"] and result["login"] not in {ctx.cfg.bot_login, *ctx.cfg.trusted_logins}:
         ctx.say(f"WARN  set `bot_login: {result['login']}` in {CONFIG_PATH} so stats and audit trust its markers")
     return 0
+
+
+def _cfg_app_id(ctx: Ctx) -> str:
+    try:
+        return ctx.cfg.app_id
+    except (ConfigError, OSError):
+        return ""  # `app installations` also works outside a configured repo
 
 
 def cmd_config(ctx: Ctx) -> int:
@@ -780,7 +892,8 @@ def cmd_check_pat(ctx: Ctx, run=subprocess.run) -> int:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
     checks = pat_checks(token, run)
     if checks[0].level == OK:
-        checks += access_checks(ctx.gh)
+        # Only the red-team filing job asks for advisories (--advisories); lane PATs never need them.
+        checks += access_checks(ctx.gh, advisories=getattr(ctx.args, "advisories", False))
     for c in checks:
         ctx.say(c.line())
     if any(c.level == FAIL for c in checks):
@@ -1002,6 +1115,20 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--mode", default="", help="reduce: file every ticket as proposed and record --prs as reduced")
     c.add_argument("--prs", default="", help="(reduce) the merged PR numbers the context covered, comma-separated")
 
+    s = sub.add_parser("redteam", parents=[common], help="(workflow) scheduled red-team scan: context | publish")
+    rsub = s.add_subparsers(dest="redteam_action", required=True)
+    c = rsub.add_parser("context", parents=[sub_common], help="decide whether to scan and write the context")
+    c.add_argument("--out-dir", required=True)
+    c.add_argument("--github-output")
+    c.add_argument("--full", action="store_true", help="scan the whole tree, not only what changed since the last scan")
+    c = rsub.add_parser("publish", parents=[sub_common],
+                       help="file findings as draft security advisories (public repo) or `security` issues (private)")
+    c.add_argument("--sha", required=True, help="the commit the scan reached")
+    c.add_argument("--base", default="", help="the commit it started from (empty for a baseline scan)")
+    c.add_argument("--findings-file", default="-", metavar="PATH",
+                   help="gzip'd scan output; '-' (default) reads stdin, where the workflow pipes the decrypted findings. "
+                        "--dry-run prints the full advisory bodies, so never use it in a public CI log")
+
     s = sub.add_parser("audit", parents=[common], help="sample merged agent PRs and measure quality")
     s.add_argument("--sample", type=int, default=25)
     s.add_argument("--seed", type=int, default=1)
@@ -1019,15 +1146,21 @@ def parser() -> argparse.ArgumentParser:
     m = asub.add_parser("check", parents=[sub_common])
     m.add_argument("--app-id", default="")
     m.add_argument("--key-file", default="", help="private key .pem (default: $APP_PRIVATE_KEY)")
+    m = asub.add_parser("installations", parents=[sub_common],
+                        help="list every account and repo the App is installed on, and its last comment in each")
+    m.add_argument("--app-id", default="")
+    m.add_argument("--key-file", default="", help="private key .pem (default: $APP_PRIVATE_KEY)")
     s = sub.add_parser("app-token", parents=[common])
     s.add_argument("--github-env", required=True)
+    s.add_argument("--advisories", action="store_true", help="also ask for Repository security advisories: write")
     s = sub.add_parser("command", parents=[common])
     for flag in ("--author", "--body", "--issue"):
         s.add_argument(flag, default="")
     s = sub.add_parser("lane-config", parents=[common])
     s.add_argument("--lane", required=True)
     s.add_argument("--github-output")
-    sub.add_parser("check-pat", parents=[common])
+    s = sub.add_parser("check-pat", parents=[common])
+    s.add_argument("--advisories", action="store_true", help="also probe security advisories (public repos only)")
     s = sub.add_parser("pick", parents=[common])
     s.add_argument("--lane", required=True)
     s.add_argument("--github-output")
@@ -1066,7 +1199,7 @@ def parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "init": cmd_init, "setup": cmd_setup, "join": cmd_join, "doctor": cmd_doctor, "status": cmd_status,
     "stats": cmd_stats, "start": cmd_switch, "pause": cmd_switch, "freeze": cmd_switch, "resume": cmd_switch,
-    "lint": cmd_lint, "rules": cmd_rules, "plan": cmd_plan, "roadmap": cmd_roadmap, "digest": cmd_digest,
+    "lint": cmd_lint, "rules": cmd_rules, "redteam": cmd_redteam, "plan": cmd_plan, "roadmap": cmd_roadmap, "digest": cmd_digest,
     "config": cmd_config, "audit-log": cmd_audit_log, "app": cmd_app, "app-token": cmd_app_token,
     "take": cmd_take_retry, "retry": cmd_take_retry, "command": cmd_command,
     "audit": cmd_audit, "lane-config": cmd_lane_config,

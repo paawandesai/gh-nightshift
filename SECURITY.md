@@ -90,6 +90,9 @@ steps of the same job, so the agent job never holds the key or the token. It exp
   and sees checks posted by other apps too.
 - **Workflows: no access.** Without it, GitHub refuses any push that changes `.github/workflows/`, a second
   wall behind the protected-path check.
+- Repository security advisories: read/write, only when `redteam.enabled`: the red-team scan files its findings
+  as draft advisories. In App mode only the filing job's token asks for it (`app-token --advisories`); every other
+  minted token lacks it.
 
 Every lane run executes `check-pat` before picking. It fails the run if the PAT does not authenticate or if
 a classic PAT has the `workflow` scope. See the gaps: a fine-grained PAT's permissions cannot be read back.
@@ -227,6 +230,27 @@ used both ways. It calls Claude only when a `security: true` rule hits, the PR t
 `risk.approve_paths`, or `security.always` is on, and otherwise passes. A high or critical finding fails the
 check even if the reviewer said pass. Findings on a PR are posted as PR comments (and on the issue when it
 fails), so on a public repo they are public; they describe unmerged code that the gate has just kept out of main.
+
+**The red-team scan** is different: it looks at code already on main, so its findings are live vulnerabilities.
+They are never written where a public repo would show them. The scan job has the Claude token only; Claude's
+output is never printed, and it leaves the job gzip'd and AES-256 encrypted with that token (a job output is
+printed in the log of the job that uses it, and every log and artifact of a public repo is readable by anyone).
+The filing job receives the same Claude token only as the decryption key (it never runs Claude), decrypts inside
+a pipe, and creates draft private security advisories on a public repo, posting only "the scan ran" on the night
+log, or `security` + `human` issues on a private repo, where the repo's visibility already limits them to
+members. Finding text is the model's and is fenced and defanged. Only advisories or issues authored by a trusted
+login count for deduplication (an outsider's private vulnerability report cannot suppress a finding), and the
+scan's progress marker is trusted only from the PAT's login. A scan that fails, is cut short or cannot file
+records nothing, so the next scan covers the same range again. On a public repo the run looks the same whether
+or not anything was found: the sealed output is padded to a fixed size, a filing error prints one generic line
+with no severity or count, and the token's access is checked on every run, findings or not.
+
+The ciphertext stays in public logs for the log retention period, and it is only as safe as the Claude token
+that sealed it. That token defaults to the security (or review) token, which agent jobs also hold; give the scan
+its own token with `redteam.claude_token_secret`, and rotate it if it may have leaked. On a private repo, removing the
+`security` label from a filed issue makes the next full scan file it again (deduplication looks at that label).
+In App mode the filing job always asks for Repository security advisories, so approve that permission on the
+installation even for private repos.
 
 ## Auto-merge
 

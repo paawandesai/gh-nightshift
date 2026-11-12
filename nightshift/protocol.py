@@ -20,6 +20,9 @@ Types
   note-sent     on the sender issue, one per note, so the cap of notes per issue can be counted
   plan          on the night-log issue after a planner run: {"mode","lane","complete","docs_sha"}; a reduce
                 run has lane "reduce" and "prs" (the merged PRs it covered, "12,15")
+  redteam       on the night-log issue after a red-team scan: {"sha" (the commit it reached), "base"}
+  redteam-finding  in a draft security advisory's description (public repo) or a `security` issue's body (private
+                repo): {"fp" (title + file), "wk" (CWE + file, when given), "sha"}
 """
 from __future__ import annotations
 
@@ -31,7 +34,7 @@ from typing import Any
 MARKER_RE = re.compile(r"<!--\s*ns:(\{.*?\})\s*-->", re.S)
 TYPES = {"attempt", "infra", "blocked", "waiting", "need", "handoff", "note", "pr", "handoff-done",
          "handoff-data", "note-sent", "fix-attempt", "fix-infra", "plan", "budget", "digest", "roadmap",
-         "take", "retry", "approval"}
+         "take", "retry", "approval", "redteam", "redteam-finding"}
 PR_REASONS = ("verdict_passed", "verdict_failed", "security_failed", "checks_failed", "conflict", "stale", "superseded", "manual")
 
 # Markers written by the original hackathon kit; still counted so a repo can migrate mid-flight.
