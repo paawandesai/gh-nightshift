@@ -563,7 +563,15 @@ def plan_context(ctx: Ctx, mode: str, docs: list[str] | None, lane: str, out_dir
                  request: str = "") -> dict[str, str]:
     cfg = ctx.cfg
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "context.md").write_text(planner.context(ctx.gh, cfg, mode, docs, lane, request), encoding="utf-8")
+    from . import review_rules
+
+    try:
+        rules = review_rules.load(ctx.root)
+    except review_rules.RulesError as err:
+        ctx.say(f"::warning::{review_rules.RULES_PATH} is invalid, planning without it: {err}")
+        rules = []
+    (out_dir / "context.md").write_text(planner.context(ctx.gh, cfg, mode, docs, lane, request, rules),
+                                        encoding="utf-8")
     (out_dir / "prompt.md").write_text(prompts.render("planner", {
         "CONTEXT_FILE": str(out_dir / "context.md"), "MAX": str(cfg.planner_max_tickets)}, ctx.root), encoding="utf-8")
     (out_dir / "schema.json").write_text(prompts.schema_json("planner"), encoding="utf-8")

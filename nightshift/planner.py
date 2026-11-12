@@ -433,8 +433,9 @@ def _fenced(text: str) -> list[str]:
     return [f"{fence}text", text, fence]
 
 
-def context(gh: GH, cfg: Config, mode: str, docs: list[str] | None = None, lane: str = "", request: str = "") -> str:
-    """Markdown the planner agent reads: mode, lanes, queue depth, next IDs, existing issues."""
+def context(gh: GH, cfg: Config, mode: str, docs: list[str] | None = None, lane: str = "", request: str = "",
+            rules: list | None = None) -> str:
+    """Markdown the planner agent reads: mode, lanes, queue depth, next IDs, the repo's review rules, existing issues."""
     counts = ready_counts(gh, cfg)
     issues = gh.issues(state="all")
     out = ["# Planning context", "", f"Mode: **{mode}**" + (f", lane `{lane}` only" if lane else ""), ""]
@@ -450,8 +451,19 @@ def context(gh: GH, cfg: Config, mode: str, docs: list[str] | None = None, lane:
     out += ["", f"## Docs to read: {', '.join(docs or cfg.planner_docs)}",
             f"## Protected paths (never ticket changes here): {', '.join(cfg.protected_paths)}",
             f"## Human-only paths (tickets touching them become human tickets): {', '.join(cfg.planner_human_paths)}",
-            f"## At most {cfg.planner_max_tickets} tickets this run", "",
-            "## Existing issues (do not duplicate; you may depend on them by number)"]
+            f"## At most {cfg.planner_max_tickets} tickets this run", ""]
+    if rules:
+        # Seen live: a ticket fixed a contract (no caller id) that a security rule then failed on every attempt.
+        out += ["## Repo review rules (every agent PR is checked against these; the ticket's `do` and `interface` "
+                "must let the code satisfy each rule that will select it, or the PR fails review. If a doc's contract "
+                "conflicts with a rule, defer that requirement as a product decision instead of ticketing it)"]
+        for r in rules[:50]:
+            where = ", ".join(r.paths) or "any path"
+            where += f" ({r.glob})" if r.glob else ""
+            tag = f"{'security, ' if r.security else ''}{r.severity}"
+            out.append(f"- `{ns.one_line(r.id, 80)}` [{tag}] on {ns.one_line(where, 200)}: {ns.one_line(r.question, 300)}")
+        out.append("")
+    out += ["## Existing issues (do not duplicate; you may depend on them by number)"]
     for i in sorted(issues, key=lambda i: i["number"])[-300:]:
         wave = wave_of(i)
         out.append(f"- #{i['number']} [{i.get('state')}] [{', '.join(lanes_of(i)) or '-'}] "
