@@ -350,7 +350,8 @@ These are not enforced. They are listed so you can judge the risk yourself.
 13. **The agent job runs on the default branch's ref, with sudo unless the lane sets `sudo: false`.** A
     process with root on the runner can read the job's own credentials for the Actions cache and artifacts.
     `sudo: false` removes sudo (and Docker, except on lanes with `postgres_image`) after setup, on GitHub-hosted
-    runners only. Leftover processes are stopped and the agent's artifact is downloaded by id, but do not
+    runners only. Leftover processes are stopped (GitHub-hosted runners only: a self-hosted machine may run
+    another job as the same user) and the agent's artifact is downloaded by id, but do not
     restore Actions caches in workflows that hold secrets (`doctor` warns), and treat the cache of the default
     branch as writable by agents.
 14. **The reviewer, planner and red-team scan can read files on their runner.** Their token reaches Claude on

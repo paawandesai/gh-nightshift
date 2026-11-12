@@ -52,7 +52,8 @@ Fixes for every open item of the November security review (H1, H2, H5, M4 to M10
   secret limited to the default branch. `doctor` warns while it is a repository secret and checks the
   environment (H2).
 - Lane option `sudo: false` removes sudo (and Docker, on lanes without a database) before the agent runs on
-  GitHub-hosted runners. Processes the agent leaves behind are stopped before its commits are packaged. The
+  GitHub-hosted runners. Processes the agent leaves behind are stopped (GitHub-hosted runners) before the
+  fallback token is used and before its commits are packaged. The
   agent's output artifact has an unguessable name and publish downloads it by id, so one lane cannot hand
   another lane's publish job its files. `doctor` warns about Actions caches in workflows that hold secrets (H5).
 - The reviewer, security reviewer, planner and red-team scan read their Claude token from a pipe instead of
@@ -72,6 +73,8 @@ Fixes for every open item of the November security review (H1, H2, H5, M4 to M10
   request and files its tickets as `proposed`; with `planner.refill_below` on, `planner.docs` are protected (M8).
 - The fallback Claude token moved to its own step, which runs only when the lane's token could not start a run;
   `config` rejects a fallback, review or security token that is another lane's or the planner's (M9).
+  **Breaking:** a config whose `review_token_secret` or `security.claude_token_secret` is also a lane's Claude
+  token no longer loads; give the reviewers their own token.
 - Cross-repo dependencies are read only for repos in the new `cross_repos` list (default: none), and
   `check-pat` fails on a classic PAT (M10).
 

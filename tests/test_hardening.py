@@ -84,7 +84,15 @@ class Workflows(unittest.TestCase):
         self.assertIn("env -u LANE_CLAUDE_FALLBACK claude -p", agent)
         # M9: the first attempt's step never holds the fallback token; the fallback step holds only that one.
         first = agent[agent.index("- name: Run agent\n"):agent.index("- name: Run agent (fallback token)")]
-        second = agent[agent.index("- name: Run agent (fallback token)"):agent.index("- name: Stop processes")]
+        second = agent[agent.index("- name: Run agent (fallback token)"):
+                       agent.index("- name: Stop processes the agent left behind")]
+        # Review fixes: the agent's processes are stopped before the fallback step, cleanup is GitHub-hosted only,
+        # and the token guard holds the fallback only after a fallback run.
+        self.assertLess(agent.index("- name: Stop processes before the fallback run"),
+                        agent.index("- name: Run agent (fallback token)"))
+        self.assertEqual(agent.count("runner.environment == 'github-hosted'"), 2)
+        guard = agent[agent.index("- name: Token guard"):]
+        self.assertIn("steps.agent.outputs.fallback == 'true' && secrets.claude_token_fallback || ''", guard)
         self.assertNotIn("secrets.claude_token_fallback }}", first)
         self.assertIn("secrets.claude_token_fallback != ''", first)
         self.assertNotIn("secrets.claude_token }}", second)
@@ -606,3 +614,14 @@ class DefaultApprovePaths(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(path_is_protected(path, cfg.protected_paths))
         self.assertFalse(path_is_protected("api/AGENT_RULES.md", cfg.protected_paths))
+
+
+class RefillDocsProtected(unittest.TestCase):
+    def test_refill_protects_planner_docs_including_folders_without_a_slash(self):
+        text = CONFIG.replace("  human_paths: [contracts/]", "  human_paths: [contracts/]\n  refill_below: 2\n"
+                              "  docs: [docs/PRD.md, docs/plan]")
+        cfg = loads(text)
+        for path in ("docs/PRD.md", "docs/plan/goals.md"):
+            with self.subTest(path=path):
+                self.assertTrue(path_is_protected(path, cfg.protected_paths))
+        self.assertFalse(path_is_protected("docs/PRD.md", loads(CONFIG).protected_paths))  # refill off

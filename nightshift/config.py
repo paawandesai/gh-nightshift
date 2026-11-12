@@ -133,7 +133,9 @@ class Config:
     def protected_paths(self) -> list[str]:
         extra = ["CODEOWNERS", "docs/CODEOWNERS"] if self.risk_codeowners else []  # .github/ is already built in
         if self.planner_refill_below > 0:
-            extra += self.planner_docs  # M8: the planner files tickets from these on a timer, unattended
+            # M8: the planner files tickets from these on a timer, unattended. A folder entry may lack its slash.
+            for doc in self.planner_docs:
+                extra += [doc] if doc.endswith("/") or "." in doc.rsplit("/", 1)[-1] else [doc, doc.rstrip("/") + "/"]
         return BUILTIN_PROTECTED + [p for p in self.extra_protected + extra if p not in BUILTIN_PROTECTED]
 
     @property
@@ -423,10 +425,12 @@ def parse(data: dict) -> Config:
         raise ConfigError(f"planner.id_prefixes names unknown lane(s): {', '.join(unknown)}")
     # A lane's fallback must not be another lane's, the planner's or a reviewer's token, and the reviewers judge
     # the lanes' work, so they must not run on a lane owner's token (security review M9).
-    lane_tokens = {lane.token_secret: lane.name for lane in lanes}
+    lane_tokens: dict[str, set[str]] = {}
+    for lane in lanes:
+        lane_tokens.setdefault(lane.token_secret, set()).add(lane.name)
     for lane in lanes:
         fb = lane.fallback_token_secret
-        if fb and (lane_tokens.get(fb, lane.name) != lane.name or fb in {cfg.review_token_secret, cfg.security_token,
+        if fb and (lane_tokens.get(fb, {lane.name}) - {lane.name} or fb in {cfg.review_token_secret, cfg.security_token,
                                                                         cfg.planner_token_secret}):
             raise ConfigError(f"lane {lane.name}: fallback_token_secret {fb} is another lane's, the planner's or a "
                               "reviewer's token")

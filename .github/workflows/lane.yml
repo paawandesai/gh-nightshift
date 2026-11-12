@@ -265,7 +265,9 @@ jobs:
           # The docker group is root by another name. A lane with a database keeps it (the runner stops the
           # service container through it after the job).
           if [ "$HAS_SERVICE" != "true" ] && [ -S /var/run/docker.sock ]; then
-            sudo chown root:root /var/run/docker.sock && sudo chmod 600 /var/run/docker.sock
+            sudo chown root:root /var/run/docker.sock
+            sudo chmod 600 /var/run/docker.sock
+            if docker info > /dev/null 2>&1; then echo "::error::Docker still works after locking its socket"; exit 1; fi
           elif [ "$HAS_SERVICE" = "true" ]; then
             echo "::warning::postgres_image keeps Docker access, which is root-equivalent; sudo is still removed"
           fi
@@ -322,7 +324,8 @@ jobs:
           echo "claude exit code: $RC (model $MODEL)"
           # Same rule as the publish job's infra-error: no structured output and fewer than 2 turns means the run
           # never really started (usage limit, expired or revoked token, outage). Both inputs are the agent's, so an
-          # agent can force the fallback run; it cannot reach the fallback token from here.
+          # agent can force the fallback run; its processes are stopped before that step, which alone holds the
+          # fallback token (on GitHub-hosted runners; a root process survives unless the lane sets sudo: false).
           TURNS="$(jq -r 'if (.structured_output | type) == "object" then 99 else (.num_turns // 0) end' \
             "$OUT/result.json" 2> /dev/null || echo 0)"
           if [ "$HAS_FALLBACK" = "true" ] && [ "${TURNS:-0}" -lt 2 ] && \
@@ -334,6 +337,23 @@ jobs:
           fi
           tail -n 50 "$OUT/claude.stderr" || true
           exit "$RC"
+
+      # Before the fallback token is in any step's environment, end what the first run left behind.
+      - name: Stop processes before the fallback run
+        if: steps.agent.outputs.fallback == 'true' && runner.environment == 'github-hosted'
+        env:
+          BEFORE: ${{ steps.procs.outputs.pids }}
+        run: |
+          KEEP=" ${BEFORE} "
+          P=$$
+          while [ -n "$P" ] && [ "$P" -gt 1 ]; do KEEP="$KEEP $P "; P="$(ps -o ppid= -p "$P" | tr -d ' ')"; done
+          for ROUND in 1 2 3; do
+            for PID in $(ps -u "$(id -u)" -o pid=); do
+              case "$KEEP" in *" $PID "*) continue ;; esac
+              kill -9 "$PID" 2> /dev/null || true
+            done
+            echo "cleanup round $ROUND done"
+          done
 
       - name: Run agent (fallback token)
         if: steps.agent.outputs.fallback == 'true'
@@ -368,7 +388,8 @@ jobs:
       # Anything the agent left running (a server, a background job) could rewrite the commits or the result while
       # they are packaged and checked. Every process of this user that was not there before the agent ran is ended.
       - name: Stop processes the agent left behind
-        if: always()
+        # GitHub-hosted only: on a self-hosted machine another runner of the same user may be running a job.
+        if: always() && runner.environment == 'github-hosted'
         env:
           BEFORE: ${{ steps.procs.outputs.pids }}
         run: |
@@ -404,7 +425,8 @@ jobs:
         if: always()
         env:
           LANE_CLAUDE_TOKEN: ${{ secrets.claude_token }}
-          LANE_CLAUDE_FALLBACK: ${{ secrets.claude_token_fallback }}
+          # Only a run that used the fallback token can have leaked it, so only then does the guard hold it.
+          LANE_CLAUDE_FALLBACK: ${{ steps.agent.outputs.fallback == 'true' && secrets.claude_token_fallback || '' }}
         run: |
           set -uo pipefail
           OUT="$RUNNER_TEMP/out"; mkdir -p "$OUT"
