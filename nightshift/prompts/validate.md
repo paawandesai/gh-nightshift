@@ -16,8 +16,8 @@ Rules:
 
 Return:
 - `testable`: true when you wrote a test (whether it fails or passes), false when this cannot be tested here.
-- `test_path`: the test file's path from the repository root.
-- `run_command`: one shell command, run from the repository root, that runs only your test file and names it (for example `python -m pytest tests/test_repro_export.py -q`). No pipes, no `||`, nothing that hides the exit code.
+- `test_path`: the test file's path from the repository root. It must be a new file; the harness refuses a run where any file from main was changed, or where anything besides the test and one helper next to it was added (never a `conftest.py` or runner configuration).
+- `runner`: which test runner runs it, exactly one of `pytest`, `unittest`, `node` (node:test), `go`, `cargo`, `jest`, `vitest`, `mocha`. The harness builds the command itself from this name and the path (for example `python3 -m pytest <test_path>`, `go test -run '^(TestA)$' ./<package>`, `cargo test --test <name>` for `<crate>/tests/<name>.rs`, or `node_modules/.bin/jest` from the repository's own install). If the repository's tests use another framework, return `testable: false` and name it in `notes`.
 - `notes`: three sentences at most: what the test does, what you saw when you ran it, and anything a person should know before trusting it.
 
-A harness will run your command twice after you finish and decide the result from those runs alone. Nothing you say about the outcome is used, so do not describe a failure you did not see.
+A harness will run your test twice after you finish and decide the result from the runner's own report alone. Only a failed assertion counts: a fixture or setup error, an uncaught exception, a panic, an import or build error, or a missing test runner means the attack was not shown. Nothing you say about the outcome is used, so do not describe a failure you did not see.

@@ -3,15 +3,21 @@
 The scan reads code and reasons about it, so some of what it reports is not reachable in practice. The `validate`
 job of `redteam.yml` takes each new candidate (at most `redteam.validate.max_per_run`, each on its own runner),
 checks out main, runs the owning lane's setup commands, and asks Claude for one test that shows the attack: a
-test that FAILS while the bug exists. Then the harness, not the model, runs that test twice:
+test that FAILS while the bug exists. The model hands back the test's path and which runner it uses (one of
+RUNNERS); the harness, not the model, checks that the checkout is main plus that one new test (and at most one
+helper beside it), builds the runner's command itself, runs it twice without a shell and reads the runner's own
+report (pytest's JUnit XML, `go test -json`, jest/vitest/mocha JSON, node:test JUnit, cargo's result lines):
 
-- `validated`: both runs failed with a test failure (not an import, syntax, collection or usage error);
-- `not_reproduced`: the test passed, errored or was flaky;
-- `not_testable`: the model said the finding needs something the runner cannot provide.
+- `validated`: both runs failed on an assertion (not a fixture, setup, import or build error, an uncaught
+  exception or a panic, and not a run where no test ran);
+- `not_reproduced`: the test passed, broke, was flaky, or the checkout was changed beyond the new test;
+- `not_testable`: the model said the finding needs something the runner cannot provide, or named a runner the
+  harness does not support.
 
-The verdict comes from the exit status and output of the runs, never from what the model says about them. That
-catches a test that does not show what it claims. It cannot stop a model that sets out to fake a result: the model
-has a shell in that job. So a person still reads every repro test, and a later fix must turn it green.
+The verdict comes from those runs, never from what the model says about them. That catches a test that does not
+show what it claims and the honest mistakes (a missing runner, an edited file). It cannot stop a model that sets
+out to fake a result: the model has a shell in that job. So a person still reads every repro test, and a later
+fix must turn it green.
 
 The job holds the red-team Claude token only. Results leave it the way findings do: gzip'd, zero-padded to a fixed
 size and AES-256 encrypted with that token, because a job output is printed in the next job's log.
@@ -23,8 +29,14 @@ import gzip
 import json
 import os
 import re
+import shlex
+import shutil
+import signal
 import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import protocol as ns
@@ -41,25 +53,34 @@ RUN_TIMEOUT = 300             # seconds for one run of the repro test
 RUNS = 2
 OPENSSL = ["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-iter", "200000", "-pass", "env:SEAL_KEY"]
 
+# The test runners the harness knows. The model names one; the harness builds the command itself, runs it without a
+# shell and reads the runner's own report, so no text the model writes decides an exit code or a verdict.
+RUNNERS = ("pytest", "unittest", "node", "go", "cargo", "jest", "vitest", "mocha")
+
 VALIDATE_SCHEMA = {
     "type": "object",
     "properties": {
         "testable": {"type": "boolean"},
         "test_path": {"type": "string"},
-        "run_command": {"type": "string"},
+        "runner": {"type": "string", "description": "one of: " + ", ".join(RUNNERS)},
         "notes": {"type": "string"},
     },
     "required": ["testable", "notes"],
 }
 
-# Output that means the run broke before it tested anything. A broken run proves nothing about the finding.
-_BROKEN_RE = re.compile(
-    r"ImportError|ModuleNotFoundError|SyntaxError|IndentationError|NameError: name|error(s)? during collection|"
-    r"no tests ran|collected 0 items|Ran 0 tests|FAILED \((?:[a-z]+=\d+, )*errors=\d+|command not found|"
-    r"No such file or directory|Cannot find module|\[build failed\]|\[setup failed\]|No tests found|"
-    r"Test suite failed to run|error TS\d+", re.I)
 
-Runner = Callable[[str, Path], tuple[int, str]]
+@dataclass(frozen=True)
+class Plan:
+    """One run of the repro test as the harness builds it: argv (never a shell), working directory, extra
+    environment, and where the runner writes its machine-readable report (None: the report is the output)."""
+    runner: str
+    argv: list[str]
+    cwd: Path
+    report: Path | None = None
+    env: dict[str, str] = field(default_factory=dict)
+
+
+Runner = Callable[[Plan], tuple[int, str]]
 
 
 # --- choosing what to validate ------------------------------------------------------------
@@ -123,43 +144,270 @@ def setup_script(cfg: Config, f: dict) -> str:
 
 # --- the harness ----------------------------------------------------------------------------
 
+# The runner writes these files between steps, and the runner executes what they hold in later steps (GITHUB_ENV
+# and GITHUB_PATH reach the seal step, which holds the token), so neither the test nor the model gets them.
+RUNNER_FILES = ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY")
+
+
 def scrubbed_env(env: dict[str, str] | None = None) -> dict[str, str]:
-    """The environment for the repro test: nothing that looks like a credential."""
+    """The environment for the repro test: nothing that looks like a credential, and none of the runner's files."""
     drop = re.compile(r"TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$|^SEAL|^CLAUDE|^ANTHROPIC|^ACTIONS_|^GH_|^GITHUB_TOKEN$", re.I)
     # PYTHONPATH and PYTHONSAFEPATH are the tool's own settings (they keep repo code out of the token jobs); with
     # them a Python test could not import the repo it is testing.
     return {k: v for k, v in (os.environ if env is None else env).items()
-            if not drop.search(k) and k not in ("PYTHONPATH", "PYTHONSAFEPATH")}
+            if not drop.search(k) and k not in ("PYTHONPATH", "PYTHONSAFEPATH", *RUNNER_FILES)}
 
 
-def shell_runner(command: str, cwd: Path) -> tuple[int, str]:
-    """Run the repro command once; (exit code, combined output). 124 on timeout, as `timeout` reports it."""
+def shell_runner(plan: Plan) -> tuple[int, str]:
+    """Run the repro test once, as argv with no shell; (exit code, combined output). 124 on timeout, as `timeout`
+    reports it; the whole process group is killed then. (The name is kept from when this ran a shell command.)"""
     try:
-        done = subprocess.run(["bash", "-c", command], cwd=str(cwd), env=scrubbed_env(), stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=RUN_TIMEOUT, check=False)
-    except subprocess.TimeoutExpired as err:
-        return 124, (err.stdout or b"").decode("utf-8", errors="replace") + "\n(timed out)"
-    return done.returncode, done.stdout.decode("utf-8", errors="replace")
+        proc = subprocess.Popen(plan.argv, cwd=str(plan.cwd), env={**scrubbed_env(), **plan.env}, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as err:
+        return 127, f"{plan.argv[0]}: {err.strerror or type(err).__name__}"
+    try:
+        out, _ = proc.communicate(timeout=RUN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        out, _ = proc.communicate()
+        return 124, (out or b"").decode("utf-8", errors="replace") + "\n(timed out)"
+    return proc.returncode, out.decode("utf-8", errors="replace")
 
 
-def classify(runs: list[tuple[int, str]]) -> tuple[str, str]:
-    """(verdict, reason) from the harness's own runs of the repro test. `validated` needs every run to fail as a
-    test failure. Exit code 1 is what pytest, unittest, jest, vitest, go test and cargo test all use for "tests
-    ran and at least one failed"; other codes mean usage, collection or build errors, a signal or a timeout."""
-    if len(runs) < RUNS:
+# --- what one run showed, per runner ---
+# Each runner's report says, per test, whether it passed, failed on an assertion or broke (a fixture or setup error,
+# an uncaught exception, a panic, a build or import error). Only an assertion failure shows the attack working: the
+# test asserted the safe behaviour and the code did not hold it. Output text is never searched for error words.
+
+FAIL, PASS, BROKEN = "fail", "pass", "broken"
+MAX_REPORT = 8 * 1024 * 1024
+_PY_ASSERT = re.compile(r"(assert\b|AssertionError\b|Failed: )")
+_JS_ASSERT = re.compile(r"\s*(?:Error: )?(?:AssertionError\b|assert[.(]|expect\()")
+
+
+def _exc_name(text: str) -> str:
+    m = re.match(r"\s*(?:\[?Error \[ERR_TEST_FAILURE\]: )?([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt))\b", text)
+    return m.group(1) if m else ns.one_line(text, 40) or "an error"
+
+
+def _xml(report: str) -> ET.Element | None:
+    try:
+        return ET.fromstring(report)
+    except (ET.ParseError, ValueError):
+        return None
+
+
+def _pytest(code: int, report: str) -> tuple[str, str]:
+    root = _xml(report)
+    if root is None:
+        return BROKEN, "pytest wrote no report: no test ran (is pytest installed?)"
+    cases = list(root.iter("testcase"))
+    if any(case.find("error") is not None for case in cases) or root.get("errors", "0") not in ("0", ""):
+        err = next((c.find("error") for c in cases if c.find("error") is not None), None)
+        msg = (err.get("message") if err is not None else "") or ""
+        return BROKEN, f"a fixture, setup or collection error ({ns.one_line(msg, 60)})"
+    failures = [c.find("failure") for c in cases if c.find("failure") is not None]
+    for fail in failures:
+        msg = fail.get("message") or ""
+        if not _PY_ASSERT.match(msg):
+            return BROKEN, f"an uncaught {_exc_name(msg)}, not an assertion failure"
+    if failures:
+        return (FAIL, "") if code == 1 else (BROKEN, f"the report shows a failure but pytest exited {code}")
+    ran = [c for c in cases if c.find("skipped") is None]
+    return (PASS, "") if ran else (BROKEN, "no test ran (none collected, or all skipped)")
+
+
+def _unittest(code: int, report: str) -> tuple[str, str]:
+    try:
+        data = json.loads(report)
+        run, failures, errors = int(data["run"]), int(data["failures"]), int(data["errors"])
+    except (ValueError, KeyError, TypeError):
+        return BROKEN, "the unittest run wrote no report: no test ran"
+    if errors:
+        return BROKEN, f"an error, not an assertion failure ({ns.one_line(str(data.get('first_error') or ''), 60)})"
+    if failures:
+        return (FAIL, "") if code == 1 else (BROKEN, f"the report shows a failure but the run exited {code}")
+    return (PASS, "") if run - int(data.get("skipped", 0)) > 0 else (BROKEN, "no test ran")
+
+
+def _node(code: int, report: str) -> tuple[str, str]:
+    root = _xml(report)
+    if root is None:
+        return BROKEN, "node --test wrote no report: no test ran"
+    ran = failed = 0
+    for case in root.iter("testcase"):
+        fail = case.find("failure")
+        if case.find("skipped") is not None:
+            continue
+        ran += 1
+        if fail is None:
+            continue
+        kind, text = fail.get("type") or "", fail.text or ""
+        if kind == "subtestsFailed":
+            continue      # the parent of a failing subtest; the subtest itself is judged
+        if kind != "testCodeFailure" or not re.search(r"^\s*(?:cause: |\[)?AssertionError\b", text, re.M):
+            return BROKEN, f"{kind or 'a failure'} ({_exc_name(text.split('cause: ', 1)[-1])}), not an assertion failure"
+        failed += 1
+    if failed:
+        return (FAIL, "") if code == 1 else (BROKEN, f"the report shows a failure but node exited {code}")
+    return (PASS, "") if ran else (BROKEN, "no test ran")
+
+
+def _go(code: int, output: str, names: tuple[str, ...]) -> tuple[str, str]:
+    results: dict[str, str] = {}
+    panicked: set[str] = set()
+    seen_json = False
+    for line in output.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        seen_json = True
+        action, test = ev.get("Action"), str(ev.get("Test") or "")
+        if action == "build-fail" or ev.get("FailedBuild") or "[build failed]" in str(ev.get("Output") or "") \
+                or "[setup failed]" in str(ev.get("Output") or ""):
+            return BROKEN, "the package did not build"
+        top = test.split("/", 1)[0]
+        if top in names and action == "output" and re.search(r"^\s*panic: ", str(ev.get("Output") or ""), re.M):
+            panicked.add(top)
+        if test in names and action in (PASS, FAIL, "skip"):
+            results[test] = action
+    if not seen_json:
+        return BROKEN, "go test wrote no report: no test ran"
+    if panicked:
+        return BROKEN, "a panic, not an assertion failure (t.Error or t.Fatal)"
+    if FAIL in results.values():
+        return (FAIL, "") if code == 1 else (BROKEN, f"the report shows a failure but go test exited {code}")
+    return (PASS, "") if PASS in results.values() else (BROKEN, "no test ran")
+
+
+_CARGO_RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed", re.M)
+_CARGO_PANIC = re.compile(r"panicked at (?:'(?P<old>[^\n]*?)', [^\n]*|[^\n]*:\n(?P<new>[^\n]*))")
+
+
+def _cargo(code: int, output: str) -> tuple[str, str]:
+    m = _CARGO_RESULT.search(output)
+    if not m:
+        return BROKEN, "cargo test reported no result: the build failed or no test ran"
+    failed, passed = int(m.group(3)), int(m.group(2))
+    if failed:
+        for block in re.split(r"^---- \S+ stdout ----$", output, flags=re.M)[1:]:
+            p = _CARGO_PANIC.search(block)
+            msg = (p.group("old") or p.group("new") or "") if p else ""
+            if not msg.startswith("assertion"):
+                return BROKEN, "a panic, not an assertion failure (assert!, assert_eq!, assert_ne!)"
+        return (FAIL, "") if code == 101 else (BROKEN, f"the report shows a failure but cargo exited {code}")
+    return (PASS, "") if passed else (BROKEN, "no test ran")
+
+
+def _jest(code: int, report: str, test_file: Path) -> tuple[str, str]:
+    """jest and vitest write the same JSON shape."""
+    try:
+        data = json.loads(report)
+        suites = [s for s in data["testResults"] if Path(str(s.get("name") or "")) == test_file]
+    except (ValueError, KeyError, TypeError):
+        return BROKEN, "the runner wrote no report: no test ran (is it installed?)"
+    if not suites:
+        return BROKEN, "the report has no result for the repro test"
+    ran = failed = 0
+    for suite in suites:
+        cases = suite.get("assertionResults") or []
+        if suite.get("status") == "failed" and not any(c.get("status") == "failed" for c in cases):
+            return BROKEN, f"the test file did not run ({_exc_name(str(suite.get('message') or ''))})"
+        for case in cases:
+            if case.get("status") == "passed":
+                ran += 1
+            elif case.get("status") == "failed":
+                ran, failed = ran + 1, failed + 1
+                details = case.get("failureDetails") or []
+                msg = str((case.get("failureMessages") or [""])[0])
+                if not (any(isinstance(d, dict) and "matcherResult" in d for d in details) or _JS_ASSERT.match(msg)):
+                    return BROKEN, f"an uncaught {_exc_name(msg)}, not an assertion failure"
+    if failed:
+        return (FAIL, "") if code == 1 else (BROKEN, f"the report shows a failure but the runner exited {code}")
+    return (PASS, "") if ran else (BROKEN, "no test ran")
+
+
+def _mocha(code: int, report: str, test_file: Path) -> tuple[str, str]:
+    try:
+        data = json.loads(report)
+        tests = [t for t in data["tests"] if Path(str(t.get("file") or "")) == test_file]
+        failures = [t for t in data["failures"] if Path(str(t.get("file") or "")) == test_file]
+        hooks = [t for t in data["failures"] if '" hook' in str(t.get("title") or "") or not t.get("file")]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return BROKEN, "mocha wrote no report: no test ran (is it installed?)"
+    if hooks:
+        return BROKEN, "a hook failed, not an assertion"
+    for t in failures:
+        err = t.get("err") or {}
+        if err.get("name") != "AssertionError":
+            return BROKEN, f"an uncaught {err.get('name') or 'error'}, not an assertion failure"
+    if failures:   # mocha exits with the number of failures
+        return (FAIL, "") if code >= 1 else (BROKEN, "the report shows a failure but mocha exited 0")
+    return (PASS, "") if tests else (BROKEN, "no test ran")
+
+
+def outcome(plan: Plan, code: int, output: str, report: str, test_file: Path) -> tuple[str, str]:
+    """What one run showed: (`fail` | `pass` | `broken`, why it broke)."""
+    if code == 124:
+        return BROKEN, "the run timed out"
+    if plan.runner == "pytest":
+        return _pytest(code, report)
+    if plan.runner == "unittest":
+        return _unittest(code, report)
+    if plan.runner == "node":
+        return _node(code, report)
+    if plan.runner == "go":
+        return _go(code, output, tuple(plan.argv[plan.argv.index("-run") + 1].strip("^$()").split("|")))
+    if plan.runner == "cargo":
+        return _cargo(code, output)
+    if plan.runner in ("jest", "vitest"):
+        return _jest(code, report, test_file)
+    return _mocha(code, report, test_file)
+
+
+def classify(outcomes: list[tuple[str, str]]) -> tuple[str, str]:
+    """(verdict, reason) from the harness's own runs. `validated` needs every run to fail on an assertion."""
+    if len(outcomes) < RUNS:
         return "not_reproduced", "the test was not run twice"
-    codes = [code for code, _ in runs]
-    if all(code == 0 for code in codes):
+    kinds = [k for k, _ in outcomes]
+    if all(k == PASS for k in kinds):
         return "not_reproduced", "the test passes on main: the attack did not work"
-    if len(set(codes)) > 1:
-        return "not_reproduced", f"the test is flaky (exit codes {', '.join(map(str, codes))})"
-    if codes[0] != 1:
-        return "not_reproduced", f"the run broke instead of failing a test (exit code {codes[0]})"
-    for _, output in runs:
-        m = _BROKEN_RE.search(output)
-        if m:
-            return "not_reproduced", f"the run broke instead of failing a test ({ns.one_line(m.group(0), 60)})"
-    return "validated", "the test fails on main in both runs"
+    broken = next((why for k, why in outcomes if k == BROKEN), None)
+    if broken is not None:
+        return "not_reproduced", f"the run broke instead of failing an assertion: {broken}"
+    if len(set(kinds)) > 1:
+        return "not_reproduced", "the test is flaky (it failed in one run and passed in the other)"
+    return "validated", "the test fails on an assertion against main in both runs"
+
+
+# --- what the model may hand over ---
+
+_TEST_NAME = {
+    "pytest": re.compile(r"(test_[^/]*|[^/]*_test)\.py"),
+    "unittest": re.compile(r"[^/]+\.py"),
+    "node": re.compile(r"[^/]+\.(js|mjs|cjs)"),
+    "go": re.compile(r"[^/]+_test\.go"),
+    "cargo": re.compile(r"[^/]+\.rs"),
+    "jest": re.compile(r"[^/]+\.(js|jsx|mjs|cjs|ts|tsx|mts|cts)"),
+    "vitest": re.compile(r"[^/]+\.(js|jsx|mjs|cjs|ts|tsx|mts|cts)"),
+    "mocha": re.compile(r"[^/]+\.(js|mjs|cjs|ts)"),
+}
+# Files that change how a runner collects or runs tests: never added by the model, not even ignored by git.
+_RUNNER_FILE = re.compile(
+    r"conftest\.py|pytest\.ini|pyproject\.toml|setup\.(cfg|py)|tox\.ini|(site|user)customize\.py|[^/]*\.pth|"
+    r"package\.json|\.mocharc(\.[a-z]+)?|(jest|vitest|vite|babel)\.config\.[a-z]+|\.babelrc|tsconfig[^/]*\.json|"
+    r"go\.(mod|sum|work)|Cargo\.toml|build\.rs|config(\.toml)?|\.npmrc|\.env[^/]*|Makefile")
+# Files a test run itself writes; they are not the model's changes.
+_CACHE_PART = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", "target"}
+_GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "diff.external=",
+        "-c", "core.untrackedCache=false"]
 
 
 def safe_test_path(cfg: Config, root: Path, raw: str) -> Path | None:
@@ -177,6 +425,146 @@ def safe_test_path(cfg: Config, root: Path, raw: str) -> Path | None:
     return path
 
 
+def _git(root: Path, *args: str) -> list[str] | None:
+    try:
+        done = subprocess.run([*_GIT, "-C", str(root), *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, env=scrubbed_env(), timeout=120, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if done.returncode != 0:
+        return None
+    return [p for p in done.stdout.decode("utf-8", errors="surrogateescape").split("\0") if p]
+
+
+def _is_cache(rel: str) -> bool:
+    parts = rel.rstrip("/").split("/")
+    return bool(_CACHE_PART.intersection(parts[:-1])) or parts[-1] in _CACHE_PART or rel.endswith(".pyc") \
+        or parts[-1] == "Cargo.lock"
+
+
+def tree_problem(root: Path, rel: str, base: str = "HEAD") -> str | None:
+    """Why the checkout is not main plus one new test, or None when it is. The test must fail against the code as
+    it is: a changed application file, an edited existing test or an added conftest.py can make any test fail."""
+    status = _git(root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-status", "-z", base, "--")
+    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
+    ignored = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    if status is None or untracked is None or ignored is None:
+        return "the checkout could not be compared with main (git failed)"
+    added: set[str] = set()
+    for kind, path in zip(status[::2], status[1::2]):
+        if kind != "A":
+            return f"a file in main was changed or deleted ({ns.one_line(path, 80)}); the test must run against main as it is"
+        added.add(path)
+    new = {p for p in added | set(untracked) if not _is_cache(p)}
+    if rel not in new:
+        return "the repro test is not a new file (an existing test was edited, or the test was committed elsewhere)"
+    folder = rel.rpartition("/")[0]
+    extra = sorted(new - {rel})
+    if len(extra) > 1:
+        return f"{len(extra)} files were added besides the test; at most one helper next to it is allowed"
+    for p in extra:
+        if p.rpartition("/")[0] != folder:
+            return f"a file was added away from the test ({ns.one_line(p, 80)}); a helper must sit next to it"
+        if _RUNNER_FILE.fullmatch(p.rpartition("/")[2]):
+            return f"a runner configuration file was added ({ns.one_line(p, 80)})"
+    ancestors = {"/".join(folder.split("/")[:i]) for i in range(len(folder.split("/")) + 1)} if folder else {""}
+    for p in ignored:
+        parent, _, name = p.rstrip("/").rpartition("/")
+        if parent in ancestors and _RUNNER_FILE.fullmatch(name) and not _is_cache(p):
+            return f"a runner configuration file git ignores sits on the test's path ({ns.one_line(p, 80)})"
+    return None
+
+
+_UNITTEST = r"""
+import json, os, sys, unittest
+path, report = sys.argv[1], sys.argv[2]
+del sys.argv[1:]
+root = os.getcwd()
+sys.path.insert(0, root)
+start, pattern = os.path.dirname(path) or ".", os.path.basename(path)
+loader = unittest.TestLoader()
+try:
+    suite = loader.discover(start, pattern=pattern, top_level_dir=root)
+except ImportError:
+    loader = unittest.TestLoader()
+    suite = loader.discover(start, pattern=pattern, top_level_dir=start)
+result = unittest.TextTestRunner(verbosity=2, stream=sys.stdout).run(suite)
+errors = list(result.errors) + [(None, e) for e in loader.errors]
+first = errors[0][1].strip().splitlines()[-1] if errors else ""
+with open(report, "w", encoding="utf-8") as fh:
+    json.dump({"run": result.testsRun, "failures": len(result.failures) + len(result.unexpectedSuccesses),
+               "errors": len(errors), "skipped": len(result.skipped), "first_error": first}, fh)
+sys.exit(1 if result.failures or result.unexpectedSuccesses or errors else 0)
+"""
+
+
+def _up(root: Path, start: Path, name: str) -> Path | None:
+    """The nearest directory from `start` up to `root` that holds `name`."""
+    d = start
+    while True:
+        if (d / name).exists():
+            return d
+        if d == root or root not in d.parents:
+            return None
+        d = d.parent
+
+
+def plan_run(runner: str, root: Path, test: Path, report: Path) -> Plan | str:
+    """The argv for one run, built by the harness; a string says why it cannot run."""
+    rel = test.relative_to(root).as_posix()
+    python, quiet = shutil.which("python3") or "python3", {"PYTHONDONTWRITEBYTECODE": "1"}
+    if runner == "pytest":
+        return Plan(runner, [python, "-m", "pytest", rel, "-q", "-p", "no:cacheprovider", f"--junitxml={report}",
+                             "-o", "junit_family=xunit2"], root, report, quiet)
+    if runner == "unittest":
+        return Plan(runner, [python, "-c", _UNITTEST, rel, str(report)], root, report, quiet)
+    if runner == "node":
+        return Plan(runner, ["node", "--test", "--test-reporter=junit", f"--test-reporter-destination={report}",
+                             "--test-reporter=spec", "--test-reporter-destination=stdout", rel], root, report)
+    if runner == "go":
+        mod = _up(root, test.parent, "go.mod")
+        names = re.findall(r"^func (Test\w*)\(\s*\w+ \*testing\.T\s*\)", test.read_text(encoding="utf-8", errors="replace"),
+                           re.M)
+        if mod is None:
+            return "no go.mod above the repro test"
+        if not names:
+            return "the repro test has no Test functions"
+        pkg = "./" + (test.parent.relative_to(mod).as_posix() if test.parent != mod else "")
+        return Plan(runner, ["go", "test", "-json", "-count=1", "-run", f"^({'|'.join(names)})$", pkg.rstrip("/") or "."],
+                    mod, None)
+    if runner == "cargo":
+        crate = test.parent.parent
+        if test.parent.name != "tests" or not (crate / "Cargo.toml").is_file():
+            return "a cargo repro test must be an integration test, <crate>/tests/<name>.rs"
+        return Plan(runner, ["cargo", "test", "--test", test.stem, "--no-fail-fast", "--color", "never"], crate, None,
+                    {"RUST_BACKTRACE": "0"})
+    pkg = _up(root, test.parent, f"node_modules/.bin/{runner}")
+    if pkg is None:
+        return f"{runner} is not installed in this checkout (no node_modules/.bin/{runner}): no test can run"
+    bin_, rel_pkg = str(pkg / "node_modules/.bin" / runner), test.relative_to(pkg).as_posix()
+    if runner == "jest":
+        argv = [bin_, "--ci", "--json", f"--outputFile={report}", "--runTestsByPath", rel_pkg]
+    elif runner == "vitest":
+        argv = [bin_, "run", "--reporter=json", f"--outputFile={report}", rel_pkg]
+    else:
+        argv = [bin_, "--reporter", "json", "--reporter-option", f"output={report}", rel_pkg]
+    return Plan(runner, argv, pkg, report)
+
+
+def shown_command(plan: Plan, root: Path) -> str:
+    """The harness's command as a person would type it from the repository root (the report goes to a temp file)."""
+    argv = [a.replace(str(plan.report), "report") if plan.report else a for a in plan.argv]
+    if plan.runner == "unittest":
+        argv = [argv[0], "-m", "unittest", "-v", argv[3]]
+    if plan.runner in ("pytest", "unittest"):
+        argv[0] = Path(argv[0]).name
+    elif Path(argv[0]).is_absolute() and plan.cwd in Path(argv[0]).parents:
+        argv[0] = Path(argv[0]).relative_to(plan.cwd).as_posix()
+    cmd = shlex.join(argv)
+    where = plan.cwd.relative_to(root).as_posix() if plan.cwd != root else ""
+    return f"cd {shlex.quote(where)} && {cmd}" if where else cmd
+
+
 def claude_result(raw: str) -> dict | None:
     """The model's answer from Claude's JSON output (None when the run did not finish with one)."""
     try:
@@ -189,8 +577,20 @@ def claude_result(raw: str) -> dict | None:
     return out if isinstance(out, dict) and isinstance(out.get("testable"), bool) else None
 
 
-def verify(cfg: Config, root: Path, f: dict, answer: dict | None, run: Runner = shell_runner) -> dict:
-    """Run the harness for one finding and return its result document."""
+def _read_report(plan: Plan, output: str) -> str:
+    if plan.report is None:
+        return output
+    try:
+        if plan.report.is_symlink() or not plan.report.is_file():
+            return ""
+        with plan.report.open("rb") as fh:
+            return fh.read(MAX_REPORT).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def verify(cfg: Config, root: Path, f: dict, answer: dict | None, run: Runner = shell_runner, base: str = "HEAD") -> dict:
+    """Run the harness for one finding and return its result document. `base` is the commit the job checked out."""
     result = {"fp": redteam.fingerprint(f), "verdict": "not_reproduced", "reason": "", "test_path": "", "test": "",
               "run_command": "", "output": "", "notes": ""}
     if answer is None:
@@ -200,21 +600,45 @@ def verify(cfg: Config, root: Path, f: dict, answer: dict | None, run: Runner = 
     if not answer["testable"]:
         result.update(verdict="not_testable", reason="the model could not test this on the runner")
         return result
-    command = str(answer.get("run_command") or "").strip()
+    runner = str(answer.get("runner") or "").strip().lower()
+    if runner not in RUNNERS:
+        shown = runner if re.fullmatch(r"[a-z0-9_.-]{1,30}", runner) else "none"
+        result.update(verdict="not_testable",
+                      reason=f"test runner `{shown}` is not supported (supported: {', '.join(RUNNERS)})")
+        return result
     path = safe_test_path(cfg, root, str(answer.get("test_path") or ""))
-    if path is None or not command or len(command) > 500 or "\n" in command:
-        result["reason"] = "no usable repro test or run command was returned"
+    if path is None or not _TEST_NAME[runner].fullmatch(path.name):
+        result["reason"] = f"no usable {runner} test file was returned"
         return result
     rel = path.relative_to(root).as_posix()
-    if path.name not in command and rel not in command:
-        result["reason"] = "the run command does not name the repro test"
+    result.update(test_path=rel, test=path.read_text(encoding="utf-8", errors="replace")[:MAX_TEST])
+    problem = tree_problem(root, rel, base)
+    if problem:
+        result["reason"] = problem
         return result
-    result.update(test_path=rel, run_command=command,
-                  test=path.read_text(encoding="utf-8", errors="replace")[:MAX_TEST])
-    runs = [run(command, root) for _ in range(RUNS)]
-    result["verdict"], result["reason"] = classify(runs)
-    result["output"] = runs[-1][1][-MAX_OUTPUT:]
+    outcomes, output = [], ""
+    with tempfile.TemporaryDirectory(prefix="ns-validate-") as tmp:
+        for i in range(RUNS):
+            plan = plan_run(runner, root, path, Path(tmp) / f"report-{i}")
+            if isinstance(plan, str):
+                result["reason"] = plan
+                return result
+            result["run_command"] = shown_command(plan, root)
+            code, output = run(plan)
+            outcomes.append(outcome(plan, code, output, _read_report(plan, output), path))
+    result["verdict"], result["reason"] = classify(outcomes)
+    if runner == "go":   # the report is JSON lines; keep what a person reads
+        output = "".join(str(e.get("Output") or "") for e in map(_json_line, output.splitlines()) if e)
+    result["output"] = output[-MAX_OUTPUT:]
     return result
+
+
+def _json_line(line: str) -> dict | None:
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    return ev if isinstance(ev, dict) else None
 
 
 # --- sealing ------------------------------------------------------------------------------------

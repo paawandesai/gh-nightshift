@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   only validated findings are filed, with the repro test attached. Unreproduced critical findings and untestable
   ones are filed with a new `unconfirmed` label. `redteam.level: 0` reports verdicts without filing anything.
   A new `redteam-skip` marker remembers what did not reproduce. Run `gh nightshift setup` for the label.
+  The model names the test's runner (`pytest`, `unittest`, `node`, `go`, `cargo`, `jest`, `vitest`, `mocha`) and
+  the harness builds and runs the command itself, without a shell, after checking with git that the checkout is
+  the scanned commit plus the new test (and at most one helper beside it). It reads each runner's own report and
+  counts only assertion failures: a missing runner, a fixture or setup error, an uncaught exception, a panic or a
+  build error is `not_reproduced`, and an unsupported runner is `not_testable`. Neither the test nor Claude gets
+  the runner's file-command variables.
 - A shared security context, `.night-shift/SECURITY.md`, which the red-team scan, the validation runs and the
   security reviewer read from the base branch before they start. Fingerprints under its "Not a finding" heading
   are not validated or filed again. `init` (and `init --regenerate`, when the file is missing) writes a starter.

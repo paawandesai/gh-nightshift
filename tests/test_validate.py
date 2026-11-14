@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import os
 import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -34,34 +36,152 @@ def workflow():
     return (Path(__file__).parent.parent / ".github/workflows/redteam.yml").read_text()
 
 
+def git_repo(root: Path, keep_out: tuple[str, ...] = ()) -> None:
+    """Make `root` a git repo whose one commit holds everything in it except `keep_out` (main as the job checks it out)."""
+    run = functools.partial(subprocess.run, cwd=root, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    run(["git", "init", "-q"])
+    run(["git", "add", "-A", "--", ".", *(f":(exclude){p}" for p in keep_out)])
+    run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "main", "--allow-empty"])
+
+
+def plan(runner, report=None, argv=None):
+    return validate.Plan(runner, argv or [runner], Path("."), Path(report) if report else None)
+
+
+def junit(*cases):
+    """A pytest JUnit report; each case is None (passed), ("failure", message), ("error", message) or "skipped"."""
+    body = []
+    for i, c in enumerate(cases):
+        inner = "<skipped/>" if c == "skipped" else (f'<{c[0]} message="{c[1]}">trace</{c[0]}>' if c else "")
+        body.append(f'<testcase classname="tests.test_repro" name="test_{i}">{inner}</testcase>')
+    return f'<testsuites><testsuite name="pytest" errors="0">{"".join(body)}</testsuite></testsuites>'
+
+
+FAILED_REPORT = junit(("failure", "assert False"))
+HAS_PYTEST = shutil.which("python3") is not None and subprocess.run(
+    ["python3", "-c", "import pytest"], capture_output=True, check=False).returncode == 0
+HAS_GIT = shutil.which("git") is not None
+
+
 class VerdictTests(unittest.TestCase):
-    def test_validated_needs_two_test_failures(self):
-        self.assertEqual(validate.classify([(1, FAIL_OUT), (1, FAIL_OUT)])[0], "validated")
+    """What one run showed comes from the runner's own report; only assertion failures in both runs validate."""
+
+    def test_validated_needs_two_assertion_failures(self):
+        fail = validate.outcome(plan("pytest", "r"), 1, "", junit(("failure", "assert 1 == 2")), Path("t"))
+        self.assertEqual(fail, (validate.FAIL, ""))
+        self.assertEqual(validate.classify([fail, fail])[0], "validated")
 
     def test_everything_else_is_not_reproduced(self):
-        cases = {
-            "passes": [(0, "1 passed"), (0, "1 passed")],
-            "flaky": [(1, FAIL_OUT), (0, "1 passed")],
-            "one run": [(1, FAIL_OUT)],
-            "collection error": [(2, "ERROR collecting tests/test_repro.py"), (2, "x")],
-            "timeout": [(124, "(timed out)"), (124, "(timed out)")],
-            "import error": [(1, "ImportError: cannot import name 'app'"), (1, "ImportError")],
-            "unittest error": [(1, "FAILED (errors=1)"), (1, "FAILED (errors=1)")],
-            "unittest failure and error": [(1, "FAILED (failures=1, errors=1)"), (1, "FAILED (failures=1, errors=1)")],
-            "no tests": [(1, "no tests ran in 0.01s"), (1, "no tests ran in 0.01s")],
-            "missing tool": [(1, "bash: pytest: command not found"), (1, "bash: pytest: command not found")],
-        }
+        f, p = (validate.FAIL, ""), (validate.PASS, "")
+        cases = {"passes": [p, p], "flaky": [f, p], "one run": [f], "broken once": [f, (validate.BROKEN, "x")]}
         for name, runs in cases.items():
             with self.subTest(name=name):
                 verdict, reason = validate.classify(runs)
                 self.assertEqual(verdict, "not_reproduced")
                 self.assertTrue(reason)
 
-    def test_unittest_failure_counts(self):
-        out = "FAIL: test_export (test_repro.T)\nAssertionError\nFAILED (failures=1)\n"
-        self.assertEqual(validate.classify([(1, out), (1, out)])[0], "validated")
+    def test_g01_a_missing_runner_is_not_a_failure(self):
+        # No report means no test ran, whatever the exit code and output say.
+        for runner, out in (("pytest", "/usr/bin/python3: No module named pytest"), ("unittest", "No module named x"),
+                            ("node", "node: bad option"), ("jest", 'npm error Missing script: "test"'),
+                            ("vitest", "vitest: not found"), ("mocha", "mocha: not found")):
+            with self.subTest(runner=runner):
+                kind, why = validate.outcome(plan(runner, "r"), 1, out, "", Path("t"))
+                self.assertEqual(kind, validate.BROKEN)
+                self.assertIn("no test ran", why)
+        self.assertEqual(validate.outcome(plan("go", argv=["go", "-run", "^(TestX)$"]), 1, "go: not found", "",
+                                          Path("t"))[0], validate.BROKEN)
+        self.assertEqual(validate.outcome(plan("cargo"), 101, "error[E0425]: cannot find", "", Path("t"))[0],
+                         validate.BROKEN)
+
+    def test_g04_errors_and_uncaught_exceptions_are_breakage(self):
+        for name, report in (("fixture error", junit(("error", 'failed on setup with "RuntimeError: db down"'))),
+                             ("uncaught KeyError", junit(("failure", "KeyError: 'k'"))),
+                             ("one assertion and one TypeError", junit(("failure", "assert 0"), ("failure", "TypeError: x"))),
+                             ("all skipped", junit("skipped")), ("no tests", junit())):
+            with self.subTest(name=name):
+                self.assertEqual(validate.outcome(plan("pytest", "r"), 1, "", report, Path("t"))[0], validate.BROKEN)
+        for msg in ("assert 1 == 2", "AssertionError: shell ran", "Failed: refused"):
+            self.assertEqual(validate.outcome(plan("pytest", "r"), 1, "", junit(("failure", msg)), Path("t"))[0],
+                             validate.FAIL)
+
+    def test_g05_breakage_words_in_an_assertion_message_do_not_matter(self):
+        for msg in ("AssertionError: read ../../etc/passwd; expected No such file or directory",
+                    "AssertionError: unsafe pickle let the attacker raise ImportError",
+                    "AssertionError: command not found was expected; SyntaxError in eval"):
+            report = junit(("failure", msg))
+            out = f"FAILED tests/test_repro.py - {msg}\n1 failed"
+            self.assertEqual(validate.outcome(plan("pytest", "r"), 1, out, report, Path("t")), (validate.FAIL, ""))
+
+    def test_g06_each_runner_has_its_own_exit_code(self):
+        cargo_fail = ("---- a stdout ----\nthread 'a' panicked at tests/r.rs:1:1:\nassertion `left == right` failed\n"
+                      "  left: 2\n right: 3\n\nfailures:\n    a\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored")
+        self.assertEqual(validate.outcome(plan("cargo"), 101, cargo_fail, "", Path("t"))[0], validate.FAIL)
+        self.assertEqual(validate.outcome(plan("cargo"), 1, cargo_fail, "", Path("t"))[0], validate.BROKEN)
+        old = "---- a stdout ----\nthread 'a' panicked at 'assertion failed: x', tests/r.rs:1:1\n\ntest result: FAILED. " \
+              "0 passed; 1 failed;"
+        self.assertEqual(validate.outcome(plan("cargo"), 101, old, "", Path("t"))[0], validate.FAIL)
+        unwrap = cargo_fail.replace("assertion `left == right` failed", "called `Option::unwrap()` on a `None` value")
+        self.assertEqual(validate.outcome(plan("cargo"), 101, unwrap, "", Path("t"))[0], validate.BROKEN)
+        t = Path("/r/t.spec.js")
+        mocha = json.dumps({"tests": [{"file": str(t)}] * 2,
+                            "failures": [{"title": "a", "file": str(t), "err": {"name": "AssertionError"}}] * 2})
+        self.assertEqual(validate.outcome(plan("mocha", "r"), 2, "2 failing", mocha, t)[0], validate.FAIL)
+        typeerr = json.dumps({"tests": [{"file": str(t)}], "failures": [{"title": "a", "file": str(t), "err": {}}]})
+        self.assertEqual(validate.outcome(plan("mocha", "r"), 1, "", typeerr, t)[0], validate.BROKEN)
+        hook = json.dumps({"tests": [], "failures": [{"title": '"before each" hook', "file": str(t),
+                                                       "err": {"name": "AssertionError"}}]})
+        self.assertEqual(validate.outcome(plan("mocha", "r"), 1, "", hook, t)[0], validate.BROKEN)
+
+    def test_jest_and_vitest_reports(self):
+        t = Path("/r/x.test.js")
+
+        def rep(*cases, status="failed", message=""):
+            return json.dumps({"testResults": [{"name": str(t), "status": status, "message": message,
+                                                "assertionResults": list(cases)}]})
+        expect = {"status": "failed", "failureDetails": [{"matcherResult": {"pass": False}}], "failureMessages": ["Error: x"]}
+        node_assert = {"status": "failed", "failureDetails": [{}], "failureMessages": ["AssertionError [ERR_ASSERTION]: x"]}
+        typeerr = {"status": "failed", "failureDetails": [{}], "failureMessages": ["TypeError: Cannot read"]}
+        for runner in ("jest", "vitest"):
+            self.assertEqual(validate.outcome(plan(runner, "r"), 1, "", rep(expect), t)[0], validate.FAIL)
+            self.assertEqual(validate.outcome(plan(runner, "r"), 1, "", rep(node_assert), t)[0], validate.FAIL)
+            self.assertEqual(validate.outcome(plan(runner, "r"), 1, "", rep(typeerr), t)[0], validate.BROKEN)
+            self.assertEqual(validate.outcome(plan(runner, "r"), 1, "", rep(message="SyntaxError"), t)[0], validate.BROKEN)
+            self.assertEqual(validate.outcome(plan(runner, "r"), 0, "", rep({"status": "passed"}, status="passed"), t)[0],
+                             validate.PASS)
+            other = rep(expect).replace(str(t), "/r/other.test.js")   # a failure in another file proves nothing
+            self.assertEqual(validate.outcome(plan(runner, "r"), 1, "", other, t)[0], validate.BROKEN)
+
+    def test_go_report(self):
+        p = plan("go", argv=["go", "test", "-json", "-run", "^(TestA|TestB)$", "."])
+
+        def ev(**e):
+            return json.dumps(e)
+        fail = "\n".join([ev(Action="run", Test="TestA"), ev(Action="output", Test="TestA", Output="attack worked\n"),
+                          ev(Action="fail", Test="TestA"), ev(Action="pass", Test="TestB"), ev(Action="fail")])
+        self.assertEqual(validate.outcome(p, 1, fail, "", Path("t")), (validate.FAIL, ""))
+        panic = fail.replace("attack worked", "panic: assignment to entry in nil map")
+        self.assertEqual(validate.outcome(p, 1, panic, "", Path("t"))[0], validate.BROKEN)
+        build = ev(Action="build-fail", ImportPath="g") + "\n" + ev(Action="fail", FailedBuild="g")
+        self.assertEqual(validate.outcome(p, 1, build, "", Path("t"))[0], validate.BROKEN)
+        other = fail.replace('"TestA"', '"TestOld"')   # only the repro test's own functions count
+        self.assertEqual(validate.outcome(p, 1, other, "", Path("t"))[0], validate.PASS)
+
+    def test_node_report(self):
+        def rep(kind, text):
+            return (f'<testsuites><testcase name="a"><failure type="{kind}" message="m">{text}</failure></testcase>'
+                    '</testsuites>')
+        p = plan("node", "r")
+        self.assertEqual(validate.outcome(p, 1, "", rep("testCodeFailure", "  cause: AssertionError [ERR_ASSERTION]: 1 !== 2"),
+                                          Path("t"))[0], validate.FAIL)
+        self.assertEqual(validate.outcome(p, 1, "", rep("testCodeFailure", "  cause: TypeError: null"), Path("t"))[0],
+                         validate.BROKEN)
+        self.assertEqual(validate.outcome(p, 1, "", rep("hookFailed", "AssertionError"), Path("t"))[0], validate.BROKEN)
+        self.assertEqual(validate.outcome(p, 124, "", rep("testCodeFailure", "cause: AssertionError"), Path("t"))[0],
+                         validate.BROKEN)   # a timeout is never a result
 
 
+@unittest.skipUnless(HAS_GIT, "no git")
 class HarnessTests(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -70,32 +190,112 @@ class HarnessTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         self.cfg = write_config(self.root)
+        (self.root / "api").mkdir()
+        (self.root / "api/export.py").write_text("def export(name):\n    return 'safe'\n")
         (self.root / "tests").mkdir()
+        (self.root / "tests/test_old.py").write_text("def test_old():\n    assert True\n")
+        git_repo(self.root)
         (self.root / "tests/test_repro.py").write_text("def test_export():\n    assert False\n")
         self.calls = []
 
-    def runner(self, code=1, out=FAIL_OUT):
-        def run(command, cwd):
-            self.calls.append((command, cwd))
+    def runner(self, report=FAILED_REPORT, code=1, out="1 failed"):
+        """A fake runner that writes `report` where the harness asked for it."""
+        def run(p):
+            self.calls.append(p)
+            if p.report is not None and report is not None:
+                p.report.write_text(report)
             return code, out
         return run
 
     def answer(self, **over):
-        return {"testable": True, "test_path": "tests/test_repro.py",
-                "run_command": "python -m pytest tests/test_repro.py -q", "notes": "calls export()", **over}
+        return {"testable": True, "test_path": "tests/test_repro.py", "runner": "pytest", "notes": "calls export()", **over}
 
     def test_harness_runs_twice_and_decides(self):
         r = validate.verify(self.cfg, self.root, FINDING, self.answer(), self.runner())
         self.assertEqual(len(self.calls), 2)
         self.assertEqual((r["verdict"], r["fp"]), ("validated", redteam.fingerprint(FINDING)))
         self.assertIn("assert False", r["test"])
-        r = validate.verify(self.cfg, self.root, FINDING, self.answer(), self.runner(0, "1 passed"))
+        self.assertTrue(r["run_command"].startswith("python3 -m pytest tests/test_repro.py"))
+        r = validate.verify(self.cfg, self.root, FINDING, self.answer(), self.runner(junit(None), 0, "1 passed"))
         self.assertEqual(r["verdict"], "not_reproduced")
 
+    def test_g02_the_harness_builds_the_command(self):
+        # Whatever command the model sends is ignored: the argv comes from the runner name and the path, with no shell.
+        tricks = ("python3 -m pytest tests/test_repro.py -q; exit 1", "pytest tests/test_repro.py && false",
+                  "false tests/test_repro.py", "test -z tests/test_repro.py")
+        for cmd in tricks:
+            self.calls.clear()
+            r = validate.verify(self.cfg, self.root, FINDING, self.answer(run_command=cmd),
+                                self.runner(junit(None), 0, "1 passed"))
+            self.assertEqual(r["verdict"], "not_reproduced")
+            self.assertEqual(self.calls[0].argv[:4], [shutil.which("python3"), "-m", "pytest", "tests/test_repro.py"])
+            self.assertTrue(all(cmd not in " ".join(c.argv) for c in self.calls))
+        self.assertNotIn("run_command", validate.VALIDATE_SCHEMA["properties"])
+        self.assertIn("runner", validate.VALIDATE_SCHEMA["properties"])
+
+    def test_g02_an_unsupported_runner_is_not_testable(self):
+        for runner in ("bash", "rspec", "", "sh -c 'exit 1'"):
+            with self.subTest(runner=runner):
+                r = validate.verify(self.cfg, self.root, FINDING, self.answer(runner=runner), self.runner())
+                self.assertEqual(r["verdict"], "not_testable")
+                self.assertIn("not supported", r["reason"])
+        self.assertEqual(self.calls, [])
+
+    def test_g03_the_checkout_must_be_main_plus_the_test(self):
+        cases = {
+            "planted bug": lambda: (self.root / "api/export.py").write_text("import os\n"),
+            "deleted file": lambda: (self.root / "api/export.py").unlink(),
+            "conftest.py": lambda: (self.root / "conftest.py").write_text("x = 1\n"),
+            "conftest.py next to the test": lambda: (self.root / "tests/conftest.py").write_text("x = 1\n"),
+            "pytest.ini next to the test": lambda: (self.root / "tests/pytest.ini").write_text("[pytest]\n"),
+            "two helpers": lambda: [(self.root / f"tests/h{i}.py").write_text("") for i in (1, 2)],
+            "helper elsewhere": lambda: (self.root / "api/helper.py").write_text(""),
+            "change staged": lambda: (self.root / "api/export.py").write_text("x\n") or subprocess.run(
+                ["git", "add", "-A"], cwd=self.root, check=True),
+        }
+        for name, change in cases.items():
+            with self.subTest(name=name):
+                self.setUp()
+                change()
+                self.calls.clear()
+                r = validate.verify(self.cfg, self.root, FINDING, self.answer(), self.runner())
+                self.assertEqual(r["verdict"], "not_reproduced")
+                self.assertTrue(r["reason"])
+                self.assertEqual(self.calls, [])
+
+    def test_g03_an_edited_existing_test_is_refused(self):
+        (self.root / "tests/test_old.py").write_text("def test_old():\n    assert False\n")
+        r = validate.verify(self.cfg, self.root, FINDING, self.answer(test_path="tests/test_old.py"), self.runner())
+        self.assertEqual((r["verdict"], self.calls), ("not_reproduced", []))
+
+    def test_g03_a_committed_change_is_seen_against_the_checked_out_commit(self):
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, capture_output=True, text=True,
+                              check=True).stdout.strip()
+        (self.root / "api/export.py").write_text("import os\n")
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "plant"], cwd=self.root,
+                       check=True)
+        r = validate.verify(self.cfg, self.root, FINDING, self.answer(), self.runner(), base=base)
+        self.assertEqual((r["verdict"], self.calls), ("not_reproduced", []))
+        self.assertIn("api/export.py", r["reason"])
+
+    def test_g03_what_a_run_leaves_behind_and_one_helper_are_fine(self):
+        for p in ("tests/__pycache__/test_repro.cpython-312.pyc", ".pytest_cache/v/x", "node_modules/a/package.json"):
+            (self.root / p).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / p).write_text("")
+        (self.root / "tests/helpers_repro.py").write_text("")
+        r = validate.verify(self.cfg, self.root, FINDING, self.answer(), self.runner())
+        self.assertEqual(r["verdict"], "validated", r["reason"])
+
+    def test_g03_a_runner_file_git_ignores_still_counts(self):
+        (self.root / ".gitignore").write_text("conftest.py\n")
+        git_repo(self.root, keep_out=("tests/test_repro.py",))
+        (self.root / "conftest.py").write_text("x = 1\n")
+        r = validate.verify(self.cfg, self.root, FINDING, self.answer(), self.runner())
+        self.assertEqual((r["verdict"], self.calls), ("not_reproduced", []))
+
     def test_the_models_own_claim_is_never_the_verdict(self):
-        # The answer has no field for the outcome; extra ones are ignored and the runs decide.
         r = validate.verify(self.cfg, self.root, FINDING, self.answer(verdict="validated", failed=True),
-                            self.runner(0, "1 passed"))
+                            self.runner(junit(None), 0))
         self.assertEqual(r["verdict"], "not_reproduced")
 
     def test_not_testable_and_unfinished_runs(self):
@@ -108,16 +308,24 @@ class HarnessTests(unittest.TestCase):
         (self.root / ".github").mkdir()
         (self.root / ".github/test_x.py").write_text("x")
         (self.root / "tests/link.py").symlink_to("/etc/passwd")
+        (self.root / "tests/notes.txt").write_text("x")
         bad = [self.answer(test_path="../outside.py"), self.answer(test_path="tests/missing.py"),
-               self.answer(test_path=".github/test_x.py", run_command="pytest .github/test_x.py"),
-               self.answer(test_path="tests/link.py", run_command="pytest tests/link.py"),
-               self.answer(run_command=""), self.answer(run_command="false"),   # does not name the test
-               self.answer(run_command="pytest tests/test_repro.py\nrm -rf /"), self.answer(run_command="x" * 501)]
+               self.answer(test_path=".github/test_x.py"), self.answer(test_path="tests/link.py"),
+               self.answer(test_path="tests/notes.txt"), self.answer(test_path=""),
+               self.answer(test_path="tests/test_repro.py", runner="go"),      # not a _test.go file
+               self.answer(test_path="tests/test_repro.py", runner="cargo")]   # not <crate>/tests/<name>.rs
         for a in bad:
             with self.subTest(answer=a):
                 r = validate.verify(self.cfg, self.root, FINDING, a, self.runner())
                 self.assertEqual(r["verdict"], "not_reproduced")
         self.assertEqual(self.calls, [])
+
+    def test_js_runners_need_the_repos_own_install(self):
+        (self.root / "tests/test_repro.py").unlink()
+        (self.root / "x.test.js").write_text("test('x', () => expect(1).toBe(2))\n")
+        r = validate.verify(self.cfg, self.root, FINDING, self.answer(test_path="x.test.js", runner="jest"), self.runner())
+        self.assertEqual((r["verdict"], self.calls), ("not_reproduced", []))
+        self.assertIn("not installed", r["reason"])
 
     def test_claude_result_reads_only_a_finished_structured_answer(self):
         ok = json.dumps({"type": "result", "is_error": False, "structured_output": self.answer()})
@@ -132,8 +340,85 @@ class HarnessTests(unittest.TestCase):
                "DATABASE_URL": "postgres://localhost", "PYTHONSAFEPATH": "1", "PYTHONPATH": "/tool"}
         self.assertEqual(set(validate.scrubbed_env(env)), {"PATH", "HOME", "DATABASE_URL"})
 
-    def test_shell_runner_reports_exit_code_and_output(self):
-        self.assertEqual(validate.shell_runner("echo hi; exit 1", self.root), (1, "hi\n"))
+    def test_g07_runner_files_are_not_passed_to_the_test(self):
+        env = {"PATH": "/bin", "GITHUB_ENV": "/r/env", "GITHUB_PATH": "/r/path", "GITHUB_OUTPUT": "/r/out",
+               "GITHUB_STATE": "/r/state", "GITHUB_STEP_SUMMARY": "/r/sum", "GITHUB_WORKSPACE": "/w", "RUNNER_TEMP": "/t"}
+        self.assertEqual(set(validate.scrubbed_env(env)), {"PATH", "GITHUB_WORKSPACE", "RUNNER_TEMP"})
+
+    def test_shell_runner_runs_argv_without_a_shell(self):
+        p = validate.Plan("pytest", [sys.executable, "-c", "import sys; print('hi; exit 0'); sys.exit(3)"], self.root)
+        self.assertEqual(validate.shell_runner(p), (3, "hi; exit 0\n"))
+        self.assertEqual(validate.shell_runner(validate.Plan("pytest", ["/no/such/runner"], self.root))[0], 127)
+
+    @unittest.skipUnless(HAS_PYTEST, "pytest is not installed")
+    def test_real_pytest_runs(self):
+        cases = {"def test_x():\n    assert 1 == 2\n": "validated",
+                 "def test_x():\n    assert False, 'expected No such file or directory, got ImportError'\n": "validated",
+                 "def test_x():\n    assert 1 == 1\n": "not_reproduced",
+                 "import nope\ndef test_x():\n    assert 1 == 2\n": "not_reproduced",
+                 "def test_x():\n    {}['k']\n": "not_reproduced",
+                 "import pytest\n@pytest.fixture\ndef c():\n    raise RuntimeError('db')\ndef test_x(c):\n    assert 0\n":
+                     "not_reproduced"}
+        for body, want in cases.items():
+            with self.subTest(body=body):
+                (self.root / "tests/test_repro.py").write_text(body)
+                r = validate.verify(self.cfg, self.root, FINDING, self.answer())
+                self.assertEqual(r["verdict"], want, r["reason"])
+
+    def test_real_unittest_runs(self):
+        body = "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        {}\n"
+        for line, want in (("self.assertEqual(1, 2)", "validated"), ("self.assertEqual(1, 1)  # passes", "not_reproduced"),
+                           ("raise KeyError('x')", "not_reproduced")):
+            with self.subTest(line=line):
+                (self.root / "tests/test_repro.py").write_text(body.format(line))
+                r = validate.verify(self.cfg, self.root, FINDING, self.answer(runner="unittest"))
+                self.assertEqual(r["verdict"], want, r["reason"])
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_real_node_test_runs(self):
+        head = "const test = require('node:test'); const assert = require('node:assert');\n"
+        for line, want in (("assert.strictEqual(1, 2)", "validated"), ("assert.ok(true)", "not_reproduced"),
+                           ("null.x", "not_reproduced")):
+            with self.subTest(line=line):
+                (self.root / "tests/repro.test.js").write_text(head + f"test('x', () => {{ {line}; }});\n")
+                r = validate.verify(self.cfg, self.root, FINDING,
+                                    self.answer(test_path="tests/repro.test.js", runner="node"))
+                self.assertEqual(r["verdict"], want, r["reason"])
+                (self.root / "tests/repro.test.js").unlink()
+
+    @unittest.skipUnless(shutil.which("go"), "go is not installed")
+    def test_real_go_test_runs(self):
+        (self.root / "tests/test_repro.py").unlink()
+        g = self.root / "g"
+        g.mkdir()
+        (g / "go.mod").write_text("module g\ngo 1.21\n")
+        (g / "f.go").write_text("package g\nfunc F() int { return 1 }\n")
+        (g / "old_test.go").write_text('package g\nimport "testing"\nfunc TestOld(t *testing.T) { t.Fatal("old") }\n')
+        git_repo(self.root)
+        for line, want in (('if F() != 2 { t.Fatal("attack worked") }', "validated"), ("_ = F()", "not_reproduced"),
+                           ('var m map[string]int; m["x"] = 1', "not_reproduced")):
+            with self.subTest(line=line):
+                (g / "x_test.go").write_text(f'package g\nimport "testing"\nfunc TestX(t *testing.T) {{ {line} }}\n')
+                r = validate.verify(self.cfg, self.root, FINDING, self.answer(test_path="g/x_test.go", runner="go"))
+                self.assertEqual(r["verdict"], want, r["reason"])   # TestOld fails on main but is not run
+
+    @unittest.skipUnless(shutil.which("cargo"), "cargo is not installed")
+    def test_real_cargo_test_runs(self):
+        (self.root / "tests/test_repro.py").unlink()
+        crate = self.root / "cr"
+        (crate / "src").mkdir(parents=True)
+        (crate / "Cargo.toml").write_text('[package]\nname = "cr"\nversion = "0.1.0"\nedition = "2021"\n')
+        (crate / "src/lib.rs").write_text("pub fn add(a: u64, b: u64) -> u64 { a + b }\n")
+        git_repo(self.root)
+        (crate / "tests").mkdir()
+        for body, want in (('assert_eq!(cr::add(1, 1), 3, "attack worked");', "validated"),   # exits 101
+                           ("assert_eq!(cr::add(1, 1), 2);", "not_reproduced"),
+                           ("let x: Option<u8> = None; x.unwrap();", "not_reproduced")):   # a panic, not an assertion
+            with self.subTest(body=body):
+                (crate / "tests/repro.rs").write_text(f"#[test]\nfn attack() {{ {body} }}\n")
+                r = validate.verify(self.cfg, self.root, FINDING, self.answer(test_path="cr/tests/repro.rs", runner="cargo"))
+                self.assertEqual(r["verdict"], want, r["reason"])
+        self.assertEqual(r["run_command"], "cd cr && cargo test --test repro --no-fail-fast --color never")
 
 
 class CandidateTests(unittest.TestCase):
@@ -314,12 +599,17 @@ class WorkflowTests(unittest.TestCase):
         job = self.job()
         claude = job[job.index("- name: Write the repro test"):job.index("- name: Run the repro test twice")]
         self.assertIn("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3", claude)
-        self.assertIn("env -u TOKEN -u PYTHONPATH -u PYTHONSAFEPATH claude -p", claude)
+        # G-07: no GITHUB_* variable (the runner's file commands among them) reaches Claude.
+        self.assertIn('( for v in "${!GITHUB_@}"; do unset "$v"; done\n            exec env -u TOKEN -u PYTHONPATH '
+                      '-u PYTHONSAFEPATH claude -p', claude)
         self.assertIn("WebFetch,WebSearch", claude)
         self.assertIn("2> /dev/null", claude)   # the model's work never reaches the log
         harness = job[job.index("- name: Run the repro test twice"):job.index("- name: Stop processes the run left behind")]
         self.assertNotIn("secrets.", harness)
-        self.assertNotIn("env:", harness)
+        # Its only variable is the commit the job checked out, which the harness compares the tree against.
+        self.assertIn("env:\n          SHA: ${{ needs.context.outputs.sha }}\n        run:", harness)
+        self.assertEqual(harness.count("${{"), 1)
+        self.assertIn('--sha "$SHA"', harness)
         # Processes are stopped before the step that holds the seal key.
         self.assertLess(job.index("- name: Stop processes the run left behind"), job.index("- name: Seal the result"))
 
@@ -531,11 +821,15 @@ class ValidateJobCliTests(RedteamCase):
     def test_verify_then_seal_then_publish(self):
         self.candidate([FINDING])
         Path(self.root, "tests").mkdir()
-        Path(self.root, "tests/test_repro.py").write_text("import sys\nprint('1 failed')\nsys.exit(1)\n")
-        answer = {"testable": True, "test_path": "tests/test_repro.py", "notes": "runs export()",
-                  "run_command": f"{sys.executable} tests/test_repro.py"}
+        answer = {"testable": True, "test_path": "tests/test_repro.py", "notes": "runs export()", "runner": "unittest"}
         Path(self.out, "claude.json").write_text(json.dumps({"is_error": False, "structured_output": answer}))
-        rc, text = self.run_cli("redteam", "verify", "--out-dir", self.out)
+        git_repo(Path(self.root))   # main as checked out: the job's own files sit in $RUNNER_TEMP, outside it
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, capture_output=True, text=True,
+                             check=True).stdout.strip()
+        Path(self.root, "tests/test_repro.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n    def test_export(self):\n"
+            "        self.assertEqual('pwned', 'safe')   # sys.exit(1) would not count\n")
+        rc, text = self.run_cli("redteam", "verify", "--out-dir", self.out, "--sha", sha)
         self.assertEqual((rc, text.strip()), (0, "verdict: validated"))
         Path(self.gh_out).write_text("")
         with mock.patch.dict(os.environ, {"SEAL_KEY": KEY}):
@@ -547,7 +841,8 @@ class ValidateJobCliTests(RedteamCase):
             rc, _ = self.publish({"findings": [FINDING]}, extra=("--validation", "true"))
         self.assertEqual(rc, 0)
         issue, = [i for n, i in self.fake.issues.items() if n != 1]
-        self.assertIn("sys.exit(1)", issue["body"])
+        self.assertIn("assertEqual('pwned', 'safe')", issue["body"])
+        self.assertIn("python3 -m unittest -v tests/test_repro.py", issue["body"])
 
     @unittest.skipUnless(HAS_OPENSSL, "no openssl")
     def test_seal_refuses_a_swapped_or_leaking_result(self):
