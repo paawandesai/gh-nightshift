@@ -503,7 +503,7 @@ def cmd_rules(ctx: Ctx) -> int:
 def cmd_redteam(ctx: Ctx) -> int:
     """(workflow) `context`: decide whether to scan and write the scan context; `publish`: file the findings as
     draft private security advisories and record the commit the scan reached."""
-    from . import redteam, review_rules, validate
+    from . import redteam, review_rules, security_context, validate
     from .review_tools import git_in
 
     a, cfg = ctx.args, ctx.cfg
@@ -583,11 +583,27 @@ def cmd_redteam(ctx: Ctx) -> int:
         return 1
     public = not private
     validation = None
+    # "Not a finding" entries, as a person sees them in the shared context, are never filed.
+    known = security_context.not_findings(security_context.read(ctx.root))
     if a.validation == "true" and not public:
+        # The validate jobs picked their findings from this scan output and the context job's seen.json; the same
+        # list here says which finding each job's result may speak for.
+        try:
+            seen = json.loads(Path(a.seen_file).read_text(encoding="utf-8")) if a.seen_file else None
+            if not isinstance(seen, list) or not all(isinstance(x, str) for x in seen):
+                raise ValueError("not a list of fingerprints")
+        except (ValueError, OSError) as err:
+            ctx.say(f"::error::--validation true needs --seen-file with the context job's seen.json ({type(err).__name__}); "
+                    "recording nothing")
+            return 1
+        known |= set(seen)
+        limit = min(cfg.redteam_validate_max, validate.MAX_PER_RUN)
+        picked = validate.candidates(redteam.findings_of(data), set(seen), cfg.redteam_min_severity, limit)
         # Sealed results arrive in the environment (ciphertext) and are decrypted in memory, never on disk.
         sealed = [os.environ.get(f"VALIDATION_{i}", "") for i in range(validate.MAX_PER_RUN)]
-        validation = validate.unseal_all(sealed, os.environ.get("SEAL_KEY", ""))
-    result = redteam.file_findings(gh, cfg, data, a.sha, a.base, public, validation)
+        validation = validate.unseal_all(sealed, os.environ.get("SEAL_KEY", ""),
+                                         expected=[redteam.fingerprint(f) for f in picked])
+    result = redteam.file_findings(gh, cfg, data, a.sha, a.base, public, validation, known)
     if result.failed and public:
         # One line, no severity, no count: a public log must not say what the scan found.
         ctx.say("::error::could not file the red-team results; the PAT or App needs Repository security advisories: "
@@ -1287,6 +1303,8 @@ def parser() -> argparse.ArgumentParser:
                         "--dry-run prints the full advisory bodies, so never use it in a public CI log")
     c.add_argument("--validation", default="false", choices=["true", "false"],
                    help="true: the validate job ran; its sealed results are in VALIDATION_0..2 and SEAL_KEY decrypts them")
+    c.add_argument("--seen-file", default="",
+                   help="(with --validation true) seen.json from the context job, as the validate jobs read it")
     c = rsub.add_parser("candidate", parents=[sub_common], help="(validate job) pick this job's finding and write its task")
     c.add_argument("--index", type=int, required=True, choices=range(3))
     c.add_argument("--findings-file", default="-", metavar="PATH")

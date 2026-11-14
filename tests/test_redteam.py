@@ -454,7 +454,8 @@ class SealTests(unittest.TestCase):
             "set -euo pipefail",
             "printf '%s' \"$SEALED\" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:SEAL_KEY \\",
             '| python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file - '
-            '--validation "$VALIDATION"'])
+            '--validation "$VALIDATION" \\',
+            '--seen-file "$RUNNER_TEMP/redteam/seen.json"'])
 
     @unittest.skipUnless(all(shutil.which(t) for t in ("openssl", "jq", "truncate")), "no openssl, jq or truncate")
     def test_seal_round_trip_matches_the_workflow(self):

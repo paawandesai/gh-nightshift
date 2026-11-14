@@ -35,7 +35,8 @@ from typing import Any
 MARKER_RE = re.compile(r"<!--\s*ns:(\{.*?\})\s*-->", re.S)
 TYPES = {"attempt", "infra", "blocked", "waiting", "need", "handoff", "note", "pr", "handoff-done",
          "handoff-data", "note-sent", "fix-attempt", "fix-infra", "plan", "budget", "digest", "roadmap",
-         "take", "retry", "approval", "redteam", "redteam-finding", "redteam-skip", "decision"}
+         "take", "retry", "approval", "redteam", "redteam-finding", "redteam-skip", "redteam-shadow",
+         "decision"}
 PR_REASONS = ("verdict_passed", "verdict_failed", "security_failed", "checks_failed", "conflict", "stale", "superseded", "manual")
 
 # Markers written by the original hackathon kit; still counted so a repo can migrate mid-flight.
