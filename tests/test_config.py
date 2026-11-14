@@ -122,3 +122,21 @@ class RunnersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenOverlap(unittest.TestCase):
+    TWO = ("version: 1\nlanes:\n  - name: api\n    claude_token_secret: CLAUDE_TOKEN_A\n"
+           "  - name: web\n    claude_token_secret: CLAUDE_TOKEN_B\n")
+
+    def test_reviewers_do_not_share_a_lane_token(self):
+        with self.assertRaisesRegex(ConfigError, "review_token_secret"):
+            loads(self.TWO + "review_token_secret: CLAUDE_TOKEN_A\n")
+        with self.assertRaisesRegex(ConfigError, "security.claude_token_secret"):
+            loads(self.TWO + "security:\n  enabled: true\n  claude_token_secret: CLAUDE_TOKEN_B\n")
+
+    def test_fallback_is_not_another_lanes_or_a_reviewers_token(self):
+        with self.assertRaisesRegex(ConfigError, "fallback_token_secret CLAUDE_TOKEN_B"):
+            loads(self.TWO.replace("CLAUDE_TOKEN_A\n", "CLAUDE_TOKEN_A\n    fallback_token_secret: CLAUDE_TOKEN_B\n", 1))
+        with self.assertRaisesRegex(ConfigError, "fallback_token_secret CLAUDE_TOKEN_REVIEW"):
+            loads(self.TWO.replace("CLAUDE_TOKEN_A\n", "CLAUDE_TOKEN_A\n    fallback_token_secret: CLAUDE_TOKEN_REVIEW\n", 1))
+        loads(self.TWO.replace("CLAUDE_TOKEN_A\n", "CLAUDE_TOKEN_A\n    fallback_token_secret: CLAUDE_TOKEN_A2\n", 1))

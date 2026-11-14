@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import fnmatch
 import posixpath
 import re
 
@@ -130,7 +131,7 @@ def age_minutes(created_at: str | None, now: dt.datetime | None = None) -> float
 
 
 # Files Claude Code (and similar agents) read as instructions wherever they sit in the tree.
-AGENT_FILES = ("CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/")
+AGENT_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json", ".claude/")
 
 
 def normalize_path(path: str) -> str | None:
@@ -150,13 +151,23 @@ def split_paths(entry: str) -> list[str]:
 def path_is_protected(path: str, protected: list[str]) -> bool:
     """`dir/` protects everything under it, `file` protects that exact path; a path that cannot be
     normalised (e.g. escapes with `..`) counts as protected. Agent instruction files (CLAUDE.md,
-    AGENTS.md, .mcp.json, .claude/) are protected at any depth when they are in the protected list."""
+    CLAUDE.local.md, AGENTS.md, .mcp.json, .claude/) are protected at any depth when they are in the protected list.
+    An entry with `*`, `?` or `[` is a glob over the whole path; `**/name` matches `name` at any depth
+    (`**/package.json`, `**/requirements*.txt`)."""
     norm = normalize_path(path)
     if norm is None:
         return True
     for p in protected:
         p = p.strip().lstrip("/")
         if not p:
+            continue
+        if any(c in p for c in "*?["):
+            if p.startswith("**/"):
+                parts = norm.split("/")
+                if any(fnmatch.fnmatchcase("/".join(parts[i:]), p[3:]) for i in range(len(parts))):
+                    return True
+            elif fnmatch.fnmatchcase(norm, p):
+                return True
             continue
         if p.endswith("/"):
             if norm.startswith(p) or norm == p.rstrip("/"):

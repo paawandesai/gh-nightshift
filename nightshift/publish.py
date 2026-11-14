@@ -10,6 +10,9 @@ Outcomes the agent can report:
   stuck    a real attempt failed -> comment, counts as an attempt
   waiting  blocked on another lane -> one ticket per `needs` entry in that lane (ready if it passes the
            ticket validator, else `proposed`), "Blocked by: #new" appended here, attempt NOT counted
+  decision the ticket cannot pass review as written (its contract conflicts with a repo review rule an earlier
+           attempt failed on, or it needs a product call) -> `needs-human`, never retried automatically; the
+           agent's follow-ups say what to change
 """
 from __future__ import annotations
 
@@ -92,6 +95,9 @@ def _turns(value) -> int:
         return 0
 
 
+STATUSES = ("done", "stuck", "waiting", "decision")
+
+
 def classify(result_path: str | None) -> Result:
     """A run that never really started (no result file, or <2 turns and no structured output: expired
     token, usage limit, outage) is infra-error and gets refunded, not counted."""
@@ -112,7 +118,7 @@ def classify(result_path: str | None) -> Result:
                                     "ticket asked for, then remove the needs-human label.")
     cost, turns = _cost(data.get("total_cost_usd")), _turns(data.get("num_turns"))
     out = data.get("structured_output")
-    if isinstance(out, dict) and out.get("status") in {"done", "stuck", "waiting"}:
+    if isinstance(out, dict) and out.get("status") in STATUSES:
         out = ns.defang(out)  # everything below is re-posted under the bot's trusted login
         assumptions = out.get("assumptions") if isinstance(out.get("assumptions"), list) else []
         # Convert to text, then defang again: a dict or list rendered as text could carry raw markers in keys.
@@ -180,7 +186,8 @@ def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
         for line in send_notes(gh, cfg, job, issue, res.notes):
             print(line)
     if issue is not None and res.follow_ups:
-        for line in file_follow_ups(gh, cfg, job, issue, res.follow_ups):
+        for line in file_follow_ups(gh, cfg, job, issue, res.follow_ups[:1] if res.status == "decision" else res.follow_ups,
+                                    decision=res.status == "decision"):
             print(line)
 
     if res.status == "infra-error" and job.attempt_comment:
@@ -194,6 +201,18 @@ def publish(gh: GH, cfg: Config, job: Job, git: GitRunner = real_git) -> str:
         outcome = "withheld: Claude token found in the run's output (needs a person)"
         if issue is not None:
             gh.add_labels(int(job.issue), [cfg.label("needs_human")])  # never retried automatically
+
+    if res.status == "decision" and issue is None:
+        outcome = "stuck"  # fix-main has no ticket to change; it counts like any failed fix attempt
+    if issue is not None and res.status == "decision":
+        # Seen in the sandbox: a ticket fixed a signature that a security rule forbids, and two more attempts
+        # failed the same way before anyone was asked. Stop at the first such failure and ask a person.
+        outcome = "needs a decision: a person must change the ticket (see the proposed follow-up)"
+        gh.add_labels(int(job.issue), [cfg.label("needs_human")])
+        if job.attempt_comment:
+            # Not counted, so removing `needs-human` after editing the ticket gives it a real attempt.
+            gh.edit_comment(int(job.attempt_comment), f"{ns.marker('decision', issue=int(job.issue))}\n"
+                                                      "Attempt not counted: the agent asked for a decision.")
 
     if issue is not None:
         if not outcome.startswith("PR") and res.status != "waiting":
@@ -343,8 +362,10 @@ def send_notes(gh: GH, cfg: Config, job: Job, issue: dict, notes: list[dict]) ->
     return out
 
 
-def file_follow_ups(gh: GH, cfg: Config, job: Job, issue: dict, follow_ups: list[dict]) -> list[str]:
-    """Builders may suggest follow-up work (step 4). Filed as `proposed`; a person promotes them."""
+def file_follow_ups(gh: GH, cfg: Config, job: Job, issue: dict, follow_ups: list[dict],
+                    decision: bool = False) -> list[str]:
+    """Builders may suggest follow-up work (step 4). Filed as `proposed`; a person promotes them.
+    A `decision` run's follow-up says how to change the ticket, so it is filed even after earlier ones."""
     out = []
     if not follow_ups:
         return out
@@ -354,7 +375,7 @@ def file_follow_ups(gh: GH, cfg: Config, job: Job, issue: dict, follow_ups: list
     earlier = [i["number"] for i in gh.issues(state="all")
                if "pull_request" not in i and (i.get("user") or {}).get("login") in gh.trusted
                and tag in (i.get("body") or "")]
-    if earlier:
+    if earlier and not decision:
         listed = ", ".join(f"#{n}" for n in sorted(earlier))
         return [f"follow-ups skipped: an earlier attempt already filed {listed}"]
     lanes = lanes_of(issue)

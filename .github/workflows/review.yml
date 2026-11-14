@@ -82,14 +82,14 @@ jobs:
       PYTHONSAFEPATH: "1"
     steps:
       - name: Check out base (trusted)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base
           persist-credentials: false
 
       - name: Check out PR head (under review)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           path: pr
@@ -97,7 +97,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out gh-nightshift scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
@@ -129,7 +129,7 @@ jobs:
           jq -n --rawfile b "$RUNNER_TEMP/review/reuse.md" '{body: $b}' | gh api -X POST "repos/$REPO/issues/$PR/comments" --input - >/dev/null || true
 
       # Node for Claude Code, in case a self-hosted runner has none.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.gather.outputs.reuse == ''
         with:
           node-version: 22
@@ -138,7 +138,7 @@ jobs:
       - name: Install Claude Code
         if: steps.gather.outputs.reuse == ''
         run: |
-          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
       - name: Review
@@ -146,22 +146,34 @@ jobs:
         if: steps.gather.outputs.reuse == ''
         working-directory: base
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          TOKEN: ${{ secrets.claude_token }}
+          TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
           REVIEW_MODEL: ${{ inputs.model || vars.REVIEW_MODEL || 'opus' }}
         run: |
           set -uo pipefail
           WORK="$RUNNER_TEMP/review"; PR_DIR="$GITHUB_WORKSPACE/pr"
-          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::The review Claude token (review_token_secret, default CLAUDE_TOKEN_REVIEW) is empty"; exit 1; fi
+          if [ -z "$TOKEN" ]; then echo "::error::The review Claude token (review_token_secret, default CLAUDE_TOKEN_REVIEW) is empty"; exit 1; fi
           # Prompt: base branch's .night-shift/prompts/review.md if present, else gh-nightshift's default.
           PROMPT="$(python3 -m nightshift prompt review --root . --set ISSUE_FILE="$WORK/issue.md" \
             --set DIFF_FILE="$WORK/diff.patch" --set DRIFT_FILE="$WORK/drift.md" --set RULES_FILE="$WORK/rules.md" \
             --set PR_DIR="$PR_DIR")"
           SCHEMA="$(python3 -m nightshift schema review)"
+          # M4: the token reaches Claude on a pipe (fd 3), never in its environment, and Read is denied under /proc and
+          # /sys, where this step's own environment block (which holds the token) can be read.
+          token_fd() { if [ "$TOKEN_IN_ENV" = "true" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN"; exec 3< /dev/null; else export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$TOKEN"); fi; }
+          # The token guard: a file that holds the token (or its base64 form) is never posted.
+          leaks() { local t; t="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"; [ "${#t}" -ge 20 ] || return 1
+            grep -qaF -f <(printf '%s\n' "$t"; printf '%s' "$t" | base64 | tr -d '\n'; echo) "$1"; }
           # Read-only: in -p runs, any tool not allowed here is denied.
-          claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" --max-turns 30 --model "$REVIEW_MODEL" \
+          token_fd
+          env -u TOKEN claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" --max-turns 30 --model "$REVIEW_MODEL" \
             --add-dir "$WORK" "$PR_DIR" --allowedTools "Read,Grep,Glob" \
-            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$WORK/review.json" 2> "$WORK/review.stderr"
-          echo "claude exit code: $?"
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Read(//proc/**),Read(//sys/**)" > "$WORK/review.json" 2> "$WORK/review.stderr"
+          echo "claude exit code: $?"; exec 3<&-
+          if leaks "$WORK/review.json"; then
+            echo '{"is_error": true, "result": "withheld: the output held the review token"}' > "$WORK/review.json"
+            echo "::error::The reviewer's output held its Claude token; it was withheld. Rotate the token."
+          fi
           python3 -m nightshift review-report --result "$WORK/review.json" --out "$WORK/comment.md" \
             --overlap "${{ steps.gather.outputs.overlap || 0 }}" --rules "$WORK/rule_hits.json" \
             --github-output "$GITHUB_OUTPUT"
@@ -209,14 +221,14 @@ jobs:
       PYTHONSAFEPATH: "1"
     steps:
       - name: Check out base (trusted)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base
           persist-credentials: false
 
       - name: Check out PR head (under review)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           path: pr
@@ -224,7 +236,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out gh-nightshift scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
@@ -257,14 +269,14 @@ jobs:
         if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security != 'true'
         run: echo "No security rule, security path or security.always applies to this PR; passing."
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security == 'true'
         with:
           node-version: 22
       - name: Install Claude Code
         if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security == 'true'
         run: |
-          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
 
       - name: Security review
@@ -272,21 +284,33 @@ jobs:
         if: steps.gather.outputs.reuse == '' && steps.gather.outputs.security == 'true'
         working-directory: base
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.security_claude_token || secrets.claude_token }}
+          TOKEN: ${{ secrets.security_claude_token || secrets.claude_token }}
+          TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
           SECURITY_MODEL: ${{ inputs.security_model || inputs.model || vars.REVIEW_MODEL || 'opus' }}
         run: |
           set -uo pipefail
           WORK="$RUNNER_TEMP/review"; PR_DIR="$GITHUB_WORKSPACE/pr"
-          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::The security reviewer's Claude token (security.claude_token_secret, else review_token_secret) is empty"; exit 1; fi
+          if [ -z "$TOKEN" ]; then echo "::error::The security reviewer's Claude token (security.claude_token_secret, else review_token_secret) is empty"; exit 1; fi
           PROMPT="$(python3 -m nightshift prompt security --root . --set ISSUE_FILE="$WORK/issue.md" \
             --set DIFF_FILE="$WORK/diff.patch" --set RULES_FILE="$WORK/security_rules.md" \
             --set TRIGGER_FILE="$WORK/security_trigger.md" --set PR_DIR="$PR_DIR")"
           SCHEMA="$(python3 -m nightshift schema security)"
+          # M4: the token reaches Claude on a pipe (fd 3), never in its environment, and Read is denied under /proc and
+          # /sys, where this step's own environment block (which holds the token) can be read.
+          token_fd() { if [ "$TOKEN_IN_ENV" = "true" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN"; exec 3< /dev/null; else export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$TOKEN"); fi; }
+          # The token guard: a file that holds the token (or its base64 form) is never posted.
+          leaks() { local t; t="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"; [ "${#t}" -ge 20 ] || return 1
+            grep -qaF -f <(printf '%s\n' "$t"; printf '%s' "$t" | base64 | tr -d '\n'; echo) "$1"; }
           # Read-only, like the review gate: in -p runs, any tool not allowed here is denied.
-          claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" --max-turns 40 --model "$SECURITY_MODEL" \
+          token_fd
+          env -u TOKEN claude -p "$PROMPT" --output-format json --json-schema "$SCHEMA" --max-turns 40 --model "$SECURITY_MODEL" \
             --add-dir "$WORK" "$PR_DIR" --allowedTools "Read,Grep,Glob" \
-            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$WORK/security.json" 2> "$WORK/security.stderr"
-          echo "claude exit code: $?"
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Read(//proc/**),Read(//sys/**)" > "$WORK/security.json" 2> "$WORK/security.stderr"
+          echo "claude exit code: $?"; exec 3<&-
+          if leaks "$WORK/security.json"; then
+            echo '{"is_error": true, "result": "withheld: the output held the review token"}' > "$WORK/security.json"
+            echo "::error::The security reviewer's output held its Claude token; it was withheld. Rotate the token."
+          fi
           python3 -m nightshift review-report --security --result "$WORK/security.json" --out "$WORK/security.md" \
             --rules "$WORK/security_hits.json" --github-output "$GITHUB_OUTPUT"
 

@@ -105,7 +105,7 @@ class Ctx:
                 self._gh.trusted_extra = {self.cfg.bot_login, *self.cfg.trusted_logins} - {""}
             except ConfigError:
                 pass  # init, before a config exists
-            # App installation tokens cannot call GET /user; the mint step exports the App's bot login.
+            # App installation tokens cannot call GET /user; the mint step outputs the App's bot login.
             app_login = os.environ.get("NIGHT_SHIFT_LOGIN", "")
             app_token = os.environ.get("NIGHT_SHIFT_APP_TOKEN", "")
             if app_login and app_token and os.environ.get("GH_TOKEN") == app_token:
@@ -161,6 +161,17 @@ def _pairs(text: str | None) -> dict[str, str]:
 
 # New setups pin the workflows to the release of the extension that wrote them.
 DEFAULT_TOOL_REF = f"v{__version__}"
+# Written into new configs as risk.approve_paths (M6): dependency manifests and lockfiles, package-manager config
+# (registry redirects), and editor, hook and container config. Edit the list in the config to suit the repo.
+DEFAULT_APPROVE_PATHS = (
+    "**/package.json", "**/package-lock.json", "**/npm-shrinkwrap.json", "**/yarn.lock", "**/pnpm-lock.yaml",
+    "**/bun.lockb", "**/requirements*.txt", "**/constraints*.txt", "**/pyproject.toml", "**/setup.py", "**/setup.cfg",
+    "**/poetry.lock", "**/uv.lock", "**/Pipfile", "**/Pipfile.lock", "**/go.mod", "**/go.sum", "**/Cargo.toml",
+    "**/Cargo.lock", "**/Gemfile", "**/Gemfile.lock", "**/mix.exs", "**/mix.lock", "**/composer.json",
+    "**/composer.lock", "**/.npmrc", "**/.yarnrc", "**/.yarnrc.yml", "**/pip.conf", "**/.pypirc", "**/Dockerfile",
+    "**/docker-compose*.yml", "**/compose*.yml", ".devcontainer/", ".vscode/", ".idea/", ".husky/", ".envrc",
+    ".gitattributes", ".gitmodules", ".pre-commit-config.yaml", ".cursor/", ".codex/", "GEMINI.md",
+)
 
 
 def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, out=None,
@@ -248,8 +259,10 @@ def build_config(root: Path, ask: Ask, lanes_arg: str | None, assume_yes: bool, 
         bot = getattr(o, "bot_login", None) or q("AGENT_PAT owner's GitHub login (the planner posts as it)", "")
         if bot:
             data["bot_login"] = bot
+    # M6: agent PRs that change what installs or runs code, or what acts on a developer's machine, wait for a person.
+    data["risk"] = {"approve_paths": list(DEFAULT_APPROVE_PATHS)}
     if co_rules:
-        data["risk"] = {"codeowners": True}  # agent PRs touching owned files wait for an owner's approval
+        data["risk"]["codeowners"] = True  # agent PRs touching owned files wait for an owner's approval
     return data
 
 
@@ -270,6 +283,28 @@ def write_files(ctx: Ctx, files: dict[str, str], overwrite: bool) -> list[str]:
     return out
 
 
+def pin_tool_ref(ctx: Ctx, ref: str) -> tuple[str, str]:
+    """(sha, label): a tag or branch resolved to its commit SHA, so a moved tag cannot change the code that runs
+    with the PAT (H1). The label (the tag) becomes a comment. Unresolvable: keep the ref and warn."""
+    if re.fullmatch(r"[0-9a-f]{40}", ref):
+        return ref, ""
+    if ctx.args.files_only:  # --files-only touches no GitHub at all
+        ctx.say(f"note: --files-only leaves tool_ref at {ref}; pin its commit SHA in the config before going live.")
+        return ref, ""
+    try:
+        commit = ctx.gh.get_or_none(f"repos/{scaffold.TOOL_REPO}/commits/{ref}")
+    except (GHError, OSError) as err:
+        commit, why = None, str(err)
+    else:
+        why = "not found"
+    sha = (commit or {}).get("sha", "")
+    if re.fullmatch(r"[0-9a-f]{40}", sha):
+        return sha, ref
+    ctx.say(f"warning: could not resolve {scaffold.TOOL_REPO}@{ref} to a commit ({why}); tool_ref stays {ref}. "
+            "Pin its commit SHA in the config before going live (`gh nightshift doctor` warns until you do).")
+    return ref, ""
+
+
 def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=None) -> int:
     a = ctx.args
     cfg_path = ctx.root / CONFIG_PATH
@@ -287,10 +322,13 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
             ctx.say(f"note: --tool-ref ignored; the config pins {cfg.tool_ref}. Edit tool_ref in {CONFIG_PATH}, "
                     "then run `gh nightshift init --regenerate`.")
     else:
-        data = build_config(ctx.root, ask, a.lanes, a.yes, ctx.out, a.tool_ref or DEFAULT_TOOL_REF, a)
+        sha, label = pin_tool_ref(ctx, a.tool_ref or DEFAULT_TOOL_REF)
+        data = build_config(ctx.root, ask, a.lanes, a.yes, ctx.out, sha, a)
         if getattr(a, "template", None):
             data = scaffold.apply_template(data, a.template)
         text = scaffold.config_yaml(data)
+        if label:
+            text = re.sub(r"^tool_ref: (\S+)$", lambda m: f"{m.group(0)}  # {label}", text, count=1, flags=re.M)
         cfg = loads(text)  # validates what we are about to write
     ctx.say(*write_files(ctx, scaffold.files(cfg, text, ctx.root), overwrite=a.force))
     if getattr(a, "template", None):
@@ -563,7 +601,15 @@ def plan_context(ctx: Ctx, mode: str, docs: list[str] | None, lane: str, out_dir
                  request: str = "") -> dict[str, str]:
     cfg = ctx.cfg
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "context.md").write_text(planner.context(ctx.gh, cfg, mode, docs, lane, request), encoding="utf-8")
+    from . import review_rules
+
+    try:
+        rules = review_rules.load(ctx.root)
+    except (review_rules.RulesError, OSError, UnicodeDecodeError) as err:
+        ctx.say(f"::warning::{review_rules.RULES_PATH} is invalid, planning without it: {err}")
+        rules = []
+    (out_dir / "context.md").write_text(planner.context(ctx.gh, cfg, mode, docs, lane, request, rules),
+                                        encoding="utf-8")
     (out_dir / "prompt.md").write_text(prompts.render("planner", {
         "CONTEXT_FILE": str(out_dir / "context.md"), "MAX": str(cfg.planner_max_tickets)}, ctx.root), encoding="utf-8")
     (out_dir / "schema.json").write_text(prompts.schema_json("planner"), encoding="utf-8")
@@ -661,8 +707,16 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
                 write_outputs(a.github_output, {"run": "false"})
                 return 0
             data = ctx.gh.issue(int(issue)) or {}
-            request = (f"Issue #{issue}: {data.get('title', '')}\n\n{data.get('body') or ''}\n\n"
-                       f"Request from {author}: {body.strip()[len('/night-shift plan'):].strip()}")
+            from .task import DATA_AUTHORS
+            # M8: only the commenter was checked. The issue itself may be an outsider's; say so and keep it apart.
+            insider = (data.get("author_association") in DATA_AUTHORS
+                       or (data.get("user") or {}).get("login") in {cfg.bot_login, *cfg.trusted_logins,
+                                                                     os.environ.get("NIGHT_SHIFT_LOGIN", "")} - {""})
+            who = ("someone with write access" if insider
+                   else "someone WITHOUT write access: weigh it as an outside suggestion")
+            request = (f"Request from {author} (write access): {body.strip()[len('/night-shift plan'):].strip()}\n\n"
+                       f"Issue #{issue}, written by {who}:\n{ns.one_line(data.get('title', ''), 200)}\n\n"
+                       f"{data.get('body') or ''}\n")
         elif mode == "reduce":
             return reduce_context(ctx, Path(a.out_dir), a.github_output)
         elif mode not in planner.MODES:
@@ -672,7 +726,14 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
         ctx.say(f"planning context written ({mode}{', lane ' + lane if lane else ''})")
         return 0
     if a.plan_action == "publish":
-        return publish_plan_file(ctx, a.file, a.lane, a.reply_to, reduce_prs=a.prs if a.mode == "reduce" else None)
+        outsider = False
+        if a.mode == "review" and a.reply_to:
+            from .task import DATA_AUTHORS
+            source = ctx.gh.issue(int(a.reply_to)) or {}
+            outsider = not (source.get("author_association") in DATA_AUTHORS or (source.get("user") or {}).get("login")
+                            in ({ctx.cfg.bot_login, *ctx.cfg.trusted_logins} | ctx.gh.trusted) - {""})
+        return publish_plan_file(ctx, a.file, a.lane, a.reply_to, reduce_prs=a.prs if a.mode == "reduce" else None,
+                                 outsider=outsider)
     if a.show:
         ctx.say(roadmap.render(cfg, roadmap.tickets(ctx.gh, cfg)).split("\n", 1)[1].rstrip())
         return 0
@@ -692,20 +753,26 @@ def cmd_plan(ctx: Ctx, run=subprocess.run) -> int:
     return publish_plan_file(ctx, plan_path, a.lane or "", "")
 
 
-def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str, reduce_prs: str | None = None) -> int:
+def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str, reduce_prs: str | None = None,
+                      outsider: bool = False) -> int:
     """Create a draft's tickets. With `reduce_prs` (reduce mode: the merged PRs the context covered, as
-    "12,15") every ticket is filed as `proposed` and the night-log marker records those PRs as reduced."""
+    "12,15") every ticket is filed as `proposed` and the night-log marker records those PRs as reduced.
+    `outsider`: the plan came from an issue whose author lacks write access, so its tickets are `proposed` too (M8)."""
     cfg, gh = ctx.cfg, ctx.gh
     if not Path(path).is_file():
         raise ConfigError(f"plan file not found: {path}")
     if reduce_prs is not None and not re.fullmatch(r"[0-9]{1,9}(,[0-9]{1,9}){0,99}", reduce_prs):
         raise ConfigError(f"--prs must be comma-separated PR numbers, not {reduce_prs!r}")
     raw = Path(path).read_text(encoding="utf-8")
-    result = planner.publish_plan(gh, cfg, raw, "" if reduce_prs is not None else lane, proposed=reduce_prs is not None)
+    result = planner.publish_plan(gh, cfg, raw, "" if reduce_prs is not None else lane,
+                                  proposed=reduce_prs is not None or outsider)
     lines = [ns.defang(line) for line in result.lines()]  # titles, notes, keys come from the model
     ctx.say(*lines)
     title = "Night shift reduce" if reduce_prs is not None else "Night shift planner"
     summary = f"**{title}**\n\n" + "\n".join(f"- {line}" for line in lines)
+    if outsider and reduce_prs is None:
+        summary += (f"\n\nThis issue was opened by someone without write access, so the tickets are "
+                    f"`{cfg.label('proposed')}`: swap the label for `{cfg.ready_label}` to queue one.")
     if reduce_prs is not None:
         summary += (f"\n\nCross-lane pass over PR(s) {', '.join('#' + n for n in reduce_prs.split(','))}. "
                     f"Tickets are `{cfg.label('proposed')}`: swap the label for `{cfg.ready_label}` to queue one.")
@@ -745,7 +812,7 @@ def cmd_take_retry(ctx: Ctx) -> int:
 
 
 def cmd_app_token(ctx: Ctx) -> int:
-    """(workflow) Mint a down-scoped installation token for this repo and expose it to later steps of this job."""
+    """(workflow) Mint a down-scoped installation token for this repo and expose it as this step's outputs."""
     from . import app
 
     try:
@@ -754,7 +821,7 @@ def cmd_app_token(ctx: Ctx) -> int:
     except app.AppError as err:
         ctx.say(f"::error::GitHub App token: {err}")
         return 1
-    app.write_github_env(ctx.args.github_env, result)
+    app.write_github_output(ctx.args.github_output, result)
     ctx.say(f"App token minted for {ctx.repo} as {result['login'] or 'the App'} "
             f"(permissions: {', '.join(f'{k}={v}' for k, v in sorted(result['permissions'].items()))})")
     return 0
@@ -880,7 +947,8 @@ def cmd_digest(ctx: Ctx) -> int:
 def cmd_lane_config(ctx: Ctx) -> int:
     lane = ctx.cfg.lane(ctx.args.lane)
     values = {"postgres_image": lane.postgres_image, "setup_action": lane.setup_action,
-              "max_turns": str(ctx.cfg.max_turns), "test_command": lane.test_command}
+              "max_turns": str(ctx.cfg.max_turns), "test_command": lane.test_command,
+              "sudo": "true" if lane.sudo else "false"}
     write_outputs(ctx.args.github_output, values)
     ctx.say(json.dumps(values))
     return 0
@@ -1151,7 +1219,7 @@ def parser() -> argparse.ArgumentParser:
     m.add_argument("--app-id", default="")
     m.add_argument("--key-file", default="", help="private key .pem (default: $APP_PRIVATE_KEY)")
     s = sub.add_parser("app-token", parents=[common])
-    s.add_argument("--github-env", required=True)
+    s.add_argument("--github-output", required=True)
     s.add_argument("--advisories", action="store_true", help="also ask for Repository security advisories: write")
     s = sub.add_parser("command", parents=[common])
     for flag in ("--author", "--body", "--issue"):

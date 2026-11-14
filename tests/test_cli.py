@@ -173,6 +173,30 @@ class InitToolRef(unittest.TestCase):
         self.assertIn("lane.yml@v0.1.0", text)
         self.assertEqual(load(root).tool_ref, "v0.1.0")
 
+    def test_init_pins_the_tags_commit_sha(self):
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        out = io.StringIO()
+        rc = cli.main(["init", "--root", root, "--repo", "o/r", "--lanes", "api", "--yes", "--skip-secrets",
+                       "--tool-ref", "v0.1.0"], transport=FakeGitHub(), out=out)
+        self.assertEqual(rc, 0, out.getvalue())
+        sha = "0" * 40
+        self.assertIn(f"lane.yml@{sha}", Path(root, ".github/workflows/night-shift.yml").read_text())
+        self.assertIn(f"tool_ref: \"{sha}\"  # v0.1.0", Path(root, CONFIG_PATH).read_text())  # all digits: quoted
+        self.assertEqual(load(root).tool_ref, sha)
+
+    def test_init_keeps_an_unknown_ref_and_warns(self):
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        out = io.StringIO()
+        rc = cli.main(["init", "--root", root, "--repo", "o/r", "--lanes", "api", "--yes", "--skip-secrets",
+                       "--tool-ref", "v9.9.9"], transport=FakeGitHub(), out=out)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("could not resolve", out.getvalue())
+        self.assertEqual(load(root).tool_ref, "v9.9.9")
+
 
 class InitTests(CliTestCase):
     def test_init_yes_lanes_with_git_remote(self):
@@ -406,8 +430,8 @@ class SetupJoinTests(CliTestCase):
         self.assertEqual(rc, 0)
         body = self.fake.writes("PUT", r"branches/main/protection$")[0][2]
         self.assertEqual(body["required_status_checks"], {"strict": True, "checks": [
-            {"context": "lint", "app_id": 15368}, {"context": "test", "app_id": -1},
-            {"context": "review / verdict", "app_id": -1}]})
+            {"context": "lint", "app_id": 15368}, {"context": "test", "app_id": 15368},
+            {"context": "review / verdict", "app_id": 15368}]})
         self.assertEqual(body["required_pull_request_reviews"], {
             "dismiss_stale_reviews": True, "require_code_owner_reviews": True, "required_approving_review_count": 2,
             "require_last_push_approval": False,
@@ -419,7 +443,8 @@ class SetupJoinTests(CliTestCase):
         self.assertIs(body["enforce_admins"], True)
         for said in ("kept the required checks already there: lint", "added required checks: review / verdict",
                      "kept required pull request reviews (2 approval(s), code owners)", "kept the push restrictions",
-                     "kept required_linear_history", "turned on enforce_admins", "turned off allow_force_pushes"):
+                     "kept required_linear_history", "turned on enforce_admins", "turned off allow_force_pushes",
+                     "bound test to GitHub Actions"):
             self.assertIn(said, text)
 
     def test_setup_changes_nothing_when_the_protection_cannot_be_read(self):
@@ -795,6 +820,20 @@ class PlanTests(CliTestCase):
         outputs = Path(gh_out).read_text() if os.path.exists(gh_out) else ""
         return rc, text, out_dir, outputs
 
+    def test_plan_context_lists_rules_and_survives_a_bad_rules_file(self):
+        rules = Path(self.root) / ".night-shift" / "review-rules.yml"
+        rules.parent.mkdir(parents=True, exist_ok=True)
+        rules.write_text("version: 1\nrules:\n  - id: shell-call\n    kind: path\n    paths: [api/]\n"
+                         "    question: Is the command a fixed list?\n", encoding="utf-8")
+        rc, _, out_dir, _ = self.context("gap")
+        self.assertEqual(rc, 0)
+        self.assertIn("`shell-call`", (Path(out_dir) / "context.md").read_text())
+        rules.write_bytes(b"\xff\xfe not utf-8")
+        rc, text, out_dir, _ = self.context("gap")
+        self.assertEqual(rc, 0)
+        self.assertIn("planning without it", text)
+        self.assertNotIn("Repo review rules", (Path(out_dir) / "context.md").read_text())
+
     def test_refill_skips_when_lanes_full(self):
         for n, lane in ((10, "api"), (11, "api"), (12, "web"), (13, "web")):
             self.fake.add_issue(number=n, title=f"t{n}", labels=[f"lane:{lane}", "night-safe"])
@@ -881,9 +920,26 @@ class PlanTests(CliTestCase):
         self.assertEqual(rc, 0)
         self.assertIn("run=true\nmode=review\nlane=\nissue=5\n", outputs)
         ctx_md = Path(out_dir, "context.md").read_text()
-        self.assertIn("Issue #5: Plan auth", ctx_md)
+        self.assertIn("Issue #5, written by someone WITHOUT write access", ctx_md)  # the fake issue has no association
+        self.assertIn("Plan auth", ctx_md)
         self.assertIn("We need SSO.", ctx_md)
-        self.assertIn("Request from alice: split it up", ctx_md)
+        self.assertIn("Request from alice (write access): split it up", ctx_md)
+
+    def test_review_mode_plan_from_an_outsiders_issue_is_proposed(self):
+        path = Path(self.root, "plan.json")
+        for association, label in (("NONE", "proposed"), ("MEMBER", "night-safe")):
+            plan = {"tickets": [{"key": "T1", "lane": "api", "title": f"Add SSO for {association}", "goal": "g",
+                                 "do": "d", "interface": "i", "acceptance": ["pytest -k sso"], "files": ["api/sso.py"],
+                                 "depends_on": [], "wave": 1}], "coverage": [], "notes": []}
+            path.write_text(json.dumps({"structured_output": plan}))
+            with self.subTest(association=association):
+                issue = self.fake.add_issue(title="Plan auth", body="We need SSO.")
+                issue["author_association"] = association
+                rc, text = self.run_cli("plan", "publish", str(path), "--mode", "review", "--reply-to",
+                                        str(issue["number"]))
+                self.assertEqual(rc, 0, text)
+                made = max(self.fake.issues.values(), key=lambda i: i["number"])
+                self.assertIn(label, [lbl["name"] for lbl in made["labels"]], made)
 
     def test_unknown_mode(self):
         with self.assertRaises(SystemExit):
@@ -931,7 +987,7 @@ class WorkflowCommandTests(CliTestCase):
         rc, text = self.run_cli("lane-config", "--lane", "api", "--github-output", self.gh_out)
         self.assertEqual(rc, 0)
         expected = {"postgres_image": "postgres:16", "setup_action": ".github/actions/api-setup", "max_turns": "120",
-                    "test_command": "pytest"}
+                    "test_command": "pytest", "sudo": "true"}
         self.assertEqual(self.outputs(), expected)
         self.assertEqual(json.loads(text), expected)
         self.assertEqual(self.fake.calls, [])

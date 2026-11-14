@@ -753,7 +753,7 @@ class GitHubApp(unittest.TestCase):
         with self.assertRaises(app.AppError):
             app.mint("o/r", "", "KEY", request=api, sign=fake_sign)
 
-    def test_github_env_masks_the_token(self):
+    def test_github_output_masks_the_token(self):
         from contextlib import redirect_stdout
 
         from nightshift import app
@@ -761,9 +761,9 @@ class GitHubApp(unittest.TestCase):
         env = Path(tempfile.mkdtemp()) / "env"
         buf = io.StringIO()
         with redirect_stdout(buf):
-            app.write_github_env(str(env), {"token": "ghs_secret", "login": "x[bot]"})
+            app.write_github_output(str(env), {"token": "ghs_secret", "login": "x[bot]"})
         self.assertEqual(buf.getvalue(), "::add-mask::ghs_secret\n")
-        self.assertEqual(env.read_text(), "NIGHT_SHIFT_APP_TOKEN=ghs_secret\nNIGHT_SHIFT_LOGIN=x[bot]\n")
+        self.assertEqual(env.read_text(), "token=ghs_secret\nlogin=x[bot]\n")
 
     def test_app_mode_callers_pass_exactly_two_secrets_per_lane_and_no_pat(self):
         import re
@@ -817,10 +817,10 @@ class GitHubApp(unittest.TestCase):
         with mock.patch.object(app, "http", FakeAppAPI()), mock.patch.object(app, "openssl_sign", fake_sign), \
                 mock.patch.dict(os.environ, {"APP_ID": "4242", "APP_PRIVATE_KEY": "KEY"}):
             out = io.StringIO()
-            rc = cli.main(["app-token", "--root", str(root), "--repo", "o/r", "--github-env", str(env_file)], out=out)
+            rc = cli.main(["app-token", "--root", str(root), "--repo", "o/r", "--github-output", str(env_file)], out=out)
         self.assertEqual(rc, 0)
         self.assertNotIn("ghs_secret", out.getvalue())
-        self.assertIn("NIGHT_SHIFT_APP_TOKEN=ghs_secret", env_file.read_text())
+        self.assertIn("token=ghs_secret", env_file.read_text())
         with mock.patch.dict(os.environ, {"GH_TOKEN": "ghs_secret", "NIGHT_SHIFT_APP_TOKEN": "ghs_secret",
                                           "NIGHT_SHIFT_LOGIN": "night-shift-o[bot]"}):
             args = cli.parser().parse_args(["status", "--root", str(root), "--repo", "o/r"])
@@ -986,17 +986,25 @@ class CrossRepo(unittest.TestCase):
         self.assertEqual(parse_deps(body, "o/r"), [UNRESOLVED, 3, 4])
         self.assertEqual(parse_cross_deps(body, "o/r"), [("a/b", 9), ("org/api", 12)])
 
+    ALLOWED = TEAM + "cross_repos: [org/api]\n"
+
     def test_waits_for_the_other_repo_then_hands_off_as_data(self):
-        self.assertEqual(picker(self.f).decide()["issue"], "")
+        self.assertEqual(picker(self.f, text=self.ALLOWED).decide()["issue"], "")
         self.f.other_repos["org/api"]["issues"][12]["state"] = "closed"
-        self.assertEqual(picker(self.f).decide()["issue"], "7")
+        self.assertEqual(picker(self.f, text=self.ALLOWED).decide()["issue"], "7")
         hand = ns.trusted(self.f.comments[7], BOT, "handoff")
         self.assertEqual([m.get("from") for m in hand], ["org/api#12"])
         body = [c["body"] for c in self.f.comments[7] if "another repository" in c["body"]][0]
         self.assertIn("GET /v1", body)
         self.assertEqual(len(ns.parse({"body": body, "user": {"login": BOT}})), 1)  # no forged marker
-        picker(self.f).decide()
+        picker(self.f, text=self.ALLOWED).decide()
         self.assertEqual(len(ns.trusted(self.f.comments[7], BOT, "handoff")), 1)  # once
+
+    def test_repo_outside_cross_repos_is_never_read(self):
+        self.f.other_repos["org/api"]["issues"][12]["state"] = "closed"
+        self.assertEqual(picker(self.f).decide()["issue"], "")  # the default allowlist is empty
+        self.assertFalse([c for c in self.f.calls if "org/api" in c[1]])
+        self.assertFalse([c for c in self.f.comments[7] if "another repository" in c["body"]])
 
     def test_unreadable_repo_counts_as_unmet(self):
         self.f.issues[7]["body"] = "Blocked by: secret/repo#1"
@@ -1051,7 +1059,7 @@ class CodeOwners(unittest.TestCase):
         (root / ".github/CODEOWNERS").write_text(self.CO)
         data = cli.build_config(root, None, "api", True, io.StringIO(), "main", cli.parser().parse_args(["init"]))
         self.assertEqual(data["lanes"][0]["claude_token_secret"], "CLAUDE_TOKEN_ALICE")
-        self.assertEqual(data["risk"], {"codeowners": True})
+        self.assertTrue(data["risk"]["codeowners"])
 
 
 class Templates(unittest.TestCase):

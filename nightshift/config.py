@@ -15,7 +15,8 @@ from . import schema, yamlish
 CONFIG_PATH = ".night-shift/config.yml"
 # Always protected, whatever the config says: agents may never change their own rules or CI.
 SECURITY_CHECK = "review / security"
-BUILTIN_PROTECTED = [".github/", ".claude/", "CLAUDE.md", "AGENTS.md", ".mcp.json", ".night-shift/"]
+BUILTIN_PROTECTED = [".github/", ".claude/", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENT_RULES.md", ".mcp.json",
+                     ".night-shift/"]
 DEFAULT_LABELS = {
     "ready": "night-safe", "blocked": "blocked", "needs_human": "needs-human", "human": "human",
     "proposed": "proposed", "agent": "agent", "in_progress": "agent:in-progress", "night_log": "night-log",
@@ -41,6 +42,7 @@ class Lane:
     setup_action: str = ""
     postgres_image: str = ""
     budget_usd_per_night: float = 0.0  # 0 = no cap
+    sudo: bool = True  # False: the agent step runs without sudo (setup commands still have it)
 
     @property
     def label(self) -> str:
@@ -65,6 +67,7 @@ class Config:
     timezone: str = "UTC"
     extra_protected: list[str] = field(default_factory=list)
     merge_mode: str = "strict"
+    merge_allow_unenforced: bool = False  # merge even when main does not enforce the required checks (M7)
     labels: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LABELS))
     default_model: str = "sonnet"
     escalate_model: str = "opus"
@@ -95,6 +98,8 @@ class Config:
     runner_agent: list[str] = field(default_factory=lambda: ["ubuntu-latest"])
     bot_login: str = ""           # the PAT's login; read-only commands (stats, audit) trust markers from it
     trusted_logins: list[str] = field(default_factory=list)  # other PAT logins (per-contributor PATs) to trust
+    cross_repos: list[str] = field(default_factory=list)  # repos whose issues `Blocked by: owner/repo#N` may read
+    environment: str = ""  # GitHub environment holding the PAT or App key for the jobs that use it (H2)
     auth_mode: str = "pat"  # pat | app (GitHub App: an installation token minted in the PAT jobs)
     app_id: str = ""
     app_key_secret: str = "NIGHT_SHIFT_APP_KEY"
@@ -127,6 +132,10 @@ class Config:
     @property
     def protected_paths(self) -> list[str]:
         extra = ["CODEOWNERS", "docs/CODEOWNERS"] if self.risk_codeowners else []  # .github/ is already built in
+        if self.planner_refill_below > 0:
+            # M8: the planner files tickets from these on a timer, unattended. A folder entry may lack its slash.
+            for doc in self.planner_docs:
+                extra += [doc] if doc.endswith("/") else [doc, doc + "/"]
         return BUILTIN_PROTECTED + [p for p in self.extra_protected + extra if p not in BUILTIN_PROTECTED]
 
     @property
@@ -279,7 +288,7 @@ def parse(data: dict) -> Config:
                           escalate_model=raw.get("escalate_model", ""), paths=raw.get("paths", []),
                           description=raw.get("description", ""), test_command=raw.get("test_command", ""),
                           setup_commands=cmds, setup_action=(setup.get("action") or "").removeprefix("./"),
-                          postgres_image=raw.get("postgres_image", ""),
+                          postgres_image=raw.get("postgres_image", ""), sudo=raw.get("sudo", True) is not False,
                           budget_usd_per_night=float(raw.get("budget_usd_per_night", 0) or 0)))
     names = [lane.name for lane in lanes]
     if len(set(names)) != len(names):
@@ -303,6 +312,7 @@ def parse(data: dict) -> Config:
         timezone=data.get("timezone", "UTC"),
         extra_protected=data.get("protected_paths", []),
         merge_mode=(data.get("merge") or {}).get("mode", "strict"),
+        merge_allow_unenforced=(data.get("merge") or {}).get("allow_unenforced") is True,
         labels={**DEFAULT_LABELS, **(data.get("labels") or {})},
         default_model=models.get("default", "sonnet"),
         escalate_model=models.get("escalate", "opus"),
@@ -330,6 +340,8 @@ def parse(data: dict) -> Config:
         runner_agent=_labels((data.get("runners") or {}).get("agent", "ubuntu-latest"), "runners.agent"),
         bot_login=data.get("bot_login", ""),
         trusted_logins=data.get("trusted_logins", []),
+        cross_repos=data.get("cross_repos", []),
+        environment=data.get("environment", ""),
         auth_mode=(data.get("auth") or {}).get("mode", "pat"),
         app_id=str((data.get("auth") or {}).get("app_id", "") or ""),
         app_key_secret=(data.get("auth") or {}).get("private_key_secret", "NIGHT_SHIFT_APP_KEY"),
@@ -411,6 +423,22 @@ def parse(data: dict) -> Config:
     unknown = sorted(set(cfg.planner_id_prefixes) - set(names))
     if unknown:
         raise ConfigError(f"planner.id_prefixes names unknown lane(s): {', '.join(unknown)}")
+    # A lane's fallback must not be another lane's, the planner's or a reviewer's token, and the reviewers judge
+    # the lanes' work, so they must not run on a lane owner's token (security review M9).
+    lane_tokens: dict[str, set[str]] = {}
+    for lane in lanes:
+        lane_tokens.setdefault(lane.token_secret, set()).add(lane.name)
+    for lane in lanes:
+        fb = lane.fallback_token_secret
+        if fb and (lane_tokens.get(fb, {lane.name}) - {lane.name} or fb in {cfg.review_token_secret, cfg.security_token,
+                                                                        cfg.planner_token_secret}):
+            raise ConfigError(f"lane {lane.name}: fallback_token_secret {fb} is another lane's, the planner's or a "
+                              "reviewer's token")
+    for who, secret in (("review_token_secret", cfg.review_token_secret),
+                        ("security.claude_token_secret", cfg.security_token)):
+        if secret in lane_tokens:
+            raise ConfigError(f"{who} {secret} is also a lane's Claude token: the reviewer must not share a token "
+                              "with the lanes it reviews")
     # A Claude token secret that is also a PAT secret would hand the PAT to the agent job.
     pats = {"AGENT_PAT"} | {lane.agent_pat_secret for lane in lanes}  # AGENT_PAT is always passed as fallback
     claude = claude_secrets(cfg) | {cfg.planner_token_secret, cfg.review_token_secret, cfg.security_token,

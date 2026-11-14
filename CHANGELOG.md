@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.4] - unreleased
+## [0.2.0] - unreleased
 
 ### Added
 
@@ -36,6 +36,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   until a person promotes it. It skips when only one lane merged and nothing depends on it, or when every PR in
   the window was already reduced. Run `gh nightshift init --regenerate` to add its timer and the planner's new
   `pull-requests: read` permission.
+- The planner sees the repo review rules and writes tickets the code can pass, deferring a doc contract that
+  conflicts with a rule as a product decision.
+- A new agent status, `decision`: when a review failed because the ticket itself keeps the code from passing,
+  the next attempt asks a person (`needs-human`, not retried) instead of trying the same contract again.
+
+### Security
+
+Fixes for every open item of the November security review (H1, H2, H5, M4 to M10). Run
+`gh nightshift init --regenerate` after upgrading, then `gh nightshift doctor`.
+
+- `init` pins `tool_ref` to the release's 40-character commit SHA (the tag stays as a comment), and `doctor`
+  counts only a SHA as pinned: a moved tag can no longer change the code that runs with the PAT (H1).
+- Optional `environment` for the jobs that hold the PAT or App key, so the credential can be an environment
+  secret limited to the default branch. `doctor` warns while it is a repository secret and checks the
+  environment (H2).
+- Lane option `sudo: false` removes sudo (and Docker, on lanes without a database) before the agent runs on
+  GitHub-hosted runners. Processes the agent leaves behind are stopped (GitHub-hosted runners) before the
+  fallback token is used and before its commits are packaged. The
+  agent's output artifact has an unguessable name and publish downloads it by id, so one lane cannot hand
+  another lane's publish job its files. `doctor` warns about Actions caches in workflows that hold secrets (H5).
+- The reviewer, security reviewer, planner and red-team scan read their Claude token from a pipe instead of
+  their environment, may not read `/proc` or `/sys`, and their output is searched for the token before anything
+  is posted. A ticket written by someone without write access is fenced as data for the reviewer (M4).
+- Every action is pinned to a commit SHA, `CLAUDE_CODE_VERSION` defaults to 2.1.319 instead of `latest`, and
+  the App token reaches only the steps that name it (a step output, not `GITHUB_ENV`) (M5).
+- `AGENT_RULES.md` and `CLAUDE.local.md` are built-in protected paths; protected paths accept globs
+  (`**/package.json`); `init` writes a default `risk.approve_paths` for dependency manifests, lockfiles,
+  package-manager, editor, hook and container config; `doctor` lists local scripts that workflows with
+  secrets run (M6).
+- `setup` binds the required checks to the GitHub Actions app, so no other app or commit status can pass them;
+  `doctor` warns about a read/write default `GITHUB_TOKEN`, Actions being allowed to approve PRs,
+  `pull_request_target` in CI and checks that any app could pass; the picker refuses to merge while main does
+  not enforce the required checks (`merge.allow_unenforced: true` accepts that) (M7).
+- `/night-shift plan` on an issue written by someone without write access fences that issue apart from the
+  request and files its tickets as `proposed`; with `planner.refill_below` on, `planner.docs` are protected (M8).
+- The fallback Claude token moved to its own step, which runs only when the lane's token could not start a run;
+  `config` rejects a fallback, review or security token that is another lane's or the planner's (M9).
+  **Breaking:** a config whose `review_token_secret` or `security.claude_token_secret` is also a lane's Claude
+  token no longer loads; give the reviewers their own token.
+- Cross-repo dependencies are read only for repos in the new `cross_repos` list (default: none), and
+  `check-pat` fails on a classic PAT (M10).
+
+## [0.1.4] - 2026-11-10
+
+### Added
 
 - `runners.github` and `runners.agent` in the config choose the runners the reusable workflows use (default
   `ubuntu-latest`), so lanes can run on self-hosted machines. The jobs that hold the PAT or the App key and the

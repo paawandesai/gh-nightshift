@@ -67,8 +67,12 @@ owner's second account). The caller passes it by explicit name as `claude_token_
 three secrets. It is handled exactly like the lane's own token: the agent job uses it only when the first token did
 not start a run (no structured output, fewer than 2 turns, no commits: a usage limit, an expired or revoked token),
 hands it to Claude on the same pipe, keeps it out of the agent's environment, and the token guard searches for both
-tokens. The pick job only checks that one of the two is set. Config refuses a fallback that is also a PAT secret or
-the lane's own token, and `doctor` fails if the caller stops passing it. A fallback adds a second credential an agent
+tokens. The fallback lives only in its own step, `Run agent (fallback token)`, which runs only when the first step
+says so; a run that does not need it never holds it. That decision reads `result.json` and the commit count, which
+the agent writes, so an agent can force the fallback run, but it cannot reach the fallback token from the first
+step. The pick job only checks that one of the two is set. Config refuses a fallback that is also a PAT secret, the
+lane's own token, another lane's token, the planner's or a reviewer's, and `doctor` fails if the caller stops
+passing it. A fallback adds a second credential an agent
 could find (see known gap 2). Check that using a second account this way fits your Claude plan's terms.
 
 **GitHub App mode.** With `auth.mode: app`, every caller passes the App's private key (`NIGHT_SHIFT_APP_KEY`)
@@ -76,8 +80,9 @@ instead of `AGENT_PAT`, so a lane still receives exactly two secrets. Only the j
 receive the key. Each mints an installation token (`nightshift/app.py`): a JWT signed with `openssl`, then
 `POST /app/installations/{id}/access_tokens` limited to this repository and to Contents, Issues, Pull requests
 write, Actions and Metadata read. Workflows is never requested, and a token that comes back with Workflows,
-Administration, Secrets or Environments is refused. The token is masked in the log and exported only to later
-steps of the same job, so the agent job never holds the key or the token. It expires after an hour.
+Administration, Secrets or Environments is refused. The token is masked in the log and passed as a step output
+into only the steps that name it (never `GITHUB_ENV`, which would reach every later step and action), so the
+agent job never holds the key or the token. It expires after an hour.
 
 **The PAT.** It should be a fine-grained token for this repo only, with:
 
@@ -95,7 +100,8 @@ steps of the same job, so the agent job never holds the key or the token. It exp
   minted token lacks it.
 
 Every lane run executes `check-pat` before picking. It fails the run if the PAT does not authenticate or if
-a classic PAT has the `workflow` scope. See the gaps: a fine-grained PAT's permissions cannot be read back.
+it is a classic PAT (which reaches every repository its owner can). See the gaps: a fine-grained PAT's
+permissions cannot be read back.
 
 **Commit identity.** The agent job sets `user.name github-actions[bot]` and the matching noreply email before
 Claude runs, so agent commits are authored as github-actions[bot]. They are not cryptographically signed. The
@@ -171,11 +177,12 @@ checkout of main. It lists the changed files with `git -c core.quotePath=false d
 origin/main...<branch>` (so a rename lists both the old and the new path, and unusual names are not quoted) and
 rejects the whole run, pushing nothing, if any file is under:
 
-`.github/`, `.claude/`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `.night-shift/`
+`.github/`, `.claude/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENT_RULES.md`, `.mcp.json`, `.night-shift/`
 
-plus every entry in `protected_paths`. Paths are normalised first; one that escapes the repo with `..` counts
-as protected. `CLAUDE.md`, `AGENTS.md`, `.mcp.json` and `.claude/` are protected at any depth, because Claude
-Code reads nested copies. The built-in list cannot be removed by config
+plus every entry in `protected_paths`, and `planner.docs` while `planner.refill_below` is on (the planner then
+files tickets from them unattended). Paths are normalised first; one that escapes the repo with `..` counts
+as protected. `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `.mcp.json` and `.claude/` are protected at any depth,
+because Claude Code reads nested copies. An entry may be a glob (`**/package.json` matches at any depth). The built-in list cannot be removed by config
 (`config.BUILTIN_PROTECTED`). Agents therefore cannot change CI, the review workflow, their own rules or
 the night-shift config. The planner turns tickets that touch these paths, or `planner.human_paths`, into
 `human` tickets that agents skip.
@@ -292,11 +299,11 @@ auto-merge. The risk is that a wrong but plausible change lands on main overnigh
 
 ## Known gaps
 
-These are not enforced by v0.1. They are listed so you can judge the risk yourself.
+These are not enforced. They are listed so you can judge the risk yourself.
 
 1. **A fine-grained PAT's Workflows permission cannot be checked.** GitHub does not expose fine-grained
-   permissions, so `check-pat` and `doctor` reject only a classic PAT with the `workflow` scope. For
-   fine-grained tokens, they warn and ask you to confirm by hand.
+   permissions, so `check-pat` and `doctor` reject classic PATs and can only ask you to confirm a fine-grained
+   token's permissions by hand.
 2. **The agent has a full shell and network.** The default `CLAUDE_PERMISSION_FLAGS` is
    `--dangerously-skip-permissions`. Two things limit what that means for the lane's Claude token:
    - Claude reads the token from a pipe, not from its environment, so the commands it runs (tests, package
@@ -314,10 +321,11 @@ These are not enforced by v0.1. They are listed so you can judge the risk yourse
    `pull_request` jobs get your repository secrets. Keep secrets out of test jobs.
 4. **The reviewer reads untrusted code.** Text in the PR can try to talk the reviewer into a `pass`. It
    cannot write anything, and the `test` check is still required, but the gate is a model, not a proof.
-5. **Moving `tool_ref`.** By default, the workflows and scripts come from `paawandesai/gh-nightshift@main`
-   and run with your PAT. `init` pins `tool_ref` to the release tag of the extension that ran it. A tag can be
-   moved by whoever can push to the tool repo; a 40-character commit SHA cannot. Pin a SHA (ideally of a fork
-   your organization owns) when the App key or PAT matters. `doctor` warns only while it follows a branch.
+5. **The tool repository is the root of trust.** The workflows and scripts come from
+   `paawandesai/gh-nightshift` and run with your PAT or App key. `init` pins `tool_ref` to the 40-character
+   commit of the release that ran it, and `doctor` warns about a tag or a branch, but a personal account still
+   publishes the code. Organizations that care should fork the tool and point `uses:` and `tool_ref` at their
+   fork's SHA.
 6. **Commits are not signed.** The github-actions[bot] author is set with `git config` in a job the agent
     controls, so the author field is not proof of origin. The PR author (the PAT login) is.
 7. **Repo collaborators with write access are trusted.** They can label issues `night-safe`, edit
@@ -328,35 +336,45 @@ These are not enforced by v0.1. They are listed so you can judge the risk yourse
 9. **The digest webhook URL is a bearer secret.** Anyone holding a Slack or Discord webhook URL can post to
    that channel. It is passed by explicit name (`digest.webhook_secret`) only to the digest workflow, never
    to a lane, and the tool never prints it, but it lives in the same job as the PAT.
-10. **The PAT and the App key are repository secrets.** Any workflow on any branch can read a repository
-    secret, so everyone with write access can. An App private key can mint tokens for every repository the App
-    is installed on, with all of the App's permissions; the one-repo limit is chosen by the code that mints.
-    Use one App per repository, or store the key as an environment secret limited to the default branch.
+10. **The PAT and the App key are repository secrets unless you set `environment`.** Any workflow on any
+    branch can read a repository secret, so everyone with write access can. An App private key can mint tokens
+    for every repository the App is installed on, with all of the App's permissions; the one-repo limit is
+    chosen by the code that mints. Use one App per repository, and keep the credential in an environment
+    limited to the default branch (README, Credentials in an environment). `doctor` warns until you do.
 11. **Who labelled a ticket, and what it said then, is not checked.** The picker trusts the ready label
     whoever applied it (a bot, an issue template of your own), and the author can edit the title and body
     afterwards. Tickets from organization members without write access are read unfenced.
 12. **Agents talk to each other.** Hand-offs and notes written by one agent appear in another's task file in
     the section marked trusted, and a note can go to any open issue. Their text is single-line and cannot
     forge markers, but it is still an agent's text.
-13. **The agent job runs on the default branch's ref with sudo.** A process with root on the runner can read
-    the job's own credentials for the Actions cache and artifacts. Do not restore Actions caches in workflows
-    that hold secrets, and treat the cache of the default branch as writable by agents.
-14. **The reviewer and the planner hold their Claude token in the environment** and can read any file on
-    their runner. A reviewer talked into it could quote the token in its review comment.
-15. **Actions and Claude Code are not pinned to commits.** The workflows use `actions/checkout@v4`,
-    `upload-artifact@v4`, `download-artifact@v4` and `@anthropic-ai/claude-code@latest` (set the repo variable
-    `CLAUDE_CODE_VERSION` to pin the last one).
-16. **Protected paths cover the night shift's own files only.** `AGENT_RULES.md`, `progress/`, your docs,
-    dependency manifests and lockfiles, package-manager config, scripts your workflows call, and editor or
-    container config are not protected. Add what matters to `protected_paths` or `risk.approve_paths`.
-17. **Your repo's Actions settings are not checked.** If the default `GITHUB_TOKEN` is read/write, agent code
-    running in your CI can post commit statuses and comments. The required checks are registered by name and
-    are not tied to the GitHub Actions app. In `queue` merge mode GitHub writes the squash message, so closing
-    keywords in an agent's commit messages work there.
-18. **The planner's tickets are ready at once.** In review mode it reads the issue's title and body, which an
-    outsider may have written; with refill on it plans from docs that agents can edit.
-19. **Cross-repo `Blocked by`** makes the night shift copy the title and `## Interface` section of an issue
-    from any repository its token can read. Use a fine-grained PAT or the App, which reach one repository.
+13. **The agent job runs on the default branch's ref, with sudo unless the lane sets `sudo: false`.** A
+    process with root on the runner can read the job's own credentials for the Actions cache and artifacts.
+    `sudo: false` removes sudo (and Docker, except on lanes with `postgres_image`) after setup, on GitHub-hosted
+    runners only. Leftover processes are stopped (GitHub-hosted runners only: a self-hosted machine may run
+    another job as the same user) and the agent's artifact is downloaded by id, but do not
+    restore Actions caches in workflows that hold secrets (`doctor` warns), and treat the cache of the default
+    branch as writable by agents.
+14. **The reviewer, planner and red-team scan can read files on their runner.** Their token reaches Claude on
+    a pipe, `Read` is denied under `/proc` and `/sys` (where the step's environment holds it), and their output
+    is searched for the token before it is posted, but the deny rules are Claude Code's, not the kernel's.
+15. **Pinned versions need updating by hand.** Actions are pinned to commit SHAs and Claude Code to a fixed
+    version (`CLAUDE_CODE_VERSION`, default 2.1.319), so fixes in them arrive only with a gh-nightshift release
+    or when you raise the variable. npm resolves Claude Code's own dependencies at install time.
+16. **Protected paths cover the night shift's own files.** `progress/`, your docs and other agent-read files
+    are not protected. `init` writes a default `risk.approve_paths` (dependency manifests, lockfiles,
+    package-manager, editor, hook and container config), which applies in `strict` mode; configs from before
+    v0.2.0 do not have it. `doctor` lists scripts that workflows with secrets run, for `protected_paths`.
+17. **Your repo's Actions settings are yours.** `doctor` warns when the default `GITHUB_TOKEN` is read/write,
+    when Actions may approve PRs and when CI runs on `pull_request_target`, and `setup` binds the required
+    checks to the GitHub Actions app, but nothing changes those settings for you. With
+    `merge.allow_unenforced: true` the picker merges on its own reading of the checks. Agent branches
+    (`agent/**`) have no ruleset. In `queue` merge mode GitHub writes the squash message, so closing keywords in
+    an agent's commit messages work there.
+18. **The planner's tickets are ready at once when a writer asked for them.** In review mode an issue written
+    by someone without write access is fenced as an outside suggestion and its tickets are `proposed`; an issue a
+    writer wrote is planned from directly.
+19. **Cross-repo `Blocked by`** copies the title and `## Interface` section of an issue from another
+    repository, but only from repositories listed in `cross_repos`. That text is quoted as data.
 
 ## Reporting a vulnerability
 
