@@ -23,6 +23,20 @@ DEFAULT_LABELS = {
 }
 
 
+# Values written into generated workflows; the schema carries the same patterns.
+REF_RE = re.compile(r"(?!.*(?:\.\.|//|/\.|\.lock$|[/.]$))[A-Za-z0-9_][A-Za-z0-9._/+-]{0,199}")
+WORKFLOW_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()/+&:,-]{0,99}")
+MODEL_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+TZ_RE = re.compile(r"[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*")
+KEY_RULES = {
+    "main_branch": "use a git branch name (letters, digits, . _ / + -)",
+    "tool_ref": "use a gh-nightshift tag, branch or 40-character commit SHA (letters, digits, . _ / + -)",
+    "ci_workflow_name": "use the CI workflow's plain `name:` (letters, digits, spaces and . _ ( ) / + & : , -)",
+    "security.model": "use a model name or alias (letters, digits, . _ -)",
+    "timezone": "use an IANA time zone such as Europe/Berlin",
+}
+
+
 class ConfigError(ValueError):
     pass
 
@@ -270,6 +284,28 @@ def cron_ok(expr: str) -> bool:
     return len(fields) == 5 and all(cron_values(f, i) is not None for i, f in enumerate(fields))
 
 
+def tz_database_present() -> bool:
+    """False when this machine has no IANA time zone database (no system zoneinfo and no tzdata package)."""
+    import zoneinfo
+
+    try:
+        return bool(zoneinfo.available_timezones())
+    except Exception:  # pragma: no cover - a broken install counts as absent
+        return False
+
+
+def timezone_ok(name: str) -> bool:
+    """A known IANA zone. Without a tz database here nothing can be checked, so any name passes (runs fall
+    back to UTC for a zone they cannot load, and `doctor` warns)."""
+    import zoneinfo
+
+    try:
+        zoneinfo.ZoneInfo(name)
+        return True
+    except (ValueError, zoneinfo.ZoneInfoNotFoundError):
+        return not tz_database_present() and bool(TZ_RE.fullmatch(name))
+
+
 def parse(data: dict) -> Config:
     if not isinstance(data, dict):
         raise ConfigError("config must be a mapping")
@@ -397,12 +433,22 @@ def parse(data: dict) -> Config:
         raise ConfigError("digest.webhook_secret must be a secret name (A-Z, 0-9, _)")
     if cfg.digest_webhook_secret in pats_or_claude(cfg):
         raise ConfigError("digest.webhook_secret must not be a PAT or Claude token secret")
+    # These reach generated workflows (W-04). The schema patterns use `$`, which also matches before a final
+    # newline, so the full match is checked here too.
+    for key, value, rx in (("main_branch", cfg.main_branch, REF_RE), ("tool_ref", cfg.tool_ref, REF_RE),
+                           ("ci_workflow_name", cfg.ci_workflow_name, WORKFLOW_NAME_RE),
+                           ("security.model", cfg.security_model, MODEL_RE), ("timezone", cfg.timezone, TZ_RE)):
+        if value and not rx.fullmatch(value):
+            raise ConfigError(f"{key} {value!r} is not allowed: {KEY_RULES[key]}")
+    if not timezone_ok(cfg.timezone):
+        raise ConfigError(f"timezone {cfg.timezone!r} is not an IANA time zone (e.g. UTC, Europe/Berlin, "
+                          "America/New_York)")
+    if not cron_ok(cfg.planner_schedule):  # checked even while unused, so it cannot break a later switch-on
+        raise ConfigError(f"planner.schedule {cfg.planner_schedule!r} is not a 5-field cron expression")
     if cfg.reduce_enabled:
         if not cron_ok(cfg.reduce_schedule):
             raise ConfigError(f"reduce.schedule {cfg.reduce_schedule!r} is not a 5-field cron expression")
         if cfg.planner_refill_below > 0:
-            if not cron_ok(cfg.planner_schedule):
-                raise ConfigError(f"planner.schedule {cfg.planner_schedule!r} is not a 5-field cron expression")
             if cron_values(cfg.reduce_schedule.split()[0], 0) & cron_values(cfg.planner_schedule.split()[0], 0):
                 raise ConfigError("reduce.schedule must use minutes planner.schedule never uses (the planner tells "
                                   "the two timers apart by cron, so they must never fire on the same tick)")

@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 from . import review_rules, scaffold
 from .rules import path_is_protected
-from .config import CONFIG_PATH, Config, ConfigError, load
+from .config import CONFIG_PATH, Config, ConfigError, load, tz_database_present
 from .gh import GH, GHError
 from .repo_setup import ACTIONS_APP_ID, existing_secrets, get_variable
 
@@ -119,6 +119,9 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
         out.append(Check(OK, f"{CONFIG_PATH} is valid ({len(cfg.lanes)} lanes: {', '.join(cfg.lane_names)})"))
     except ConfigError as err:
         return None, [Check(FAIL, str(err), "run `gh nightshift init`, or fix the file")]
+    if cfg.timezone != "UTC" and not tz_database_present():
+        out.append(Check(WARN, f"no time zone database here, so timezone {cfg.timezone!r} was not checked; a runner "
+                               "without one counts nights in UTC", "pip install tzdata, or set timezone: UTC"))
     wf = root / LANE_WORKFLOW
     if not wf.is_file():
         out.append(Check(FAIL, f"{LANE_WORKFLOW} is missing", "run `gh nightshift init --regenerate`"))

@@ -16,8 +16,8 @@
       ]
     },
     "main_branch": {
-      "type": "string",
-      "minLength": 1
+      "$ref": "#/$defs/ref",
+      "description": "The branch lanes merge into (default main)."
     },
     "ci_workflow": {
       "type": "string",
@@ -37,7 +37,9 @@
       "pattern": "^[a-z0-9][a-z0-9_-]{0,30}$"
     },
     "timezone": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$",
+      "description": "IANA time zone (default UTC); a night runs noon to noon here. Unknown zones are refused when the config loads."
     },
     "protected_paths": {
       "type": "array",
@@ -282,7 +284,8 @@
     },
     "ci_workflow_name": {
       "type": "string",
-      "description": "The `name:` of the CI workflow (for workflow_run triggers; default read from the file, else CI)."
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()/+&:,-]{0,99}$",
+      "description": "The `name:` of the CI workflow (for workflow_run triggers; default read from the file, else CI). Letters, digits, spaces and . _ ( ) / + & : , - only."
     },
     "bot_login": {
       "type": "string",
@@ -313,7 +316,7 @@
       "description": "Logins of per-contributor PATs (lanes[].agent_pat_secret). Their ns markers and PRs are trusted like the shared PAT's. Default: only the login of the PAT the job runs with."
     },
     "tool_ref": {
-      "type": "string",
+      "$ref": "#/$defs/ref",
       "description": "gh-nightshift ref the caller workflows pin (default main; pin a tag or SHA)."
     },
     "runners": {
@@ -421,7 +424,7 @@
           "description": "Claude token for the security reviewer; default review_token_secret"
         },
         "model": {
-          "type": "string",
+          "$ref": "#/$defs/model",
           "description": "default: models.review"
         },
         "paths": {
@@ -486,7 +489,7 @@
           "description": "Claude token for the scan; default security.claude_token_secret, then review_token_secret"
         },
         "model": {
-          "type": "string",
+          "$ref": "#/$defs/model",
           "description": "default: security.model, then models.review"
         }
       }
@@ -527,6 +530,11 @@
     "model": {
       "type": "string",
       "pattern": "^[A-Za-z0-9._-]{1,64}$"
+    },
+    "ref": {
+      "type": "string",
+      "pattern": "^(?!.*(\\.\\.|//|/\\.|\\.lock$|[/.]$))[A-Za-z0-9_][A-Za-z0-9._/+-]{0,199}$",
+      "description": "A git ref: branch, tag or 40-character commit SHA (letters, digits, . _ / + -; no `..`, `//`, part starting with a dot, or trailing `/`, `.` or `.lock`)."
     }
   }
 }

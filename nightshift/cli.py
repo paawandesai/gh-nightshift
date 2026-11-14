@@ -1060,6 +1060,14 @@ def cmd_audit(ctx: Ctx) -> int:
     out_dir = Path(a.out_dir or f"audit-seed{a.seed}")
     prs = audit.sample(ctx.gh, a.sample, a.seed, [a.lane] if a.lane else None, ctx.cfg.bot_login,
                        tuple(ctx.cfg.trusted_logins))
+    if not prs:
+        ctx.say(f"nothing to audit: no merged agent PRs found{' in lane ' + a.lane if a.lane else ''}; no files written")
+        return 0
+    if ctx.gh.dry_run:  # a dry run reads GitHub but writes no files and runs no tests
+        ctx.say(f"dry run: would sample {len(prs)} merged agent PR(s) with seed {a.seed} "
+                f"({', '.join('#' + str(p['number']) for p in prs)}) and write evidence to {out_dir}/ and "
+                f"{out_dir / 'audit.csv'}; no files written")
+        return 0
     rows = audit.collect_evidence(ctx.gh, prs, str(out_dir))
     for row in rows:
         if a.test_cmd:

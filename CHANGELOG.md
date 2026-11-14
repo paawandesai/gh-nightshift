@@ -78,6 +78,25 @@ Fixes for every open item of the November security review (H1, H2, H5, M4 to M10
 - Cross-repo dependencies are read only for repos in the new `cross_repos` list (default: none), and
   `check-pat` fails on a classic PAT (M10).
 
+Fixes from the wider gap test (W-03, W-04, W-06, W-07, W-08):
+
+- Built-in protected names match in any case (`.GitHub/`, `claude.md`, `.Claude/`, `AGENTS.MD`, `.MCP.json`,
+  `.Night-Shift/`, `agent_rules.md`): on a macOS or Windows clone those spellings are the real files. Your own
+  `protected_paths` entries stay case-sensitive (W-03).
+- **Breaking:** values written into generated workflows are checked when the config loads (W-04).
+  `main_branch` and `tool_ref` must be git ref names (letters, digits, `. _ / + -`; no `..`, `//`, part starting
+  with a dot, or trailing `/`, `.` or `.lock`); `ci_workflow_name` may hold only letters, digits, spaces and
+  `. _ ( ) / + & : , -`; `security.model` takes the same pattern as `models.*`. A config using `${{ ... }}` or
+  other characters there no longer loads: write the plain branch, ref, workflow name or model alias.
+- **Breaking:** `timezone` must be a known IANA zone (such as `Europe/Berlin`) and `planner.schedule` a 5-field
+  cron expression, checked at load even while refill or reduce is off (W-06). Before, an unknown zone silently
+  counted nights in UTC. Fix the value, or remove the key for the default. With no time zone database on the
+  machine any zone-shaped name still loads, and `doctor` warns.
+- `gh nightshift audit` on a repo without merged agent PRs prints one line instead of a traceback, `--dry-run`
+  only lists the PRs it would sample and writes no files, and the CSV's folder is created when missing (W-07).
+- Every config key is now in the README's Config reference and in `examples/config.yml`, and
+  `tests/test_docs.py` fails when the schema gains a key that is in neither (W-08).
+
 ## [0.1.4] - 2026-11-10
 
 ### Added

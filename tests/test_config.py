@@ -140,3 +140,40 @@ class TokenOverlap(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "fallback_token_secret CLAUDE_TOKEN_REVIEW"):
             loads(self.TWO.replace("CLAUDE_TOKEN_A\n", "CLAUDE_TOKEN_A\n    fallback_token_secret: CLAUDE_TOKEN_REVIEW\n", 1))
         loads(self.TWO.replace("CLAUDE_TOKEN_A\n", "CLAUDE_TOKEN_A\n    fallback_token_secret: CLAUDE_TOKEN_A2\n", 1))
+
+
+class WorkflowValues(unittest.TestCase):
+    """W-04 and W-06: values that reach generated workflows or run-time logic are checked when the config loads."""
+
+    def load_with(self, extra: str):
+        return loads(MINIMAL + extra)
+
+    def test_expressions_and_odd_refs_are_refused(self):
+        bad = ["main_branch: '${{ github.event.x }}'", "main_branch: 'a..b'", "main_branch: '-x'",
+               "main_branch: 'main/'", "main_branch: 'x.lock'", "main_branch: 'a/.b'", 'main_branch: "main\\n"',
+               "tool_ref: '${{ x }}'", "tool_ref: 'v1 2'", "ci_workflow_name: '${{ x }}'",
+               "ci_workflow_name: 'CI\" x'", "ci_workflow_name: ' CI'", "security:\n  model: '${{ x }}'",
+               "security:\n  model: 'op us'", "redteam:\n  model: '${{ x }}'", "timezone: Mars/Olympus",
+               "timezone: '../etc/passwd'", "timezone: '${{ x }}'", "planner:\n  schedule: whenever",
+               "planner:\n  schedule: '61 * * * *'"]
+        for extra in bad:
+            with self.subTest(extra=extra), self.assertRaises(ConfigError):
+                self.load_with(extra + "\n")
+
+    def test_ordinary_values_pass(self):
+        sha = "7097423d839d36c0d37573bd9330581798b1b460"
+        good = ["main_branch: release/1.x", "main_branch: develop", f"tool_ref: {sha}", "tool_ref: v0.2.0",
+                "tool_ref: build/v0.1", "ci_workflow_name: 'Build & Test (linux)'", "ci_workflow_name: CI / test",
+                "security:\n  model: claude-opus-4-1", "timezone: America/New_York", "timezone: UTC",
+                "planner:\n  enabled: false\n  schedule: '5 */2 * * 1-5'"]
+        for extra in good:
+            with self.subTest(extra=extra):
+                self.load_with(extra + "\n")
+
+    def test_unknown_timezone_passes_without_a_tz_database(self):
+        from unittest import mock
+        with mock.patch("zoneinfo.ZoneInfo", side_effect=__import__("zoneinfo").ZoneInfoNotFoundError("x")), \
+                mock.patch("nightshift.config.tz_database_present", return_value=False):
+            self.assertEqual(self.load_with("timezone: Europe/Berlin\n").timezone, "Europe/Berlin")
+            with self.assertRaises(ConfigError):  # still a name, never a path or an expression
+                self.load_with("timezone: '${{ x }}'\n")
