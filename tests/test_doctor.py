@@ -451,3 +451,73 @@ class DoctorToolRepoTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DoctorMergeGateTests(DoctorBase):
+    """W-01: CI that gives agent-written code a token able to fake the gate; W-02: a dropped review gate."""
+
+    def write_wf(self, name, head, perms):
+        (self.root / f".github/workflows/{name}").write_text(
+            f"name: X\n{head}{perms}jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pytest\n",
+            encoding="utf-8")
+
+    def gate_warnings(self):
+        from nightshift.doctor import WARN, workflow_checks
+        return [c for c in workflow_checks(self.root, self.cfg) if c.level == WARN and "agent-written code" in c.what]
+
+    def test_ci_granting_gate_writes_warns(self):
+        self.write_wf("ci.yml", "on:\n  pull_request:\n",
+                      "permissions:\n  contents: read\n  statuses: write\n  checks: write\n  pull-requests: write\n")
+        (warning,) = self.gate_warnings()
+        self.assertIn("checks, pull-requests, statuses", warning.what)
+        self.assertIn("ci.yml", warning.what)
+        rc, text = self.doctor()
+        self.assertIn("! .github/workflows/ci.yml runs agent-written code", text)
+
+    def test_each_gate_write_and_write_all_warn(self):
+        for perms in ("permissions:\n  statuses: write\n", "permissions: write-all\n",
+                      "permissions:\n  checks: 'write'\n", "permissions:\n  pull-requests: write\n"):
+            self.write_wf("ci.yml", "on: [push, pull_request]\n", perms)
+            self.assertEqual(len(self.gate_warnings()), 1, perms)
+
+    def test_job_level_permissions_count(self):
+        (self.root / ".github/workflows/ci.yml").write_text(
+            "on:\n  pull_request:\njobs:\n  test:\n    permissions:\n      statuses: write\n    runs-on: x\n"
+            "    steps:\n      - run: pytest\n", encoding="utf-8")
+        self.assertEqual(len(self.gate_warnings()), 1)
+
+    def test_other_pull_request_workflow_warns(self):
+        self.write_wf("lint.yml", "on:\n  - pull_request\n", "permissions:\n  pull-requests: write\n")
+        (warning,) = self.gate_warnings()
+        self.assertIn("lint.yml", warning.what)
+
+    def test_read_only_or_non_pr_workflows_do_not_warn(self):
+        self.write_wf("ci.yml", "on:\n  pull_request:\n", "permissions:\n  contents: read\n  checks: read\n")
+        self.write_wf("release.yml", "on:\n  push:\n    tags: ['v*']\n", "permissions:\n  contents: write\n  checks: write\n")
+        self.write_wf("label.yml", "on:\n  issues:\n", "permissions:\n  pull-requests: write\n"
+                      "# reads github.event.pull_request.number in a step\n")
+        self.assertEqual(self.gate_warnings(), [])
+
+    def test_generated_night_shift_workflows_are_not_flagged(self):
+        # night-shift-review.yml grants pull-requests: write by design and runs no agent code.
+        self.assertEqual(self.gate_warnings(), [])
+
+    def test_review_gate_not_required_fails(self):
+        self.write_repo(config_text(self.lanes, self.mode, required_checks=["test"]))
+        self.fake = self.good_fake()
+        rc, text = self.doctor()
+        self.assertEqual(rc, 1)
+        self.assertIn("review / verdict", self.fix_after(text, "does not include `review / verdict`"))
+
+    def test_security_gate_not_required_fails(self):
+        from nightshift.doctor import FAIL, rules_checks
+        self.cfg.security_enabled = True
+        self.cfg.required_checks = ["test", "review / verdict"]  # load() adds it; a hand-built config may not
+        fails = [c.what for c in rules_checks(self.root, self.cfg) if c.level == FAIL]
+        self.assertTrue(any("`review / security`" in w for w in fails), fails)
+
+    def test_default_and_security_configs_pass_the_gate_checks(self):
+        from nightshift.doctor import FAIL, rules_checks
+        for extra in ({}, {"security": {"enabled": True}}):
+            cfg = loads(config_text(self.lanes, self.mode, **extra))
+            self.assertFalse([c for c in rules_checks(self.root, cfg) if c.level == FAIL and "required_checks" in c.what])

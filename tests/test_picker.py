@@ -560,3 +560,88 @@ class HandOffs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MergeGateReading(unittest.TestCase):
+    """W-01 and W-05: only a check run named in full stands in for a review gate, and a gate passes only on success."""
+
+    REQ = ["test", "review / verdict"]
+    TEST_OK = {"name": "test", "status": "completed", "conclusion": "success"}
+
+    def state(self, runs, statuses=(), req=None):
+        from nightshift.rules import checks_state
+        return checks_state(list(runs), list(statuses), req or self.REQ)
+
+    def test_commit_status_never_stands_in_for_the_review_gate(self):
+        forged = [{"context": "review / verdict", "state": "success"}]
+        self.assertEqual(self.state([self.TEST_OK], forged), "pending")
+        sec = [{"context": "review / security", "state": "success"}]
+        self.assertEqual(self.state([*GREEN], sec, [*self.REQ, "review / security"]), "pending")
+
+    def test_commit_status_still_satisfies_an_ordinary_check(self):
+        gate = GREEN[1]
+        self.assertEqual(self.state([gate], [{"context": "test", "state": "success"}]), "passed")
+
+    def test_forged_status_with_real_gate_pending_or_passed(self):
+        forged = [{"context": "review / verdict", "state": "success"}]
+        running = {"name": "review / verdict", "status": "in_progress", "conclusion": None}
+        self.assertEqual(self.state([self.TEST_OK, running], forged), "pending")
+        self.assertEqual(self.state(GREEN, forged), "passed")
+
+    def test_gate_needs_its_full_name(self):
+        short = {"name": "verdict", "status": "completed", "conclusion": "success"}
+        self.assertEqual(self.state([self.TEST_OK, short]), "pending")
+        nested = {"name": "ci / review / verdict", "status": "completed", "conclusion": "success"}
+        self.assertEqual(self.state([self.TEST_OK, nested]), "pending")
+
+    def test_ordinary_checks_still_match_a_reusable_workflow_spelling(self):
+        self.assertEqual(self.state([{**self.TEST_OK, "name": "ci / test"}, GREEN[1]]), "passed")
+
+    def test_skipped_or_neutral_test_passes_like_branch_protection(self):
+        for conclusion in ("skipped", "neutral"):
+            self.assertEqual(self.state([{**self.TEST_OK, "conclusion": conclusion}, GREEN[1]]), "passed", conclusion)
+
+    def test_skipped_or_neutral_gate_fails(self):
+        from nightshift.rules import close_reason, failed_check_names
+        for conclusion in ("skipped", "neutral"):
+            runs = [self.TEST_OK, {**GREEN[1], "conclusion": conclusion}]
+            self.assertEqual(self.state(runs), "failed", conclusion)
+            self.assertEqual(close_reason(failed_check_names(runs, [], self.REQ)), "verdict_failed")
+
+    def test_gate_that_is_not_required_may_be_skipped(self):
+        """With security off, the review workflow's `security` job is skipped on every PR; that must not fail it."""
+        skipped_security = {"name": "review / security", "status": "completed", "conclusion": "skipped"}
+        self.assertEqual(self.state([*GREEN, skipped_security]), "passed")
+        self.assertEqual(self.state([*GREEN, skipped_security], req=[*self.REQ, "review / security"]), "failed")
+
+    def test_picker_does_not_merge_on_a_forged_status(self):
+        f = FakeGitHub()
+        f.workflow_runs = list(GREEN_MAIN)
+        ready(f, 1)
+        f.add_pull(10, sha="s1")
+        f.check_runs["s1"] = [self.TEST_OK]
+        f.statuses["s1"] = [{"context": "review / verdict", "state": "success"}]
+        self.assertIn("still in review", decide(f)["reason"])
+        self.assertFalse([c for c in f.writes("PUT") if "/merge" in c[1]])
+
+    def test_picker_closes_pr_whose_gate_was_skipped(self):
+        f = FakeGitHub()
+        f.workflow_runs = list(GREEN_MAIN)
+        ready(f, 1)
+        f.add_pull(10, sha="s1")
+        f.check_runs["s1"] = [self.TEST_OK, {**GREEN[1], "conclusion": "skipped"}]
+        decide(f)
+        self.assertEqual(f.pulls[10]["state"], "closed")
+        self.assertEqual(ns.pr_reason(f.comments[10], BOT), "verdict_failed")
+
+    def test_actions_jobs_fallback_still_reads_the_gate(self):
+        """Fine-grained PATs get 403 on check runs; the jobs of the PR's workflow runs carry the same names, so a
+        forged status cannot stand in for the gate there either, and the real job still passes it."""
+        for jobs, statuses, want in (([self.TEST_OK], [{"context": "review / verdict", "state": "success"}], "pending"),
+                                     (list(GREEN), [], "passed")):
+            f = FakeGitHub()
+            f.forbidden.add(r"commits/[^/]+/check-runs")
+            f.workflow_runs.append({"id": 501, "event": "pull_request", "head_sha": "s1", "status": "completed"})
+            f.jobs[501] = jobs
+            runs = f.gh(out=io.StringIO()).check_runs("s1")
+            self.assertEqual(self.state(runs, statuses), want)
