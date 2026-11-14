@@ -217,6 +217,7 @@ outsider cannot forge attempt counts, unblock an issue or steer work.
 | `redteam` | night-log issue | A red-team scan: `sha` (the commit it reached) and `base` |
 | `redteam-finding` | draft security advisory or `security` issue | The finding's fingerprint `fp` (title + file), `wk` (CWE + file), `sha` and, with validation on, `validated` (the verdict), so it is filed once |
 | `redteam-skip` | night-log issue | `fps`: fingerprints of findings whose repro test did not fail, so later scans skip them (a full scan tries them again) |
+| `redteam-shadow` | night-log issue | `fps`: fingerprints a `redteam.level: 0` run already validated (any verdict), so later level-0 scans do not validate them again. Ignored at level 1 and by a full scan |
 
 **Hand-off.** When a PR merges, the picker posts a hand-off comment on every open issue whose `Blocked by`
 line lists the merged issue (for PRs merged in the last 72 hours). The comment gives the interface as built
@@ -393,16 +394,26 @@ the model, runs that test twice and decides:
 | `not_testable` | the model says the runner lacks what the test needs | files it labelled `unconfirmed` |
 
 A finding with no result yet (more than `max_per_run` in one night, or a validation job that failed) is not
-filed, and the scan does not record its position, so the next run covers the range again. `level: 0` is a shadow
-mode: everything runs, the night log reports each verdict, nothing is filed and the scan's position does not
-move. Start there, read a few nights of results, then set `level: 1`. On a public repo validation stays off and
-findings are filed as before.
+filed, and the scan does not record its position, so the next run covers the range again. Each validate job's
+result counts only for the finding that job was given: the file job works out the same list from the scan output
+and the context job's `seen.json`, so one job cannot set or overwrite the verdict of another job's finding.
+
+`level: 0` is a shadow mode: everything runs, the night log reports each verdict, nothing is filed and the scan's
+position does not move. Each verdict is recorded in a `redteam-shadow` marker, so later level-0 nights skip that
+finding and a shadow week costs one validation per finding (the scan itself still reads the whole range since
+the last recorded position). Start there, read a few nights of results, then set `level: 1`. Shadow records stop
+counting at level 1: since the position never moved during the shadow period, the first level-1 runs cover it
+again, validate those findings for real and file them (at most `max_per_run` a night; the rest wait). A full
+scan (`full: true`) ignores shadow and skip records alike and tries every finding again. On a public repo
+validation stays off and findings are filed as before.
 
 Every security pass (the scan, the validation runs and `review / security`) first reads
 `.night-shift/SECURITY.md` from the default branch: a system map, the invariants the code must keep, the checks
 that guard fixed findings, and a "Not a finding" list. `init` writes a starter. An entry under "Not a finding"
-that names a fingerprint (`fp:` and the 16 characters the night log prints) stops that finding from being
-validated or filed again. The file is under `.night-shift/`, so agents cannot change it: only a PR a person
+that names a fingerprint (`fp:` and the 16 characters the night log and each filed issue print) stops that
+finding from being validated or filed again, with or without validation. Only what a reader of the rendered
+file sees counts: a `## Not a finding` line inside a code fence is not the heading, and an entry inside an HTML
+comment (`<!-- -->`) suppresses nothing. Scans and validation runs are shown the file with its comments removed. The file is under `.night-shift/`, so agents cannot change it: only a PR a person
 merges does. Never put an open finding or an attack path in it. `doctor` warns when validation is on and a lane
 has no `test_command`, the file is missing, or the scan shares its Claude token with a lane or the reviewer.
 

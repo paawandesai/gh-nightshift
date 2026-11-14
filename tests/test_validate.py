@@ -192,15 +192,16 @@ class SealTests(unittest.TestCase):
     def test_unreadable_and_malformed_results_are_skipped(self):
         good = validate.seal(self.result(), KEY, plain)
         wrong_verdict = validate.seal(self.result(verdict="confirmed"), KEY, plain)
-        got = validate.unseal_all(["", "not base64 !!", wrong_verdict, good], KEY, plain)
-        self.assertEqual(list(got), ["0123456789abcdef"])
+        fp = "0123456789abcdef"
+        got = validate.unseal_all(["", "not base64 !!", wrong_verdict, good], KEY, plain, expected=[fp] * 4)
+        self.assertEqual(list(got), [fp])
 
     @unittest.skipUnless(HAS_OPENSSL, "no openssl")
     def test_real_openssl_round_trip_and_wrong_key(self):
         sealed = validate.seal(self.result(), KEY)
         self.assertNotIn(b"assert False", base64.b64decode(sealed))
         self.assertEqual(validate.unseal(sealed, KEY)["test_path"], "tests/t.py")
-        self.assertEqual(validate.unseal_all([sealed], "another-key-0123456789abcdef"), {})
+        self.assertEqual(validate.unseal_all([sealed], "another-key-0123456789abcdef", expected=["0123456789abcdef"]), {})
 
 
 class ContextFileTests(unittest.TestCase):
@@ -356,10 +357,17 @@ class ValidatedPublishTests(RedteamCase):
                 "test_path": "tests/test_repro.py", "test": "def test_export():\n    assert not ran_shell()",
                 "run_command": "pytest tests/test_repro.py", "output": FAIL_OUT, "notes": "calls export()", **over}
 
-    def publish_validated(self, findings, results, **kw):
-        env = {"SEAL_KEY": KEY, **{f"VALIDATION_{i}": validate.seal(r, KEY) for i, r in enumerate(results)}}
+    def seen_file(self, seen=()):
+        path = os.path.join(self.root, "seen.json")
+        Path(path).write_text(json.dumps(sorted(seen)))
+        return path
+
+    def publish_validated(self, findings, results, seen=(), **kw):
+        """Result i is what validate job i sealed (None: that job had nothing or failed)."""
+        env = {"SEAL_KEY": KEY, **{f"VALIDATION_{i}": validate.seal(r, KEY) for i, r in enumerate(results) if r}}
         with mock.patch.dict(os.environ, env):
-            return self.publish({"findings": findings}, extra=("--validation", "true"), **kw)
+            return self.publish({"findings": findings}, extra=("--validation", "true", "--seen-file", self.seen_file(seen)),
+                                **kw)
 
     def made(self):
         return [i for n, i in sorted(self.fake.issues.items()) if n != 1]
@@ -419,7 +427,8 @@ class ValidatedPublishTests(RedteamCase):
         self.assertEqual(len(self.made()), 1)
         self.assertIn("1 more wait for validation", self.log())
         self.assertEqual(self.scan_marks(), [])
-        rc, _ = self.publish_validated([FINDING, other], [self.sealed(other)])   # next run: the first is a duplicate
+        # Next run: the first is filed, so the context job lists it in seen.json and job 0 takes the second.
+        rc, _ = self.publish_validated([FINDING, other], [self.sealed(other)], seen={self.fp})
         self.assertEqual(len(self.made()), 2)
         self.assertEqual(len(self.scan_marks()), 1)
 
@@ -441,7 +450,7 @@ class ValidatedPublishTests(RedteamCase):
         env = {"SEAL_KEY": KEY, "VALIDATION_0": validate.seal(self.sealed(), "another-key-0123456789abcdef"),
                "VALIDATION_1": validate.seal(stranger, KEY)}
         with mock.patch.dict(os.environ, env):
-            rc, _ = self.publish({"findings": [FINDING]}, extra=("--validation", "true"))
+            rc, _ = self.publish({"findings": [FINDING]}, extra=("--validation", "true", "--seen-file", self.seen_file()))
         self.assertEqual((rc, self.made(), self.scan_marks()), (0, [], []))
 
     def test_without_the_flag_or_on_a_public_repo_filing_is_unchanged(self):
@@ -544,7 +553,7 @@ class ValidateJobCliTests(RedteamCase):
         name, sealed = Path(self.gh_out).read_text().strip().split("=", 1)
         self.assertEqual(name, "r0")
         with mock.patch.dict(os.environ, {"SEAL_KEY": KEY, "VALIDATION_0": sealed}):
-            rc, _ = self.publish({"findings": [FINDING]}, extra=("--validation", "true"))
+            rc, _ = self.publish({"findings": [FINDING]}, extra=("--validation", "true", "--seen-file", self.seen))
         self.assertEqual(rc, 0)
         issue, = [i for n, i in self.fake.issues.items() if n != 1]
         self.assertIn("sys.exit(1)", issue["body"])

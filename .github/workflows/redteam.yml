@@ -299,6 +299,13 @@ jobs:
           ref: ${{ inputs.tool_ref }}
           path: .nightshift-tool
           persist-credentials: false
+      # seen.json, so this job recomputes the candidate list the validate jobs used and takes each result only
+      # for its own job's finding.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.context.outputs.validate == 'true'
+        with:
+          name: redteam-context
+          path: ${{ runner.temp }}/redteam
       - name: Mint a GitHub App token (this repo only, advisories included, never Workflows)
         id: app
         if: inputs.app_id != ''
@@ -327,4 +334,5 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$SEALED" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:SEAL_KEY \
-            | python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file - --validation "$VALIDATION"
+            | python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file - --validation "$VALIDATION" \
+                --seen-file "$RUNNER_TEMP/redteam/seen.json"

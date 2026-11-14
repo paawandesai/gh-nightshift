@@ -267,15 +267,22 @@ def unseal(sealed: str, key: str, crypt: Callable[[list[str], bytes, str], bytes
             for k in ("fp", "verdict", "reason", "test_path", "test", "run_command", "output", "notes")}
 
 
-def unseal_all(sealed: list[str], key: str, crypt: Callable[[list[str], bytes, str], bytes] = _openssl) -> dict[str, dict]:
-    """Results by fingerprint. An unreadable result is skipped: its finding then waits for the next run."""
+def unseal_all(sealed: list[str], key: str, crypt: Callable[[list[str], bytes, str], bytes] = _openssl, *,
+               expected: list[str]) -> dict[str, dict]:
+    """Results by fingerprint. `sealed[i]` came from validate job i and `expected[i]` is the fingerprint of the
+    candidate that job was given (the file job recomputes the list with `candidates`, from the same scan output and
+    seen.json). Result i counts only for that finding: a job cannot set or overwrite the verdict of another job's
+    finding, or of one nobody validated. The seal step's own check is no guard here, since it reads finding.json,
+    which the model in that job can rewrite. An unreadable or mismatched result is skipped: its finding then waits
+    for the next run."""
     out: dict[str, dict] = {}
-    for item in sealed:
-        if not item.strip():
+    for i, item in enumerate(sealed):
+        if not item.strip() or i >= len(expected):
             continue
         try:
             data = unseal(item.strip(), key, crypt)
         except ValueError:
             continue
-        out[data["fp"]] = data
+        if data["fp"] == expected[i]:
+            out[data["fp"]] = data
     return out
