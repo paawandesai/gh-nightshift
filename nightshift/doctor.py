@@ -275,12 +275,19 @@ def rules_checks(root: Path, cfg: Config) -> list[Check]:
                                "agent PRs would merge without the security review",
                          f"add \"{SECURITY_CHECK}\" to required_checks in {CONFIG_PATH}, then run `gh nightshift setup`"))
     try:
-        rules = review_rules.load(root)
+        rules, notes = review_rules.load_with_notes(root)
     except review_rules.RulesError as err:
-        return [Check(FAIL, f"{err}: every review would error until it is fixed", f"fix {review_rules.RULES_PATH}")]
+        return [Check(FAIL, f"{err}: every review would error until it is fixed",
+                      f"fix the file named in the error ({review_rules.BASE_RULES_PATH} comes from "
+                      "`gh nightshift config pull`)")]
     if rules:
         sec = sum(r.security for r in rules)
-        out.append(Check(OK, f"{review_rules.RULES_PATH}: {len(rules)} rule(s), {sec} security rule(s)"))
+        org = sum(r.org for r in rules)
+        out.append(Check(OK, f"{review_rules.RULES_PATH}: {len(rules)} rule(s), {sec} security rule(s)"
+                             + (f", {org} from the org's {review_rules.BASE_RULES_PATH}" if org else "")))
+    for note in notes:
+        out.append(Check(WARN, note, "rename the local rule, or change the rule in the org repo and run "
+                                     "`gh nightshift config pull`"))
     review = root / ".github/workflows/night-shift-review.yml"
     text = review.read_text(encoding="utf-8") if review.is_file() else ""
     writes = {m.group(1) for m in re.finditer(r"([a-z-]+):\s*write\b", text)} - {"pull-requests", "issues"}

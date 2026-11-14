@@ -62,7 +62,7 @@ class ParseTests(unittest.TestCase):
         self.assertFalse(r.security)
 
     def test_example_file_parses(self):
-        rules = review_rules.load(Path(__file__).parent.parent, "examples/review-rules.yml")
+        rules = review_rules.load_file(Path(__file__).parent.parent, "examples/review-rules.yml")
         self.assertGreaterEqual(len(rules), 5)
         self.assertTrue(any(r.security for r in rules))
 
@@ -362,6 +362,125 @@ class WriteInputsWithRulesTests(unittest.TestCase):
     def test_broken_rules_file_raises(self):
         with self.assertRaises(RulesError):
             self.build(rules_text="version: 1\nrules:\n  - id: X\n")
+
+
+def yamlish_rules(text):
+    from nightshift import yamlish
+
+    return yamlish.loads(text)
+
+
+class OrgRulesTests(unittest.TestCase):
+    """Org rules come from .night-shift/base-review-rules.yml; a repo adds rules but never weakens org security."""
+
+    ORG = textwrap.dedent("""\
+        rules:
+          - id: owner-check
+            kind: regex
+            pattern: "def (delete|withdraw)"
+            question: Does it check the owner?
+            security: true
+            severity: high
+          - id: style
+            kind: regex
+            pattern: "print[(]"
+            question: Is the print intended?
+        """)
+
+    def rules(self, local: str):
+        d = tempfile.mkdtemp()
+        write(d, review_rules.BASE_RULES_PATH, self.ORG)
+        if local:
+            write(d, review_rules.RULES_PATH, local)
+        return review_rules.load_with_notes(d)
+
+    def test_repo_adds_rules_on_top_of_the_org(self):
+        rules, notes = self.rules("rules:\n  - id: mine\n    pattern: x\n    question: Fine?\n")
+        self.assertEqual([r.id for r in rules], ["owner-check", "style", "mine"])
+        self.assertEqual([r.org for r in rules], [True, True, False])
+        self.assertEqual(notes, [])
+
+    def test_org_rules_apply_without_a_repo_file(self):
+        rules, _ = self.rules("")
+        self.assertEqual([r.id for r in rules], ["owner-check", "style"])
+
+    def test_repo_cannot_weaken_or_switch_off_an_org_security_rule(self):
+        for local in ("    pattern: never-matches\n    question: Fine?\n",
+                      "    pattern: x\n    question: Fine?\n    severity: low\n",
+                      "    pattern: x\n    question: Fine?\n    paths: [nowhere/]\n"):
+            rules, notes = self.rules("rules:\n  - id: owner-check\n" + local)
+            (sec,) = [r for r in rules if r.id == "owner-check"]
+            self.assertEqual((sec.pattern, sec.severity, sec.paths, sec.security, sec.org),
+                             ("def (delete|withdraw)", "high", [], True, True))
+            self.assertEqual(len(rules), 2)
+            self.assertIn("owner-check is ignored", notes[0])
+
+    def test_repo_may_replace_an_org_rule_that_is_not_a_security_rule(self):
+        rules, notes = self.rules("rules:\n  - id: style\n    pattern: console[.]log\n    question: Intended?\n")
+        (style,) = [r for r in rules if r.id == "style"]
+        self.assertEqual((style.pattern, style.org), ("console[.]log", False))
+        self.assertEqual(notes, [])
+
+    def test_a_broken_repo_file_keeps_the_org_rules_in_lenient_scans(self):
+        d = tempfile.mkdtemp()
+        write(d, review_rules.BASE_RULES_PATH, self.ORG)
+        write(d, review_rules.RULES_PATH, "rules:\n  - id: Bad\n")
+        rules, err = review_rules.load_lenient(d)
+        self.assertEqual([r.id for r in rules], ["owner-check", "style"])
+        self.assertIn("org rules only", err)
+        with self.assertRaises(RulesError):
+            review_rules.load(d)  # the review gate itself fails closed
+
+    def test_merge_does_not_change_the_callers_rules(self):
+        org = parse(yamlish_rules(self.ORG))
+        review_rules.merge(org, [])
+        self.assertFalse(any(r.org for r in org))
+
+    def test_rules_command_runs_org_rules(self):
+        d = tempfile.mkdtemp()
+        git(d, "init", "-q", "-b", "main")
+        write(d, ".night-shift/config.yml", CFG)
+        write(d, review_rules.BASE_RULES_PATH, self.ORG)
+        write(d, "api/x.py", "x = 1\n")
+        commit_all(d, "base")
+        git(d, "checkout", "-q", "-b", "feature")
+        write(d, "api/x.py", "def withdraw(user):\n    pass\n")
+        commit_all(d, "change")
+        out = io.StringIO()
+        self.assertEqual(cli.main(["rules", "--root", d, "--base", "main"], out=out), 0)
+        self.assertIn("2 rule(s) (2 from the org)", out.getvalue())
+        self.assertIn("owner-check@api/x.py:1", out.getvalue())
+
+    def test_bad_org_file_names_its_path(self):
+        d = tempfile.mkdtemp()
+        write(d, review_rules.BASE_RULES_PATH, "rules:\n  - id: Bad\n")
+        with self.assertRaisesRegex(RulesError, "base-review-rules.yml"):
+            review_rules.load(d)
+
+    def test_render_tags_org_rules(self):
+        rules, _ = self.rules("")
+        hit = review_rules.Hit(rules[0], "api/x.py", 3, "def delete(): ...")
+        self.assertIn("[org, security, high]", render([hit], 10))
+
+    def test_doctor_warns_about_an_ignored_local_rule(self):
+        d = tempfile.mkdtemp()
+        write(d, review_rules.BASE_RULES_PATH, self.ORG)
+        write(d, review_rules.RULES_PATH, "rules:\n  - id: owner-check\n    pattern: x\n    question: Fine?\n")
+        checks = doctor.rules_checks(Path(d), config.loads(CFG))
+        self.assertTrue(any(c.level == doctor.OK and "2 from the org" in c.what for c in checks))
+        self.assertTrue(any(c.level == doctor.WARN and "owner-check is ignored" in c.what for c in checks))
+
+    def test_write_inputs_uses_org_rules_from_the_base_branch(self):
+        from nightshift.review_tools import write_rules
+
+        d = tempfile.mkdtemp()
+        write(d, review_rules.BASE_RULES_PATH, self.ORG)
+        write(d, ".night-shift/config.yml", CFG)
+        pr = tempfile.mkdtemp()
+        write(pr, "api/x.py", "def withdraw(user):\n    pass\n")
+        out = Path(tempfile.mkdtemp())
+        write_rules(d, pr, {"api/x.py": {1}}, out)
+        self.assertIn("owner-check@api/x.py:1", (out / "security_rules.md").read_text())
 
 
 class ConfigAndWiringTests(unittest.TestCase):
