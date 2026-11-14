@@ -273,8 +273,15 @@ class Ported(unittest.TestCase):
         # Seen live: fine-grained PATs have no Checks permission, so check-runs answers 403.
         self.f.forbidden.add(r"commits/[^/]+/check-runs")
         for run_id, (event, jobs) in jobs_by_run.items():
-            self.f.workflow_runs.append({"id": run_id, "event": event, "head_sha": "s1", "status": "completed"})
-            self.f.jobs[run_id] = jobs
+            # Gate jobs belong to a run of the review caller; the rest to the repo's CI.
+            gates = [j for j in jobs if j["name"].startswith("review / ")]
+            ok = all(j.get("conclusion") == "success" for j in gates)
+            for rid, path, part in ((run_id, ".github/workflows/ci.yml", [j for j in jobs if j not in gates]),
+                                    (run_id + 1000, ".github/workflows/night-shift-review.yml", gates)):
+                if part:
+                    self.f.workflow_runs.append({"id": rid, "event": event, "head_sha": "s1", "status": "completed",
+                                                 "path": path, "conclusion": "success" if ok else "failure"})
+                    self.f.jobs[rid] = part
 
     def test_green_pr_merges_from_actions_jobs_when_checks_are_forbidden(self):
         ready(self.f, 1), ready(self.f, 2)

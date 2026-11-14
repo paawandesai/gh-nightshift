@@ -168,7 +168,8 @@ class GH:
         """The check runs on a commit. Fine-grained PATs cannot be given the Checks permission (only GitHub Apps
         can), so on 403 this rebuilds the same list from Actions (Actions: Read): the jobs of every workflow run
         on that commit, which carry the same names, status and conclusion as their check runs. Checks posted by
-        other apps are not visible that way; commit statuses still are."""
+        other apps are not visible that way; commit statuses still are. Each job carries its workflow run under
+        `workflow_run`, so the merge gate can tell which workflow produced it (provenance.GateVerifier)."""
         try:
             return self.paginate(self.r(f"commits/{sha}/check-runs"), key="check_runs")
         except GHError as err:
@@ -177,7 +178,8 @@ class GH:
         jobs: list[dict] = []
         for run in self.paginate(self.r("actions/runs"), {"head_sha": sha}, key="workflow_runs"):
             if run.get("event") in self.CI_EVENTS:
-                jobs += self.paginate(self.r(f"actions/runs/{run['id']}/jobs"), key="jobs")
+                jobs += [{**job, "workflow_run": run}
+                         for job in self.paginate(self.r(f"actions/runs/{run['id']}/jobs"), key="jobs")]
         return jobs
 
     def comments(self, number: int) -> list[dict]:

@@ -508,6 +508,16 @@ class ReuseVerdictTests(unittest.TestCase):
         self.assertIn("did not pass", self.reuse()[1])
         self.assertIn("no `review / security` check", self.reuse("security")[1])
 
+    def test_forged_previous_verdict_is_not_reused(self):
+        """CI with checks: write could create a passing `review / verdict` on the old head; only the review
+        workflow's own job counts."""
+        self.fake.check_runs[self.prev][0]["forged"] = True
+        self.main_moves("web/page.py", "y = 2\n")
+        self.update_branch()
+        prev, why = self.reuse()
+        self.assertEqual(prev, "")
+        self.assertIn("did not come from the review workflow", why)
+
     def test_unreadable_checks_runs_in_full(self):
         self.fake.forbidden.add(r"commits/.*/check-runs")
         self.fake.forbidden.add(r"actions/runs")
