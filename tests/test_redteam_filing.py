@@ -195,6 +195,26 @@ class VisibleContextTests(unittest.TestCase):
         self.assertEqual(security_context.not_findings(text),
                          {"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "dddddddddddddddd"})
 
+    def test_r203_only_plain_list_items_count(self):
+        fp = "0123456789abcdef"
+        hidden = {
+            "HTML attribute": f'- <span title="fp:{fp}">reviewed</span>',
+            "link reference definition": f'[x]: https://example.com "fp:{fp}"',
+            "link title as a list item": f'- [reviewed](https://example.com "fp:{fp}")',
+            "image alt text": f"- ![fp:{fp}](https://example.com/a.png)",
+            "collapsed <details>": f"<details><summary>more</summary>\n\n- fp:{fp}\n\n</details>",
+            "zero-size HTML": f'<sub><sup><font size="1" color="white">fp:{fp}</font></sup></sub>',
+            "hidden div across lines": f"<div hidden>\n\n- fp:{fp}\n\n</div>",
+            "not a list item": f"fp:{fp} reviewed",
+            "reference link": f"- see [the note][1] fp:{fp}",
+        }
+        for name, body in hidden.items():
+            with self.subTest(name=name):
+                self.assertEqual(security_context.not_findings(f"# S\n\n## Not a finding\n\n{body}\n"), set())
+        shown = f"## Not a finding\n<details>\n- fp:aaaaaaaaaaaaaaaa\n</details>\n\n- fp:{fp} fixed list\n" \
+                "1. `fp:bbbbbbbbbbbbbbbb` reviewed\n  * fp:cccccccccccccccc nested\n"
+        self.assertEqual(security_context.not_findings(shown), {fp, "bbbbbbbbbbbbbbbb", "cccccccccccccccc"})
+
     def test_heading_with_a_trailing_colon_counts(self):
         self.assertEqual(security_context.not_findings("## Not a finding:\n- fp:aaaaaaaaaaaaaaaa\n"), {"aaaaaaaaaaaaaaaa"})
 

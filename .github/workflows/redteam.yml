@@ -277,6 +277,19 @@ jobs:
         run: |
           npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
+      # R2-02: every file the commit does not track (git-ignored, excluded or not, node_modules included) as lane setup
+      # left it. The digest is this step's output, which the model cannot change; the harness refuses a run where any
+      # of those files changed or a new one appeared, other than the test, one helper and caches it keeps from being read.
+      - name: Record the files git does not track
+        id: baseline
+        if: steps.pick.outputs.run == 'true'
+        env:
+          SHA: ${{ needs.context.outputs.sha }}
+        run: |
+          export PYTHONPATH="$RUNNER_TEMP/nightshift-tool"
+          start=$(date +%s)
+          python3 -m nightshift redteam baseline --out-dir "$RUNNER_TEMP/validate" --sha "$SHA" --github-output "$GITHUB_OUTPUT"
+          echo "baseline took $(( $(date +%s) - start ))s"
       - name: Note running processes
         id: procs
         if: steps.pick.outputs.run == 'true'
@@ -305,14 +318,32 @@ jobs:
             && rc=0 || rc=$?
           exec 3<&-; unset CLAUDE_CODE_OAUTH_TOKEN; echo "claude exit code: $rc"
           exit 0   # a run that did not finish gets the verdict not_reproduced below, and is tried again next time
+      # A process the model left running could change a file after the harness checked the tree and before the test
+      # runs, so it is stopped first.
+      - name: Stop processes the model left behind
+        if: steps.pick.outputs.run == 'true' && runner.environment == 'github-hosted'
+        env:
+          BEFORE: ${{ steps.procs.outputs.pids }}
+        run: |
+          KEEP=" ${BEFORE} "
+          P=$$
+          while [ -n "$P" ] && [ "$P" -gt 1 ]; do KEEP="$KEEP $P "; P="$(ps -o ppid= -p "$P" | tr -d ' ')"; done
+          for ROUND in 1 2 3; do
+            for PID in $(ps -u "$(id -u)" -o pid=); do
+              case "$KEEP" in *" $PID "*) continue ;; esac
+              kill -9 "$PID" 2> /dev/null || true
+            done
+            echo "cleanup round $ROUND done"
+          done
       # No secret is in this step's environment: it runs a test a model wrote.
       - name: Run the repro test twice (the harness decides)
         if: steps.pick.outputs.run == 'true'
         env:
           SHA: ${{ needs.context.outputs.sha }}
+          BASELINE: ${{ steps.baseline.outputs.digest }}
         run: |
           export PYTHONPATH="$RUNNER_TEMP/nightshift-tool"
-          python3 -m nightshift redteam verify --out-dir "$RUNNER_TEMP/validate" --sha "$SHA"
+          python3 -m nightshift redteam verify --out-dir "$RUNNER_TEMP/validate" --sha "$SHA" --baseline-digest "$BASELINE"
       # Anything the model or its test left running could read the next step's environment, which holds the token.
       - name: Stop processes the run left behind
         if: always() && steps.pick.outputs.run == 'true' && runner.environment == 'github-hosted'
