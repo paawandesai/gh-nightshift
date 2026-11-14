@@ -170,6 +170,16 @@ class DoctorGeneratedWorkflowTests(DoctorBase):
 
 
 class DoctorProblemTests(DoctorBase):
+    def test_timezone_unchecked_without_a_tz_database_warns(self):
+        from nightshift import doctor
+        self.write_repo(config_text(self.lanes, self.mode) + "timezone: Europe/Berlin\n")
+        with mock.patch("nightshift.doctor.tz_database_present", return_value=False):
+            _, checks = doctor.local_checks(self.root)
+        warns = [c for c in checks if c.level == doctor.WARN and "time zone database" in c.what]
+        self.assertEqual(len(warns), 1, [c.line() for c in checks])
+        _, checks = doctor.local_checks(self.root)
+        self.assertFalse([c for c in checks if "time zone database" in c.what])
+
     def test_strict_false_protection_fails_with_fix(self):
         self.fake.protection["required_status_checks"]["strict"] = False
         rc, text = self.doctor()

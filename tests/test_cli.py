@@ -961,6 +961,32 @@ class AuditTests(CliTestCase):
         self.assertIn("Labels: human (4 of 4 rows labelled)", text)
         self.assertIn("ok rate: 50%", text)
 
+    def test_audit_on_a_repo_without_agent_prs_ends_in_one_line(self):
+        # W-07: this used to end in a FileNotFoundError traceback for audit-seed1/audit.csv.
+        write_config(self.root)
+        out_dir = os.path.join(self.root, "evidence")
+        for dry in ([], ["--dry-run"]):
+            with self.subTest(dry=dry):
+                rc, text = self.run_cli("audit", "--out-dir", out_dir, *dry)
+                self.assertEqual(rc, 0)
+                self.assertIn("nothing to audit: no merged agent PRs found; no files written", text)
+                self.assertFalse(os.path.exists(out_dir))
+
+    def test_audit_dry_run_writes_no_files(self):
+        write_config(self.root)
+        self.fake.add_pull(7, branch="agent/api/issue-3", state="closed", merged_at="2026-01-01T00:00:00Z")
+        out_dir = os.path.join(self.root, "evidence")
+        rc, text = self.run_cli("audit", "--out-dir", out_dir, "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("dry run: would sample 1 merged agent PR(s) with seed 1 (#7)", text)
+        self.assertIn("no files written", text)
+        self.assertFalse(os.path.exists(out_dir))
+
+    def test_write_csv_creates_its_folder(self):
+        path = os.path.join(self.root, "new", "audit.csv")
+        audit.write_csv([], path)
+        self.assertTrue(os.path.isfile(path))
+
     def test_audit_report_bad_label_is_reported(self):
         path = os.path.join(self.root, "audit.csv")
         audit.write_csv([{"pr": 1, "human_label": "great"}], path)

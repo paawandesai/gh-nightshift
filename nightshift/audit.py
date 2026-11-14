@@ -210,6 +210,7 @@ def mechanical_check(repo_dir: str, merge_sha: str, impl_files: list[str], test_
 # --- 4. CSV ---------------------------------------------------------------------------
 
 def write_csv(rows: list[dict], path: str) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=COLUMNS, extrasaction="ignore")
         w.writeheader()
