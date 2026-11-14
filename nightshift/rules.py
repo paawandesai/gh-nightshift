@@ -91,14 +91,41 @@ def lanes_of(item: dict) -> list[str]:
     return sorted(n[5:] for n in label_names(item) if n.startswith("lane:"))
 
 
+# Night Shift's own gates are jobs of its reusable review workflow, called from the job `review`, so they only ever
+# exist as check runs (or, through a fine-grained PAT, as Actions jobs) named in full: `review / verdict`.
+GATE_PREFIX = "review / "
+
+
+def is_gate(name: str) -> bool:
+    return name.startswith(GATE_PREFIX)
+
+
 def _matches(required: str, name: str) -> bool:
-    # A reusable workflow's job shows up as "<caller job> / <job>"; accept either spelling.
+    # A reusable workflow's job shows up as "<caller job> / <job>"; accept either spelling, except for Night Shift's
+    # gates, which match only on the full name (a job called plain `verdict` in the repo's CI is not the review).
+    if is_gate(required):
+        return name == required
     return name == required or name.endswith(" / " + required) or required.endswith(" / " + name)
+
+
+def _run_failed(run: dict, required: list[str] | None = None) -> bool:
+    """A completed check run that did not pass. A required gate concluded skipped or neutral did not review this
+    commit, and it will not report again on it, so it counts as failed. (A gate that is not required, such as
+    `review / security` with the security gate off, is skipped on every PR and stays harmless.)"""
+    if (run.get("status") or "").lower() != "completed":
+        return False
+    conclusion = (run.get("conclusion") or "").lower()
+    name = run.get("name", "")
+    if is_gate(name) and name in (required or []):
+        return conclusion != "success"
+    # Ordinary checks (`test`) follow GitHub's branch protection, which counts skipped and neutral as passed.
+    return conclusion in RUN_FAILED
 
 
 def checks_state(check_runs: list[dict], statuses: list[dict], required: list[str] | None = None) -> str:
     """'failed', 'pending' or 'passed' for a commit, from REST check runs and commit statuses.
-    Every required check must have reported before a commit counts as passed."""
+    Every required check must have reported before a commit counts as passed. A commit status never stands in for
+    a gate (`review / ...`): anything with `statuses: write` can post one, so gates count only as check runs."""
     if not check_runs and not statuses:
         return "pending"
     pending = False
@@ -107,10 +134,12 @@ def checks_state(check_runs: list[dict], statuses: list[dict], required: list[st
         seen.append(run.get("name", ""))
         if (run.get("status") or "").lower() != "completed":
             pending = True
-        elif (run.get("conclusion") or "").lower() in RUN_FAILED:
+        elif _run_failed(run, required):
             return "failed"
     for status in statuses:
-        seen.append(status.get("context", ""))
+        context = status.get("context", "")
+        if not is_gate(context):
+            seen.append(context)
         state = (status.get("state") or "").lower()
         if state in STATUS_FAILED:
             return "failed"
@@ -183,9 +212,8 @@ REVIEW_CHECK = "verdict"
 SECURITY_CHECK = "security"
 
 
-def failed_check_names(check_runs: list[dict], statuses: list[dict]) -> list[str]:
-    names = [r.get("name", "") for r in check_runs
-             if (r.get("status") or "").lower() == "completed" and (r.get("conclusion") or "").lower() in RUN_FAILED]
+def failed_check_names(check_runs: list[dict], statuses: list[dict], required: list[str] | None = None) -> list[str]:
+    names = [r.get("name", "") for r in check_runs if _run_failed(r, required)]
     names += [s.get("context", "") for s in statuses if (s.get("state") or "").lower() in STATUS_FAILED]
     return names
 
@@ -195,7 +223,7 @@ def close_reason(failed: list[str]) -> str:
     else checks_failed."""
     if any(n == f"review / {SECURITY_CHECK}" for n in failed):
         return "security_failed"
-    return "verdict_failed" if any(_matches(REVIEW_CHECK, n) for n in failed) else "checks_failed"
+    return "verdict_failed" if any(n == f"{GATE_PREFIX}{REVIEW_CHECK}" for n in failed) else "checks_failed"
 
 
 def section(body: str | None, heading: str) -> str:

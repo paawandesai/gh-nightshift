@@ -10,12 +10,13 @@ from collections.abc import Callable
 
 from . import review_rules, scaffold
 from .rules import path_is_protected
-from .config import CONFIG_PATH, Config, ConfigError, load
+from .config import CONFIG_PATH, SECURITY_CHECK, Config, ConfigError, load
 from .gh import GH, GHError
 from .repo_setup import ACTIONS_APP_ID, existing_secrets, get_variable
 
 OK, WARN, FAIL = "ok", "warn", "FAIL"
 LANE_WORKFLOW = ".github/workflows/night-shift.yml"
+REVIEW_GATE = "review / verdict"
 
 
 @dataclass
@@ -203,9 +204,19 @@ SCRIPT_RE = re.compile(r"(?:^|[\s;&|(])(?:(?:bash|sh|zsh|python3?|node|ruby|perl
                        r"(\.{0,2}/?[\w.-]+(?:/[\w.-]+)*\.(?:sh|py|js|mjs|ts|rb|pl|ps1)|\./[\w./-]+)")
 
 
+PR_TRIGGER_RE = re.compile(r"^on\s*:.*\bpull_request(?:_target)?\b|^\s+(?:-\s*)?pull_request(?:_target)?\s*(?::|$)", re.M)
+# Token permissions that let code running in a workflow fake or skip the merge gate: post a commit status or create a
+# check run with a gate's name (both count for branch protection bound to GitHub Actions), or approve and edit PRs.
+GATE_WRITES = ("statuses", "checks", "pull-requests")
+GATE_WRITE_RE = re.compile(r"^\s*(statuses|checks|pull-requests)\s*:\s*['\"]?write\b|^\s*permissions\s*:\s*['\"]?(write-all)\b",
+                           re.M)
+
+
 def workflow_checks(root: Path, cfg: Config) -> list[Check]:
     """The repo's own workflows that hold secrets: Actions caches they restore (H5), local scripts they run that an
-    agent PR could change (M6), and pull_request_target in CI (M7). Night shift's own workflows are skipped."""
+    agent PR could change (M6), and pull_request_target in CI (M7); and CI (or any workflow run on pull_request) that
+    gives agent-written code a token able to write statuses, checks or pull requests (W-01). Night shift's own
+    workflows are skipped."""
     out: list[Check] = []
     folder = root / ".github/workflows"
     if not folder.is_dir():
@@ -222,6 +233,14 @@ def workflow_checks(root: Path, cfg: Config) -> list[Check]:
         if wf.name == cfg.ci_workflow and re.search(r"^\s*pull_request_target\s*:", code, re.M):
             out.append(Check(WARN, f"{cfg.ci_workflow} runs on pull_request_target: agent-written code would run with "
                                    "this repo's write token and secrets", "use `pull_request` for CI"))
+        if wf.name == cfg.ci_workflow or PR_TRIGGER_RE.search(code):
+            granted = sorted({m.group(1) or m.group(2) for m in GATE_WRITE_RE.finditer(code)})
+            if granted:
+                out.append(Check(WARN, f".github/workflows/{wf.name} runs agent-written code with a token that can write "
+                                       f"{', '.join(granted)}: that code could post a passing `review / verdict` status or "
+                                       "check run, or approve its own PR",
+                                 f"in {wf.name}'s permissions blocks, grant {', '.join(GATE_WRITES)} at most `read` "
+                                 "(CI needs only contents: read)"))
         if not re.search(r"\bsecrets\.(?!GITHUB_TOKEN\b)\w+", code):
             continue
         if re.search(r"uses:\s*actions/cache[@/]|^\s*cache:\s*\S", code, re.M):
@@ -240,8 +259,17 @@ def workflow_checks(root: Path, cfg: Config) -> list[Check]:
 
 
 def rules_checks(root: Path, cfg: Config) -> list[Check]:
-    """The review rules file parses, and the security gate is wired into the review caller."""
+    """The review gates are required, the review rules file parses, and the security gate is wired into the review
+    caller."""
     out = []
+    if REVIEW_GATE not in cfg.required_checks:
+        out.append(Check(FAIL, f"required_checks does not include `{REVIEW_GATE}`: agent PRs would merge with no "
+                               "model review, on the test check alone",
+                         f"add \"{REVIEW_GATE}\" to required_checks in {CONFIG_PATH}, then run `gh nightshift setup`"))
+    if cfg.security_enabled and SECURITY_CHECK not in cfg.required_checks:
+        out.append(Check(FAIL, f"security.enabled is true but required_checks does not include `{SECURITY_CHECK}`: "
+                               "agent PRs would merge without the security review",
+                         f"add \"{SECURITY_CHECK}\" to required_checks in {CONFIG_PATH}, then run `gh nightshift setup`"))
     try:
         rules = review_rules.load(root)
     except review_rules.RulesError as err:
