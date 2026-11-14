@@ -153,7 +153,7 @@ class ScopeTests(RedteamCase):
         self.commit(".night-shift/review-rules.yml", "rules: [1]\n")
         rc, text, _, outputs = self.context()
         self.assertEqual(rc, 0)
-        self.assertIn("scanning without it", text)
+        self.assertIn("review rules are invalid", text)
         self.assertIn("run=true", outputs)
 
 

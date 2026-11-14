@@ -456,7 +456,10 @@ to `.night-shift/base-review-rules.yml` (and removes that copy when the org drop
 review runs the org rules and the repo's own rules together, and the checklist tags org rules `[org, ...]`. A repo
 can add rules and can replace an org rule that is not a security rule by reusing its id, but it can never drop or
 change an org `security: true` rule: a local rule with the same id is ignored, and `config pull` and `doctor` warn
-about it. Both files sit under `.night-shift/`, which agents can never change.
+about it. Both files sit under `.night-shift/`, which agents can never change. The copy is only as current as the
+last pull (run it again when the org changes its rules), and deleting it drops the org rules, so review changes to
+it like any other security change. If a pull turns on `reduce`, run `gh nightshift init --regenerate` so the planner
+workflow gets its schedule.
 
 ## GitHub App (instead of a PAT)
 

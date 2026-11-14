@@ -245,7 +245,9 @@ def rules_checks(root: Path, cfg: Config) -> list[Check]:
     try:
         rules, notes = review_rules.load_with_notes(root)
     except review_rules.RulesError as err:
-        return [Check(FAIL, f"{err}: every review would error until it is fixed", f"fix {review_rules.RULES_PATH}")]
+        return [Check(FAIL, f"{err}: every review would error until it is fixed",
+                      f"fix the file named in the error ({review_rules.BASE_RULES_PATH} comes from "
+                      "`gh nightshift config pull`)")]
     if rules:
         sec = sum(r.security for r in rules)
         org = sum(r.org for r in rules)

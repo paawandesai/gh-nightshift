@@ -831,7 +831,7 @@ class PlanTests(CliTestCase):
         rules.write_bytes(b"\xff\xfe not utf-8")
         rc, text, out_dir, _ = self.context("gap")
         self.assertEqual(rc, 0)
-        self.assertIn("planning without it", text)
+        self.assertIn("review rules are invalid", text)
         self.assertNotIn("Repo review rules", (Path(out_dir) / "context.md").read_text())
 
     def test_refill_skips_when_lanes_full(self):

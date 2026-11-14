@@ -1131,6 +1131,17 @@ class OrgConfig(unittest.TestCase):
         self.assertIn("warning: .night-shift/review-rules.yml rule owner is ignored", out.getvalue())
         (rule,) = review_rules.load(root)
         self.assertEqual((rule.pattern, rule.security, rule.org), ("delete", True, True))
+        # A second pull with no local conflict does not mistake the old org copy for local rules.
+        (root / review_rules.RULES_PATH).unlink()
+        out = io.StringIO()
+        self.assertEqual(cli.main(["config", "pull", "--root", str(root), "--repo", "o/r"], transport=f, out=out), 0)
+        self.assertNotIn("warning", out.getvalue())
+        # An empty org file is an error, not "no rules": the copy stays.
+        f.other_repos["org/.github"]["contents"][review_rules.RULES_PATH] = ""
+        with mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(cli.main(["config", "pull", "--root", str(root), "--repo", "o/r"], transport=f,
+                                      out=io.StringIO()), 2)
+        self.assertTrue((root / review_rules.BASE_RULES_PATH).exists())
         # The org drops its rules: the copy goes too.
         del f.other_repos["org/.github"]["contents"][review_rules.RULES_PATH]
         self.assertEqual(cli.main(["config", "pull", "--root", str(root), "--repo", "o/r"], transport=f, out=out), 0)
@@ -1162,6 +1173,10 @@ class OrgConfig(unittest.TestCase):
         self.assertTrue(cfg.reduce_enabled)
         cfg = load_text(TEAM + "planner:\n  enabled: true\nreduce:\n  enabled: false\n", base)
         self.assertFalse(cfg.reduce_enabled)
+        cfg = load_text(TEAM + "reduce:\n  window_hours: 12\n", base)
+        self.assertEqual((cfg.reduce_enabled, cfg.reduce_window_hours), (False, 12))
+        cfg = load_text(TEAM, base + "planner:\n  enabled: true\n")
+        self.assertTrue(cfg.planner_enabled and cfg.reduce_enabled)
 
 
 class OrgStatsWeeklyAuditLog(unittest.TestCase):

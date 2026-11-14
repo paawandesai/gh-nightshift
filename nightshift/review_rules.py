@@ -35,7 +35,7 @@ from __future__ import annotations
 import ast
 import fnmatch
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import yamlish
@@ -158,7 +158,8 @@ def parse(data: object, path: str = RULES_PATH) -> list[Rule]:
     return out
 
 
-def _load_file(root: str | Path, path: str) -> list[Rule]:
+def load_file(root: str | Path, path: str) -> list[Rule]:
+    """One rules file on its own (no merge); no file means no rules."""
     file = Path(root) / path
     if not file.is_file():
         return []
@@ -175,8 +176,7 @@ def merge(base: list[Rule], local: list[Rule]) -> tuple[list[Rule], list[str]]:
     notes = []
     sec = {r.id for r in base if r.security}
     mine = {r.id: r for r in local}
-    for r in base:
-        r.org = True
+    base = [replace(r, org=True) for r in base]
     out = [r if r.security or r.id not in mine else mine[r.id] for r in base]
     for r in local:
         if r.id in sec:
@@ -187,16 +187,25 @@ def merge(base: list[Rule], local: list[Rule]) -> tuple[list[Rule], list[str]]:
     return out, notes
 
 
-def load_with_notes(root: str | Path, path: str = RULES_PATH) -> tuple[list[Rule], list[str]]:
+def load_with_notes(root: str | Path) -> tuple[list[Rule], list[str]]:
     """The rules on the base branch, merged with the org's base rules (see `merge`); no file means no rules."""
-    local = _load_file(root, path)
-    if path != RULES_PATH:
-        return local, []
-    return merge(_load_file(root, BASE_RULES_PATH), local)
+    return merge(load_file(root, BASE_RULES_PATH), load_file(root, RULES_PATH))
 
 
-def load(root: str | Path, path: str = RULES_PATH) -> list[Rule]:
-    return load_with_notes(root, path)[0]
+def load(root: str | Path) -> list[Rule]:
+    return load_with_notes(root)[0]
+
+
+def load_lenient(root: str | Path) -> tuple[list[Rule], str]:
+    """For the scans that carry on without rules (planner context, red-team): a broken repo file loses only the
+    repo's own rules, never the org's. Returns the rules and the error to warn about ("" when none)."""
+    try:
+        return load(root), ""
+    except (RulesError, OSError, UnicodeDecodeError) as err:
+        try:
+            return [replace(r, org=True) for r in load_file(root, BASE_RULES_PATH)], f"{err} (using the org rules only)"
+        except (RulesError, OSError, UnicodeDecodeError) as err2:
+            return [], f"{err}; {err2} (using no rules)"
 
 
 # --- the diff ---------------------------------------------------------------------------------------

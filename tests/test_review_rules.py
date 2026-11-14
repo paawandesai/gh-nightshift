@@ -62,7 +62,7 @@ class ParseTests(unittest.TestCase):
         self.assertFalse(r.security)
 
     def test_example_file_parses(self):
-        rules = review_rules.load(Path(__file__).parent.parent, "examples/review-rules.yml")
+        rules = review_rules.load_file(Path(__file__).parent.parent, "examples/review-rules.yml")
         self.assertGreaterEqual(len(rules), 5)
         self.assertTrue(any(r.security for r in rules))
 
@@ -364,6 +364,12 @@ class WriteInputsWithRulesTests(unittest.TestCase):
             self.build(rules_text="version: 1\nrules:\n  - id: X\n")
 
 
+def yamlish_rules(text):
+    from nightshift import yamlish
+
+    return yamlish.loads(text)
+
+
 class OrgRulesTests(unittest.TestCase):
     """Org rules come from .night-shift/base-review-rules.yml; a repo adds rules but never weakens org security."""
 
@@ -414,6 +420,36 @@ class OrgRulesTests(unittest.TestCase):
         (style,) = [r for r in rules if r.id == "style"]
         self.assertEqual((style.pattern, style.org), ("console[.]log", False))
         self.assertEqual(notes, [])
+
+    def test_a_broken_repo_file_keeps_the_org_rules_in_lenient_scans(self):
+        d = tempfile.mkdtemp()
+        write(d, review_rules.BASE_RULES_PATH, self.ORG)
+        write(d, review_rules.RULES_PATH, "rules:\n  - id: Bad\n")
+        rules, err = review_rules.load_lenient(d)
+        self.assertEqual([r.id for r in rules], ["owner-check", "style"])
+        self.assertIn("org rules only", err)
+        with self.assertRaises(RulesError):
+            review_rules.load(d)  # the review gate itself fails closed
+
+    def test_merge_does_not_change_the_callers_rules(self):
+        org = parse(yamlish_rules(self.ORG))
+        review_rules.merge(org, [])
+        self.assertFalse(any(r.org for r in org))
+
+    def test_rules_command_runs_org_rules(self):
+        d = tempfile.mkdtemp()
+        git(d, "init", "-q", "-b", "main")
+        write(d, ".night-shift/config.yml", CFG)
+        write(d, review_rules.BASE_RULES_PATH, self.ORG)
+        write(d, "api/x.py", "x = 1\n")
+        commit_all(d, "base")
+        git(d, "checkout", "-q", "-b", "feature")
+        write(d, "api/x.py", "def withdraw(user):\n    pass\n")
+        commit_all(d, "change")
+        out = io.StringIO()
+        self.assertEqual(cli.main(["rules", "--root", d, "--base", "main"], out=out), 0)
+        self.assertIn("2 rule(s) (2 from the org)", out.getvalue())
+        self.assertIn("owner-check@api/x.py:1", out.getvalue())
 
     def test_bad_org_file_names_its_path(self):
         d = tempfile.mkdtemp()
