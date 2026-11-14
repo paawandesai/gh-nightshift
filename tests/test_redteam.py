@@ -439,20 +439,30 @@ class SealTests(unittest.TestCase):
     def test_workflow_never_passes_plaintext_between_jobs(self):
         text = (Path(__file__).parent.parent / ".github/workflows/redteam.yml").read_text()
         scan, file_job = text.split("\n  scan:")[1].split("\n  file:")
+        scan = scan.split("\n  validate:")[0]   # the validate job has its own tests (test_validate.py)
         self.assertIn("openssl enc -aes-256-cbc", scan)
         self.assertIn("trap 'rm -f", scan)
         self.assertIn("truncate -s 65536", scan)
         self.assertNotIn("wc -c < \"$P/findings.json\"", scan)
-        # The scan job hands over exactly one output, and the only echo into it is the ciphertext.
+        # The scan job hands over the ciphertext and, on a private repo with validation on, the validate matrix
+        # (written by the tool: indexes and Postgres images only, see test_validate.PlanTests). Nothing else.
         outputs = scan.split("outputs:")[1].split("steps:")[0].strip().splitlines()
-        self.assertEqual(outputs, ["findings: ${{ steps.scan.outputs.findings }}"])
-        self.assertEqual([ln.strip() for ln in scan.splitlines() if "GITHUB_OUTPUT" in ln],
-                         ['echo "findings=$sealed" >> "$GITHUB_OUTPUT"'])
+        self.assertEqual([ln.strip() for ln in outputs], ["findings: ${{ steps.scan.outputs.findings }}",
+                                                          "validate_plan: ${{ steps.scan.outputs.validate_plan }}"])
+        self.assertEqual([ln.strip() for ln in scan.splitlines() if "GITHUB_OUTPUT" in ln], [
+            'echo "findings=$sealed" >> "$GITHUB_OUTPUT"',
+            '--findings-file "$P/slim.gz" --seen-file "$P/seen.json" --github-output "$GITHUB_OUTPUT" \\',
+            '|| { echo "::warning::could not plan validation; these findings are validated next run"; '
+            'echo "validate_plan=[]" >> "$GITHUB_OUTPUT"; }'])
+        plan = scan[scan.index('if [ "$VALIDATE" = "true" ]; then'):scan.index("validate_plan=[]")]
+        self.assertIn("env -u TOKEN PYTHONPATH=", plan)   # the tool plans without the token in its environment
         run = file_job.split("- name: File findings privately")[1].split("run: |")[1].strip().splitlines()
         self.assertEqual([ln.strip() for ln in run], [
             "set -euo pipefail",
             "printf '%s' \"$SEALED\" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:SEAL_KEY \\",
-            '| python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file -'])
+            '| python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file - '
+            '--validation "$VALIDATION" \\',
+            '--seen-file "$RUNNER_TEMP/redteam/seen.json"'])
 
     @unittest.skipUnless(all(shutil.which(t) for t in ("openssl", "jq", "truncate")), "no openssl, jq or truncate")
     def test_seal_round_trip_matches_the_workflow(self):

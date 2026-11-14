@@ -9,6 +9,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Dynamic validation of red-team findings (`redteam.validate`, private repos): a `validate` job between `scan`
+  and `file` reproduces each new finding (at most 3 a run, each on a fresh runner) with a test that fails while
+  the bug exists. The harness runs the test twice and decides `validated`, `not_reproduced` or `not_testable`;
+  only validated findings are filed, with the repro test attached. Unreproduced critical findings and untestable
+  ones are filed with a new `unconfirmed` label. `redteam.level: 0` reports verdicts without filing anything.
+  A new `redteam-skip` marker remembers what did not reproduce. Run `gh nightshift setup` for the label.
+  The model names the test's runner (`pytest`, `unittest`, `node`, `go`, `cargo`, `jest`, `vitest`, `mocha`) and
+  the harness builds and runs the command itself, without a shell, after checking with git that the checkout is
+  the scanned commit plus the new test (and at most one helper beside it). It reads each runner's own report and
+  counts only assertion failures: a missing runner, a fixture or setup error, an uncaught exception, a panic or a
+  build error is `not_reproduced`, and an unsupported runner is `not_testable`. Neither the test nor Claude gets
+  the runner's file-command variables.
+- A shared security context, `.night-shift/SECURITY.md`, which the red-team scan, the validation runs and the
+  security reviewer read from the base branch before they start. Fingerprints under its "Not a finding" heading
+  are not validated or filed again. `init` (and `init --regenerate`, when the file is missing) writes a starter.
+- At `redteam.level: 0` a new `redteam-shadow` marker records each verdict, so a shadow period validates each
+  finding once; level 1 ignores those records and files what the shadow period saw. Filed findings print their
+  `fp:` fingerprint, "Not a finding" ignores code fences and HTML comments, and the file job takes each
+  validation result only for the finding its job was given (the `file` job now reads `seen.json`).
 - Repo review rules: `.night-shift/review-rules.yml` (read from the base branch, protected from agents) holds
   repo-specific checks of four kinds (`regex`, `python-call`, `python-decorator`, `path`). The review job runs
   them deterministically over the PR's added and changed lines and hands every hit to the reviewer, which must
@@ -77,6 +96,37 @@ Fixes for every open item of the November security review (H1, H2, H5, M4 to M10
   token no longer loads; give the reviewers their own token.
 - Cross-repo dependencies are read only for repos in the new `cross_repos` list (default: none), and
   `check-pat` fails on a classic PAT (M10).
+- The picker counts the review gates (`review / verdict`, `review / security`) only as check runs (or Actions
+  jobs) with exactly that name that concluded `success`. A commit status of that name, a job called plain
+  `verdict`, and a required gate concluded `skipped` or `neutral` no longer pass; such a gate closes the PR
+  as `verdict_failed` (or `security_failed`). Ordinary checks such as `test` keep GitHub's rule (skipped and neutral pass) (W-01, W-05).
+- `doctor` warns when CI, or any workflow that runs on `pull_request`, grants `statuses`, `checks` or
+  `pull-requests` write (or `write-all`) in a `permissions:` block, since agent-written code runs there (W-01).
+- **Stricter:** `doctor` fails when `required_checks` leaves out `review / verdict`, or `review / security` while
+  `security.enabled` is on. A config with `required_checks: [test]` still loads and runs, but `doctor` now exits
+  1; add `"review / verdict"` back and run `gh nightshift setup` (W-02).
+- **Stricter:** if your own CI has a job named `verdict` or `review / verdict`, or posts a commit status with a
+  gate's name, it no longer satisfies the gate; the review workflow's own `review / verdict` check run must
+  pass (W-01, W-05).
+
+Fixes from the wider gap test (W-03, W-04, W-06, W-07, W-08):
+
+- Built-in protected names match in any case (`.GitHub/`, `claude.md`, `.Claude/`, `AGENTS.MD`, `.MCP.json`,
+  `.Night-Shift/`, `agent_rules.md`): on a macOS or Windows clone those spellings are the real files. Your own
+  `protected_paths` entries stay case-sensitive (W-03).
+- **Breaking:** values written into generated workflows are checked when the config loads (W-04).
+  `main_branch` and `tool_ref` must be git ref names (letters, digits, `. _ / + -`; no `..`, `//`, part starting
+  with a dot, or trailing `/`, `.` or `.lock`); `ci_workflow_name` may hold only letters, digits, spaces and
+  `. _ ( ) / + & : , -`; `security.model` takes the same pattern as `models.*`. A config using `${{ ... }}` or
+  other characters there no longer loads: write the plain branch, ref, workflow name or model alias.
+- **Breaking:** `timezone` must be a known IANA zone (such as `Europe/Berlin`) and `planner.schedule` a 5-field
+  cron expression, checked at load even while refill or reduce is off (W-06). Before, an unknown zone silently
+  counted nights in UTC. Fix the value, or remove the key for the default. With no time zone database on the
+  machine any zone-shaped name still loads, and `doctor` warns.
+- `gh nightshift audit` on a repo without merged agent PRs prints one line instead of a traceback, `--dry-run`
+  only lists the PRs it would sample and writes no files, and the CSV's folder is created when missing (W-07).
+- Every config key is now in the README's Config reference and in `examples/config.yml`, and
+  `tests/test_docs.py` fails when the schema gains a key that is in neither (W-08).
 
 ## [0.1.4] - 2026-11-10
 

@@ -154,21 +154,23 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 
 | Key | Default | What it does |
 |---|---|---|
+| `version` | required | Always `1` |
 | `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `fallback_token_secret` (a second Claude token used only when the first cannot start a run), `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image`, `sudo` (`false`: the agent runs without sudo or, on lanes without `postgres_image`, Docker; setup still has them. GitHub-hosted runners only) |
-| `main_branch` | `main` | Branch the lanes build on and protect |
+| `main_branch` | `main` | Branch the lanes build on and protect. A git branch name (letters, digits, `. _ / + -`) |
 | `ci_workflow` | `ci.yml` | CI file whose runs on main gate every lane |
-| `required_checks` | `[test, "review / verdict"]` | Required status checks; a PR counts as green only when all have reported |
+| `ci_workflow_name` | the `name:` in `ci_workflow`, else `CI` | The CI workflow's display name, which the lane workflow's `workflow_run` trigger listens for. Set it only when it cannot be read from the file. Letters, digits, spaces and `. _ ( ) / + & : , -` |
+| `required_checks` | `[test, "review / verdict"]` | Required status checks; a PR counts as green only when all have reported (see [How the picker reads checks](#how-the-picker-reads-checks)). `doctor` fails when `review / verdict` (or, with `security.enabled`, `review / security`) is missing |
 | `fix_lane` | first lane | The only lane that works while main is red |
 | `merge.mode` | `strict` | `strict` or `queue` (see below) |
 | `merge.allow_unenforced` | `false` | The picker merges a green PR only when main's branch protection or a ruleset enforces every required check. `true` merges anyway (a free private repo cannot have branch protection) |
-| `protected_paths` | `[]` | Added to the built-in list (`.github/`, `.claude/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENT_RULES.md`, `.mcp.json`, `.night-shift/`, plus `planner.docs` when `planner.refill_below` is on); never replaces it. `dir/` covers a folder, a glob such as `**/package.json` matches at any depth |
+| `protected_paths` | `[]` | Added to the built-in list (`.github/`, `.claude/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENT_RULES.md`, `.mcp.json`, `.night-shift/`, plus `planner.docs` when `planner.refill_below` is on); never replaces it. Built-in names match in any case (`.GitHub/`, `claude.md`), since a macOS or Windows clone treats them as the same file; your own entries are case-sensitive. `dir/` covers a folder, a glob such as `**/package.json` matches at any depth |
 | `models` | `sonnet` / `opus` / `opus` / `opus` | `default`, `escalate`, `review`, `planner` |
 | `limits` | 3, 6, 45, 80, 2, 2, `true` | `max_attempts`, `infra_cap`, `stale_minutes`, `max_turns`, `max_needs_per_issue`, `max_notes_per_issue`, `auto_ready_needs` (`false`: an agent's request to another lane waits as `proposed` until a person promotes it) |
 | `planner` | | `docs`, `max_tickets_per_run` (8), `refill_below` (0 = off), `id_prefixes`, `human_paths` (`[contracts/]`), `claude_token_secret`, `schedule`, `enabled` |
-| `labels` | | Rename any of the standard labels (`ready` is `night-safe` by default) |
+| `labels` | | Rename any of the standard labels: `ready` (`night-safe`), `blocked` (`blocked`), `needs_human` (`needs-human`), `human` (`human`), `proposed` (`proposed`), `agent` (`agent`), `in_progress` (`agent:in-progress`), `night_log` (`night-log`) |
 | `review_token_secret` | `CLAUDE_TOKEN_REVIEW` | Claude token secret for the review gate |
-| `timezone` | `UTC` | Time zone for night-log lines |
-| `tool_ref` | `main` (`init` writes the installed release's commit) | Ref of gh-nightshift the workflows use. Pin a 40-character commit SHA; `doctor` warns about a tag (which can be moved) or a branch. |
+| `timezone` | `UTC` | IANA time zone (such as `Europe/Berlin`) for night-log lines and the noon-to-noon night of lane budgets. An unknown zone is refused when the config loads; `doctor` warns when this machine has no time zone database to check it with |
+| `tool_ref` | `main` (`init` writes the installed release's commit) | Ref of gh-nightshift the workflows use: a tag, branch or 40-character commit SHA (letters, digits, `. _ / + -`). Pin a SHA; `doctor` warns about a tag (which can be moved) or a branch. |
 | `bot_login` | you | The PAT's login, for read-only commands run as someone else (`stats`, `audit`, `digest`) |
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
 | `cross_repos` | `[]` | Repos (`owner/name`) whose issues a ticket may depend on with `Blocked by: owner/repo#N` (see Cross-repo dependencies) |
@@ -176,7 +178,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `review` | `reuse_on_update: true` | Keep a passed verdict when update-branch only merged main (see Merge modes) |
-| `redteam` | `enabled: false` | `enabled`, `schedule` (`0 5 * * *`), `min_severity` (`high`), `claude_token_secret` (default the security token; a dedicated token is recommended, see SECURITY.md), `model`. See Review rules and the security gate |
+| `redteam` | `enabled: false` | `enabled`, `schedule` (`0 5 * * *`), `min_severity` (`high`), `claude_token_secret` (default the security token; a dedicated token is recommended, see SECURITY.md), `model`, `validate` (`enabled: false`, `max_per_run: 3`) and `level` (`1`; `0` reports only), see Validation and the shared security context. See Review rules and the security gate |
 | `reduce` | `enabled: false` | `enabled`, `schedule` (`30 6 * * *`, no minute in common with `planner.schedule`), `window_hours` (48). Needs `planner.enabled`. See Reduce |
 | `security` | `enabled: false` | `enabled` (adds the required check `review / security`), `claude_token_secret` (default `review_token_secret`), `model`, `paths` (always reviewed, as are `risk.approve_paths`), `always` (review every PR). See Review rules |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths` (`init` writes a default list of dependency manifests, lockfiles, package-manager, editor, hook and container config), `auto_labels`, `codeowners` (see Risk tiers) |
@@ -215,7 +217,9 @@ outsider cannot forge attempt counts, unblock an issue or steer work.
 | `handoff-done` | merged PR | Hand-offs went out (makes the step idempotent) |
 | `plan` | night-log issue | A planner run: lane, `complete`, `docs_sha`; a reduce run has `lane: reduce` and `prs` |
 | `redteam` | night-log issue | A red-team scan: `sha` (the commit it reached) and `base` |
-| `redteam-finding` | draft security advisory or `security` issue | The finding's fingerprint `fp` (title + file), `wk` (CWE + file) and `sha`, so it is filed once |
+| `redteam-finding` | draft security advisory or `security` issue | The finding's fingerprint `fp` (title + file), `wk` (CWE + file), `sha` and, with validation on, `validated` (the verdict), so it is filed once |
+| `redteam-skip` | night-log issue | `fps`: fingerprints of findings whose repro test did not fail, so later scans skip them (a full scan tries them again) |
+| `redteam-shadow` | night-log issue | `fps`: fingerprints a `redteam.level: 0` run already validated (any verdict), so later level-0 scans do not validate them again. Ignored at level 1 and by a full scan |
 
 **Hand-off.** When a PR merges, the picker posts a hand-off comment on every open issue whose `Blocked by`
 line lists the merged issue (for PRs merged in the last 72 hours). The comment gives the interface as built
@@ -377,6 +381,67 @@ Findings never appear in a log or an artifact, a fingerprint (title and file, or
 rewords titles) keeps a finding from being filed twice, and a scan that fails or is cut short records nothing, so the next one covers the same range again. The
 scan needs `bot_login` in the config. Dispatches from another branch are skipped. Give the scan its own
 Claude token (`redteam.claude_token_secret`): the encrypted findings in public logs are only as safe as that token.
+
+**Validation and the shared security context.** A scan that only reads code reports some things that cannot
+be reached in practice. With `redteam: {validate: {enabled: true}}` on a **private** repo, a `validate` job runs
+between `scan` and `file`. Each new finding (at most `validate.max_per_run`, default and maximum 3, each on its
+own fresh runner; no runner starts when nothing is new) gets main checked out and the owning lane's environment
+as a lane agent has it (`setup.commands`, `setup.action`, and a Postgres service with `DATABASE_URL` when the lane
+sets `postgres_image`). A file no lane lists gets the first lane with a `test_command`, labelled a guess in the
+task. Claude writes one test
+that performs the attack and asserts the safe behaviour, so it fails while the bug exists. Claude returns the
+test's path and its runner, one of `pytest`, `unittest`, `node` (node:test), `go`, `cargo` (an integration test in
+`<crate>/tests/`), `jest`, `vitest` or `mocha` (the last three from the repo's own `node_modules`). Then the
+harness, not the model, checks with git that the checkout is main plus that one new test (and at most one helper
+file beside it, never a `conftest.py` or runner configuration), builds the runner's command itself, runs it twice
+without a shell and reads the runner's own report (JUnit XML, `go test -json`, JSON, or cargo's result lines):
+
+| Verdict | When | What `file` does at `level: 1` |
+|---|---|---|
+| `validated` | both runs fail on an assertion: not a fixture, setup, import or build error, an uncaught exception or a panic, and not a run with no report (a missing runner) | files the issue with the repro test, the command and the end of the output |
+| `not_reproduced` | the test passes, breaks, times out or is flaky, or a file from main was changed or something else was added | does not file it; lists its fingerprint on the night log and skips it in later scans. A `critical` one is still filed, labelled `unconfirmed` |
+| `not_testable` | the model says the runner lacks what the test needs, or names a runner the harness does not support | files it labelled `unconfirmed` |
+
+A finding with no result yet (more than `max_per_run` in one night, or a validation job that failed) is not
+filed, and the scan does not record its position, so the next run covers the range again. Each validate job's
+result counts only for the finding that job was given: the file job works out the same list from the scan output
+and the context job's `seen.json`, so one job cannot set or overwrite the verdict of another job's finding.
+
+`level: 0` is a shadow mode: everything runs, the night log reports each verdict, nothing is filed and the scan's
+position does not move. Each verdict is recorded in a `redteam-shadow` marker, so later level-0 nights skip that
+finding and a shadow week costs one validation per finding (the scan itself still reads the whole range since
+the last recorded position). Start there, read a few nights of results, then set `level: 1`. Shadow records stop
+counting at level 1: since the position never moved during the shadow period, the first level-1 runs cover it
+again, validate those findings for real and file them (at most `max_per_run` a night; the rest wait). A full
+scan (`full: true`) ignores shadow and skip records alike and tries every finding again. On a public repo
+validation stays off and findings are filed as before.
+
+Every security pass (the scan, the validation runs and `review / security`) first reads
+`.night-shift/SECURITY.md` from the default branch: a system map, the invariants the code must keep, the checks
+that guard fixed findings, and a "Not a finding" list. `init` writes a starter. An entry under "Not a finding"
+that names a fingerprint (`fp:` and the 16 characters the night log and each filed issue print) stops that
+finding from being validated or filed again, with or without validation. Only what a reader of the rendered
+file sees counts: a `## Not a finding` line inside a code fence is not the heading, and an entry inside an HTML
+comment (`<!-- -->`) suppresses nothing. Scans and validation runs are shown the file with its comments removed. The file is under `.night-shift/`, so agents cannot change it: only a PR a person
+merges does. Never put an open finding or an attack path in it. `doctor` warns when validation is on and a lane
+has no `test_command`, the file is missing, or the scan shares its Claude token with a lane or the reviewer.
+
+## How the picker reads checks
+
+The picker merges an agent PR only when every check on its head commit has finished without failing and every
+name in `required_checks` has reported.
+
+- **Ordinary checks** (`test`, anything from your CI) count as a check run or a commit status, under their own
+  name or as `<caller job> / <name>` from a reusable workflow. Like GitHub's branch protection, a check concluded
+  `skipped` or `neutral` counts as passed.
+- **Night Shift's gates** (`review / verdict`, `review / security`) count only as a check run (or, with a
+  fine-grained PAT, an Actions job) with exactly that name, and only when it concluded `success`. A commit
+  status of that name, a job called plain `verdict`, or a required gate that was `skipped` or `neutral` never
+  passes; such a gate closes the PR as `verdict_failed` (or `security_failed`). A gate you do not require (the
+  `review / security` job while the security gate is off) is skipped on every PR and is ignored.
+- `doctor` warns when CI, or any workflow that runs on `pull_request`, grants `statuses: write`,
+  `checks: write`, `pull-requests: write` or `write-all`: agent-written code runs there and could post a passing
+  gate or approve its own PR. CI needs only `contents: read`.
 
 ## Merge modes
 

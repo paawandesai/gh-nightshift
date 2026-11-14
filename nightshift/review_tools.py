@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from collections.abc import Callable
 
-from . import review_rules
+from . import review_rules, security_context
 from .config import BUILTIN_PROTECTED, Config, ConfigError, load as load_config
 from .gh import GH, GHError
 from .rules import BRANCH_RE, path_is_protected
@@ -92,7 +92,10 @@ def write_rules(rules_root: str | None, pr_dir: str, changed: dict[str, set[int]
     (out / "security_hits.json").write_text(json.dumps(review_rules.items(sec, cap)), encoding="utf-8")
     reasons = security_trigger(cfg, hits, sorted(changed))
     (out / "security_trigger.md").write_text(
-        "# Why the security review ran\n\n" + "".join(f"- {r}\n" for r in reasons[:50]), encoding="utf-8")
+        "# Why the security review ran\n\n" + "".join(f"- {r}\n" for r in reasons[:50])
+        # The shared security context, from the base branch only (rules_root), never from the PR.
+        + ("\n" + "\n".join(security_context.for_prompt(security_context.read(rules_root))) if rules_root else ""),
+        encoding="utf-8")
     return {"rule_hits": str(len(hits)), "security": "true" if reasons else "false"}
 
 

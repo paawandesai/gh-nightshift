@@ -47,6 +47,10 @@ class Workflows(unittest.TestCase):
     def test_read_only_claude_steps_deny_write_and_network_tools(self):
         for name in ("review.yml", "planner.yml", "redteam.yml"):
             text = workflow(name)
+            if name == "redteam.yml":
+                # The validate job is the one place in this workflow where a model has a shell: it has to run the
+                # repro test it writes. It holds no GitHub token and has its own checks in test_validate.py.
+                text = text[:text.index("\n  validate:")] + text[text.index("\n  file:"):]
             with self.subTest(name=name):
                 self.assertIn('--disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,'
                               'Read(//proc/**),Read(//sys/**)"', text)
@@ -130,6 +134,29 @@ class ProtectedPaths(unittest.TestCase):
         for path in ("api/x.py", "docs/CLAUDE.md.example", "contracts.md", "web/claude/x.ts"):
             with self.subTest(path=path):
                 self.assertFalse(path_is_protected(path, self.PROTECTED))
+
+    def test_built_in_names_match_in_any_case(self):
+        # W-03: a macOS or Windows clone puts these on the real files, so the built-in names ignore case.
+        from nightshift.config import BUILTIN_PROTECTED
+        for path in (".GitHub/workflows/x.yml", ".GITHUB/x", "claude.md", "Claude.md", "sub/claude.md",
+                     ".Claude/settings.json", "sub/.CLAUDE/x", "sub/.MCP.json", "AGENTS.MD", "deep/agents.md",
+                     ".Night-Shift/config.yml", "agent_rules.md", "claude.LOCAL.md"):
+            with self.subTest(path=path):
+                self.assertTrue(path_is_protected(path, BUILTIN_PROTECTED))
+        for path in ("docs/claude.md.example", "web/claude/x.ts", "sub/.github/x", "sub/agent_rules.md"):
+            with self.subTest(path=path):
+                self.assertFalse(path_is_protected(path, BUILTIN_PROTECTED))
+
+    def test_configured_entries_stay_case_sensitive(self):
+        self.assertTrue(path_is_protected("contracts/x.json", ["contracts/"]))
+        self.assertFalse(path_is_protected("Contracts/x.json", ["contracts/"]))
+        self.assertFalse(path_is_protected("api/Package.json", ["**/package.json"]))
+
+    def test_every_built_in_name_is_compared_without_case(self):
+        from nightshift.config import BUILTIN_PROTECTED
+        from nightshift.rules import CASELESS_NAMES
+        self.assertEqual({p.casefold() for p in BUILTIN_PROTECTED} - CASELESS_NAMES, set(),
+                         "add new built-in protected names to rules.CASELESS_NAMES")
 
 
 def t(key, **kw):

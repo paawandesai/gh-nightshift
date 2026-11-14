@@ -286,7 +286,7 @@ class Picker:
                 self.close_pr(pr, "conflict", "merge conflict with main")
                 continue
             if state == "failed":
-                self.close_pr(pr, close_reason(failed_check_names(runs, statuses)), "checks failed")
+                self.close_pr(pr, close_reason(failed_check_names(runs, statuses, self.cfg.required_checks)), "checks failed")
                 continue
             if stale:
                 self.close_pr(pr, "stale", f"no checks reported after {self.cfg.stale_minutes} min")

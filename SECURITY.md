@@ -259,6 +259,30 @@ its own token with `redteam.claude_token_secret`, and rotate it if it may have l
 In App mode the filing job always asks for Repository security advisories, so approve that permission on the
 installation even for private repos.
 
+**Validation** (`redteam.validate`, private repos only) adds the one red-team job where a model has a shell: it
+must run the repro test it writes. That job is built like a lane's agent job. It holds the red-team Claude token
+only (on a pipe, not in Claude's environment), a read-only `GITHUB_TOKEN` that no step uses, and no PAT or App
+key; it runs on the `agent` runner class; and nothing it produces is uploaded or printed. The step that runs the
+repro test has no secret in its environment and a scrubbed one for the test itself (no credential-like variable
+and none of the runner's file-command variables; Claude's step drops every `GITHUB_*` variable for the same
+reason: what is written to those files runs in the later seal step), and every process the model or its test
+started is stopped before the step that holds the token again to seal the result. The model does not choose the
+command that runs its test: it names a runner from a fixed list, and the harness builds the argv and runs it with
+no shell, then reads the runner's report. Before running, the harness checks with git, against the commit the job
+checked out, that no file from main was changed or deleted and nothing was added besides the test and at most one
+helper beside it. A result that
+contains the token (or its base64 form) is refused when it is sealed and again when it is opened, so a test
+file cannot carry the token into an issue. The verdict comes from the harness's two runs, never from the
+model's account of them, and the filing job reads it only from results sealed with the scan's token. The
+prompt limits attacks to the checkout and localhost; the runner still has internet access, as lane agents do.
+A finding without a result is never filed and never dropped: the scan does not record progress until every
+finding has a verdict.
+
+The shared context in `.night-shift/SECURITY.md` is read from the base branch, capped at 32 KiB, fenced and
+defanged, and presented to every reader as material under review. It is a protected path, so an agent PR that
+touches it is rejected. Its "Not a finding" list can hide a real bug from later scans, which is why only a
+person's merge can change it and why only that section's fingerprints count.
+
 ## Auto-merge
 
 The picker merges a lane's PR itself (squash, via the PAT) when it is green. It does not use GitHub's
@@ -375,6 +399,18 @@ These are not enforced. They are listed so you can judge the risk yourself.
     writer wrote is planned from directly.
 19. **Cross-repo `Blocked by`** copies the title and `## Interface` section of an issue from another
     repository, but only from repositories listed in `cross_repos`. That text is quoted as data.
+
+20. **A model that sets out to fake a validation can.** In the validate job the model has a shell on the same
+    machine the harness runs on, so it could tamper with the test runner, an ignored dependency, git's own data or
+    the tool, or write a test that fakes its runner's report. The harness closes the cheap and the accidental paths:
+    the model never writes the command (it names a runner; the harness builds the argv and runs it without a
+    shell), a missing runner or a run with no report is never `validated`, only assertion failures count (not
+    fixture errors, uncaught exceptions, panics or build errors), and a checkout that differs from the scanned
+    commit by more than the new test and one helper beside it is refused. A person should still read each repro
+    test before trusting it, and a fix that turns the same test green is the independent check.
+21. **Unreproduced findings are skipped by later scans.** Their fingerprints are listed on the night log with
+    the titles, and a full scan tries them again, but a real bug whose repro test was badly written stays
+    unfiled until someone reads that list. Critical ones are filed anyway, labelled `unconfirmed`.
 
 ## Reporting a vulnerability
 

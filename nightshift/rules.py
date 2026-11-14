@@ -91,14 +91,41 @@ def lanes_of(item: dict) -> list[str]:
     return sorted(n[5:] for n in label_names(item) if n.startswith("lane:"))
 
 
+# Night Shift's own gates are jobs of its reusable review workflow, called from the job `review`, so they only ever
+# exist as check runs (or, through a fine-grained PAT, as Actions jobs) named in full: `review / verdict`.
+GATE_PREFIX = "review / "
+
+
+def is_gate(name: str) -> bool:
+    return name.startswith(GATE_PREFIX)
+
+
 def _matches(required: str, name: str) -> bool:
-    # A reusable workflow's job shows up as "<caller job> / <job>"; accept either spelling.
+    # A reusable workflow's job shows up as "<caller job> / <job>"; accept either spelling, except for Night Shift's
+    # gates, which match only on the full name (a job called plain `verdict` in the repo's CI is not the review).
+    if is_gate(required):
+        return name == required
     return name == required or name.endswith(" / " + required) or required.endswith(" / " + name)
+
+
+def _run_failed(run: dict, required: list[str] | None = None) -> bool:
+    """A completed check run that did not pass. A required gate concluded skipped or neutral did not review this
+    commit, and it will not report again on it, so it counts as failed. (A gate that is not required, such as
+    `review / security` with the security gate off, is skipped on every PR and stays harmless.)"""
+    if (run.get("status") or "").lower() != "completed":
+        return False
+    conclusion = (run.get("conclusion") or "").lower()
+    name = run.get("name", "")
+    if is_gate(name) and name in (required or []):
+        return conclusion != "success"
+    # Ordinary checks (`test`) follow GitHub's branch protection, which counts skipped and neutral as passed.
+    return conclusion in RUN_FAILED
 
 
 def checks_state(check_runs: list[dict], statuses: list[dict], required: list[str] | None = None) -> str:
     """'failed', 'pending' or 'passed' for a commit, from REST check runs and commit statuses.
-    Every required check must have reported before a commit counts as passed."""
+    Every required check must have reported before a commit counts as passed. A commit status never stands in for
+    a gate (`review / ...`): anything with `statuses: write` can post one, so gates count only as check runs."""
     if not check_runs and not statuses:
         return "pending"
     pending = False
@@ -107,10 +134,12 @@ def checks_state(check_runs: list[dict], statuses: list[dict], required: list[st
         seen.append(run.get("name", ""))
         if (run.get("status") or "").lower() != "completed":
             pending = True
-        elif (run.get("conclusion") or "").lower() in RUN_FAILED:
+        elif _run_failed(run, required):
             return "failed"
     for status in statuses:
-        seen.append(status.get("context", ""))
+        context = status.get("context", "")
+        if not is_gate(context):
+            seen.append(context)
         state = (status.get("state") or "").lower()
         if state in STATUS_FAILED:
             return "failed"
@@ -132,6 +161,11 @@ def age_minutes(created_at: str | None, now: dt.datetime | None = None) -> float
 
 # Files Claude Code (and similar agents) read as instructions wherever they sit in the tree.
 AGENT_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json", ".claude/")
+# Built-in protected names compared without regard to case (W-03): on a macOS or Windows clone `.GitHub/` or
+# `claude.md` lands on the real file. Keep in step with config.BUILTIN_PROTECTED (a test checks this).
+# User-configured protected_paths stay case-sensitive: they name the repo's own files, as git stores them.
+CASELESS_NAMES = frozenset(n.casefold() for n in AGENT_FILES + (".github/", ".night-shift/", "AGENT_RULES.md"))
+CASELESS_AGENT_FILES = frozenset(n.casefold() for n in AGENT_FILES)
 
 
 def normalize_path(path: str) -> str | None:
@@ -151,12 +185,14 @@ def split_paths(entry: str) -> list[str]:
 def path_is_protected(path: str, protected: list[str]) -> bool:
     """`dir/` protects everything under it, `file` protects that exact path; a path that cannot be
     normalised (e.g. escapes with `..`) counts as protected. Agent instruction files (CLAUDE.md,
-    CLAUDE.local.md, AGENTS.md, .mcp.json, .claude/) are protected at any depth when they are in the protected list.
+    CLAUDE.local.md, AGENTS.md, .mcp.json, .claude/) are protected at any depth when they are in the protected list,
+    and built-in names (CASELESS_NAMES) match in any case; other entries are case-sensitive.
     An entry with `*`, `?` or `[` is a glob over the whole path; `**/name` matches `name` at any depth
     (`**/package.json`, `**/requirements*.txt`)."""
     norm = normalize_path(path)
     if norm is None:
         return True
+    folded = norm.casefold()
     for p in protected:
         p = p.strip().lstrip("/")
         if not p:
@@ -169,12 +205,17 @@ def path_is_protected(path: str, protected: list[str]) -> bool:
             elif fnmatch.fnmatchcase(norm, p):
                 return True
             continue
+        caseless = p.casefold() in CASELESS_NAMES
+        target = folded if caseless else norm
+        if caseless:
+            p = p.casefold()
+        agent = caseless and p in CASELESS_AGENT_FILES
         if p.endswith("/"):
-            if norm.startswith(p) or norm == p.rstrip("/"):
+            if target.startswith(p) or target == p.rstrip("/"):
                 return True
-            if p in AGENT_FILES and f"/{p}" in f"/{norm}":
+            if agent and f"/{p}" in f"/{target}":
                 return True
-        elif norm == p or (p in AGENT_FILES and norm.endswith("/" + p)):
+        elif target == p or (agent and target.endswith("/" + p)):
             return True
     return False
 
@@ -183,9 +224,8 @@ REVIEW_CHECK = "verdict"
 SECURITY_CHECK = "security"
 
 
-def failed_check_names(check_runs: list[dict], statuses: list[dict]) -> list[str]:
-    names = [r.get("name", "") for r in check_runs
-             if (r.get("status") or "").lower() == "completed" and (r.get("conclusion") or "").lower() in RUN_FAILED]
+def failed_check_names(check_runs: list[dict], statuses: list[dict], required: list[str] | None = None) -> list[str]:
+    names = [r.get("name", "") for r in check_runs if _run_failed(r, required)]
     names += [s.get("context", "") for s in statuses if (s.get("state") or "").lower() in STATUS_FAILED]
     return names
 
@@ -195,7 +235,7 @@ def close_reason(failed: list[str]) -> str:
     else checks_failed."""
     if any(n == f"review / {SECURITY_CHECK}" for n in failed):
         return "security_failed"
-    return "verdict_failed" if any(_matches(REVIEW_CHECK, n) for n in failed) else "checks_failed"
+    return "verdict_failed" if any(n == f"{GATE_PREFIX}{REVIEW_CHECK}" for n in failed) else "checks_failed"
 
 
 def section(body: str | None, heading: str) -> str:
