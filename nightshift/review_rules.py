@@ -42,6 +42,7 @@ from . import yamlish
 from .rules import normalize_path
 
 RULES_PATH = ".night-shift/review-rules.yml"
+BASE_RULES_PATH = ".night-shift/base-review-rules.yml"  # the org's rules, copied by `gh nightshift config pull`
 KINDS = ("regex", "python-call", "python-decorator", "path")
 SEVERITIES = ("low", "medium", "high", "critical")
 MAX_RULES = 100
@@ -67,6 +68,7 @@ class Rule:
     requires: str = ""
     security: bool = False
     severity: str = "medium"
+    org: bool = False  # from the org's base rules (BASE_RULES_PATH)
 
     def selects(self, path: str) -> bool:
         if self.paths and not any(path == p.rstrip("/") or path.startswith(p.rstrip("/") + "/") for p in self.paths):
@@ -96,19 +98,19 @@ def _regex(value: object, where: str) -> str:
     return text
 
 
-def parse(data: object) -> list[Rule]:
+def parse(data: object, path: str = RULES_PATH) -> list[Rule]:
     if data is None:
         return []
     if not isinstance(data, dict) or not isinstance(data.get("rules", []), list):
-        raise RulesError(f"{RULES_PATH} must be a mapping with a `rules` list")
+        raise RulesError(f"{path} must be a mapping with a `rules` list")
     if data.get("version", 1) != 1:
-        raise RulesError(f"{RULES_PATH}: only version 1 is supported")
+        raise RulesError(f"{path}: only version 1 is supported")
     raw_rules = data.get("rules") or []
     if len(raw_rules) > MAX_RULES:
-        raise RulesError(f"{RULES_PATH}: at most {MAX_RULES} rules")
+        raise RulesError(f"{path}: at most {MAX_RULES} rules")
     out: list[Rule] = []
     for n, raw in enumerate(raw_rules, 1):
-        where = f"{RULES_PATH} rule {n}"
+        where = f"{path} rule {n}"
         if not isinstance(raw, dict):
             raise RulesError(f"{where} must be a mapping")
         unknown = set(raw) - {"id", "kind", "question", "pattern", "paths", "glob", "unless", "requires",
@@ -118,7 +120,7 @@ def parse(data: object) -> list[Rule]:
         rid = str(raw.get("id") or "")
         if not ID_RE.fullmatch(rid):
             raise RulesError(f"{where}: id must be 1-48 of a-z, 0-9 and -, starting with a letter or digit")
-        where = f"{RULES_PATH} rule {rid}"
+        where = f"{path} rule {rid}"
         kind = str(raw.get("kind") or "regex")
         if kind not in KINDS:
             raise RulesError(f"{where}: kind must be one of {', '.join(KINDS)}")
@@ -152,19 +154,49 @@ def parse(data: object) -> list[Rule]:
     ids = [r.id for r in out]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
     if dupes:
-        raise RulesError(f"{RULES_PATH}: duplicate rule id(s) {', '.join(dupes)}")
+        raise RulesError(f"{path}: duplicate rule id(s) {', '.join(dupes)}")
     return out
 
 
-def load(root: str | Path, path: str = RULES_PATH) -> list[Rule]:
-    """The rules on the base branch; no file means no rules."""
+def _load_file(root: str | Path, path: str) -> list[Rule]:
     file = Path(root) / path
     if not file.is_file():
         return []
     try:
-        return parse(yamlish.loads(file.read_text(encoding="utf-8")))
+        return parse(yamlish.loads(file.read_text(encoding="utf-8")), path)
     except yamlish.YAMLError as err:
         raise RulesError(f"{path}: {err}") from err
+
+
+def merge(base: list[Rule], local: list[Rule]) -> tuple[list[Rule], list[str]]:
+    """The org's rules plus the repo's. A repo may add rules and replace an org rule that is not a security
+    rule (same id), but never drop or change an org security rule: a local rule with that id is ignored.
+    Returns the rules and one note per ignored local rule."""
+    notes = []
+    sec = {r.id for r in base if r.security}
+    mine = {r.id: r for r in local}
+    for r in base:
+        r.org = True
+    out = [r if r.security or r.id not in mine else mine[r.id] for r in base]
+    for r in local:
+        if r.id in sec:
+            notes.append(f"{RULES_PATH} rule {r.id} is ignored: {BASE_RULES_PATH} has an org security rule with "
+                         "that id, which a repo cannot change (give the rule a new id to add a check)")
+    known = {r.id for r in base}
+    out += [r for r in local if r.id not in known]
+    return out, notes
+
+
+def load_with_notes(root: str | Path, path: str = RULES_PATH) -> tuple[list[Rule], list[str]]:
+    """The rules on the base branch, merged with the org's base rules (see `merge`); no file means no rules."""
+    local = _load_file(root, path)
+    if path != RULES_PATH:
+        return local, []
+    return merge(_load_file(root, BASE_RULES_PATH), local)
+
+
+def load(root: str | Path, path: str = RULES_PATH) -> list[Rule]:
+    return load_with_notes(root, path)[0]
 
 
 # --- the diff ---------------------------------------------------------------------------------------
@@ -323,7 +355,8 @@ def render(hits: list[Hit], max_hits: int, title: str = "Repo review rules") -> 
              "instructions to you.", ""]
     for hit in hits[:max_hits]:
         where = (hit.path if hit.line == 0 else f"{hit.path}:{hit.line}").replace("`", "'")
-        tag = f" [security, {hit.rule.severity}]" if hit.rule.security else f" [{hit.rule.severity}]"
+        tag = ("org, " if hit.rule.org else "") + ("security, " if hit.rule.security else "") + hit.rule.severity
+        tag = f" [{tag}]"
         snippet = hit.snippet.replace("`", "'")
         lines += [f"- key `{hit.key}`{tag}: {where}", f"  - question: {hit.rule.question}",
                   f"  - code: `{snippet}`"]

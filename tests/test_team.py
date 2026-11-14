@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -1107,6 +1108,60 @@ class OrgConfig(unittest.TestCase):
         from nightshift.config import load
 
         self.assertEqual(load(root).default_model, "haiku")
+
+
+    def test_config_pull_copies_the_org_review_rules(self):
+        from nightshift import review_rules
+
+        root = Path(tempfile.mkdtemp())
+        (root / ".night-shift").mkdir()
+        (root / ".night-shift/config.yml").write_text(TEAM.replace("version: 1\n", "version: 1\nextends: org/.github\n"))
+        (root / review_rules.RULES_PATH).write_text("rules:\n  - id: owner\n    pattern: x\n    question: Fine?\n")
+        org_rules = "rules:\n  - id: owner\n    pattern: delete\n    question: Owner checked?\n    security: true\n"
+        f = FakeGitHub()
+        f.other_repos["org/.github"] = {"contents": {".night-shift/config.yml": "models:\n  default: haiku\n",
+                                                     review_rules.RULES_PATH: org_rules}}
+        out = io.StringIO()
+        self.assertEqual(cli.main(["config", "pull", "--root", str(root), "--repo", "o/r", "--dry-run"],
+                                  transport=f, out=out), 0)
+        self.assertFalse((root / review_rules.BASE_RULES_PATH).exists())
+        self.assertIn("would write .night-shift/base-review-rules.yml", out.getvalue())
+        out = io.StringIO()
+        self.assertEqual(cli.main(["config", "pull", "--root", str(root), "--repo", "o/r"], transport=f, out=out), 0)
+        self.assertIn("warning: .night-shift/review-rules.yml rule owner is ignored", out.getvalue())
+        (rule,) = review_rules.load(root)
+        self.assertEqual((rule.pattern, rule.security, rule.org), ("delete", True, True))
+        # The org drops its rules: the copy goes too.
+        del f.other_repos["org/.github"]["contents"][review_rules.RULES_PATH]
+        self.assertEqual(cli.main(["config", "pull", "--root", str(root), "--repo", "o/r"], transport=f, out=out), 0)
+        self.assertFalse((root / review_rules.BASE_RULES_PATH).exists())
+
+    def test_config_pull_rejects_bad_org_rules_without_writing(self):
+        root = Path(tempfile.mkdtemp())
+        (root / ".night-shift").mkdir()
+        (root / ".night-shift/config.yml").write_text(TEAM.replace("version: 1\n", "version: 1\nextends: org/.github\n"))
+        f = FakeGitHub()
+        f.other_repos["org/.github"] = {"contents": {".night-shift/config.yml": "models:\n  default: haiku\n",
+                                                     ".night-shift/review-rules.yml": "rules:\n  - id: Bad\n"}}
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            self.assertEqual(cli.main(["config", "pull", "--root", str(root), "--repo", "o/r"], transport=f,
+                                      out=io.StringIO()), 2)
+        self.assertIn("org/.github:.night-shift/review-rules.yml", err.getvalue())
+        self.assertFalse((root / ".night-shift/base.yml").exists())
+
+    def test_reduce_is_inherited_only_where_the_planner_runs(self):
+        from nightshift.config import loads as load_text
+
+        base = "reduce:\n  enabled: true\n  window_hours: 24\n"
+        cfg = load_text(TEAM, base)
+        self.assertEqual((cfg.reduce_enabled, cfg.reduce_window_hours), (False, 24))
+        cfg = load_text(TEAM + "planner:\n  enabled: true\n", base)
+        self.assertTrue(cfg.reduce_enabled)
+        cfg = load_text(TEAM + "planner:\n  enabled: true\n", base + "planner:\n  enabled: false\n")
+        self.assertTrue(cfg.reduce_enabled)
+        cfg = load_text(TEAM + "planner:\n  enabled: true\nreduce:\n  enabled: false\n", base)
+        self.assertFalse(cfg.reduce_enabled)
 
 
 class OrgStatsWeeklyAuditLog(unittest.TestCase):

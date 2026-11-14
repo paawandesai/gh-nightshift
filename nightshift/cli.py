@@ -898,15 +898,45 @@ def cmd_config(ctx: Ctx) -> int:
     text = base64.b64decode(data["content"]).decode("utf-8")
     header = (f"# Copied from {cfg.extends}:{CONFIG_PATH} by `gh nightshift config pull`; do not edit here.\n"
               f"# Only shared settings are used (models, limits, protected_paths, required_checks, timezone, risk,\n"
-              f"# digest, planner), and only to add checks; lanes, labels, merge mode, tool_ref, logins, auth and\n"
-              f"# secret names stay in config.yml.\n")
+              f"# digest, planner, security, reduce), and only to add checks; lanes, labels, merge mode, tool_ref,\n"
+              f"# logins, auth and secret names stay in config.yml.\n")
     loads((ctx.root / CONFIG_PATH).read_text(encoding="utf-8"), text)  # the merged result must be valid
+    from . import review_rules, yamlish
+
+    rules = ctx.gh.get_or_none(f"repos/{cfg.extends}/contents/{review_rules.RULES_PATH}") or {}
+    rules_text = base64.b64decode(rules["content"]).decode("utf-8") if rules.get("content") else None
+    notes: list[str] = []
+    if rules_text is not None:
+        where = f"{cfg.extends}:{review_rules.RULES_PATH}"
+        try:
+            org = review_rules.parse(yamlish.loads(rules_text), where)
+            notes = review_rules.merge(org, review_rules.load(ctx.root))[1]
+        except yamlish.YAMLError as err:
+            raise ConfigError(f"{where}: {err}") from err
+        except review_rules.RulesError as err:
+            raise ConfigError(str(err)) from err
     target = ctx.root / BASE_PATH
+    rules_target = ctx.root / review_rules.BASE_RULES_PATH
     if ctx.gh.dry_run:
         ctx.say(f"[dry-run] would write {BASE_PATH} from {cfg.extends}")
+        if rules_text is not None:
+            ctx.say(f"[dry-run] would write {review_rules.BASE_RULES_PATH} from {cfg.extends}")
+        elif rules_target.is_file():
+            ctx.say(f"[dry-run] would remove {review_rules.BASE_RULES_PATH} ({cfg.extends} has no review rules)")
         return 0
     target.write_text(header + text, encoding="utf-8")
     ctx.say(f"wrote {BASE_PATH} from {cfg.extends}; commit it so the workflows use it")
+    if rules_text is not None:
+        rules_target.write_text(
+            f"# Copied from {cfg.extends}:{review_rules.RULES_PATH} by `gh nightshift config pull`; do not edit here.\n"
+            f"# The repo's {review_rules.RULES_PATH} adds to these rules; it cannot drop or change a security rule.\n"
+            + rules_text, encoding="utf-8")
+        ctx.say(f"wrote {review_rules.BASE_RULES_PATH} from {cfg.extends}; commit it too")
+    elif rules_target.is_file():
+        rules_target.unlink()
+        ctx.say(f"removed {review_rules.BASE_RULES_PATH}: {cfg.extends} has no review rules")
+    for note in notes:
+        ctx.say(f"warning: {note}")
     return 0
 
 
