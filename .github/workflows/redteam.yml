@@ -240,20 +240,25 @@ jobs:
           if [ -z "$TOKEN" ]; then echo "::error::red-team Claude token is empty"; exit 1; fi
           P="$RUNNER_TEMP/validate"
           if [ "$TOKEN_IN_ENV" = "true" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN"; exec 3< /dev/null; else export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$TOKEN"); fi
-          # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
           # PYTHONPATH and PYTHONSAFEPATH are for the tool; with them the repo's own tests could not import the repo.
-          env -u TOKEN -u PYTHONPATH -u PYTHONSAFEPATH claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
-            --model "$MODEL" --max-turns 80 --add-dir "$P" $PERMISSION_FLAGS \
-            --disallowedTools "WebFetch,WebSearch,NotebookEdit" > "$P/claude.json" 2> /dev/null \
+          # Every GITHUB_* variable is dropped too: some name the runner's file commands, and what is written to those
+          # files runs in later steps, including the seal step, which holds the token.
+          # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
+          ( for v in "${!GITHUB_@}"; do unset "$v"; done
+            exec env -u TOKEN -u PYTHONPATH -u PYTHONSAFEPATH claude -p "$(cat "$P/prompt.md")" --output-format json \
+              --json-schema "$(cat "$P/schema.json")" --model "$MODEL" --max-turns 80 --add-dir "$P" $PERMISSION_FLAGS \
+              --disallowedTools "WebFetch,WebSearch,NotebookEdit" > "$P/claude.json" 2> /dev/null ) \
             && rc=0 || rc=$?
           exec 3<&-; unset CLAUDE_CODE_OAUTH_TOKEN; echo "claude exit code: $rc"
           exit 0   # a run that did not finish gets the verdict not_reproduced below, and is tried again next time
       # No secret is in this step's environment: it runs a test a model wrote.
       - name: Run the repro test twice (the harness decides)
         if: steps.pick.outputs.run == 'true'
+        env:
+          SHA: ${{ needs.context.outputs.sha }}
         run: |
           export PYTHONPATH="$RUNNER_TEMP/nightshift-tool"
-          python3 -m nightshift redteam verify --out-dir "$RUNNER_TEMP/validate"
+          python3 -m nightshift redteam verify --out-dir "$RUNNER_TEMP/validate" --sha "$SHA"
       # Anything the model or its test left running could read the next step's environment, which holds the token.
       - name: Stop processes the run left behind
         if: always() && steps.pick.outputs.run == 'true' && runner.environment == 'github-hosted'

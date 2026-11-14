@@ -383,14 +383,18 @@ Claude token (`redteam.claude_token_secret`): the encrypted findings in public l
 be reached in practice. With `redteam: {validate: {enabled: true}}` on a **private** repo, a `validate` job runs
 between `scan` and `file`. Each new finding (at most `validate.max_per_run`, default and maximum 3, each on its
 own fresh runner) gets main checked out and the owning lane's `setup.commands` run, and Claude writes one test
-that performs the attack and asserts the safe behaviour, so it fails while the bug exists. Then the harness, not
-the model, runs that test twice and decides:
+that performs the attack and asserts the safe behaviour, so it fails while the bug exists. Claude returns the
+test's path and its runner, one of `pytest`, `unittest`, `node` (node:test), `go`, `cargo` (an integration test in
+`<crate>/tests/`), `jest`, `vitest` or `mocha` (the last three from the repo's own `node_modules`). Then the
+harness, not the model, checks with git that the checkout is main plus that one new test (and at most one helper
+file beside it, never a `conftest.py` or runner configuration), builds the runner's command itself, runs it twice
+without a shell and reads the runner's own report (JUnit XML, `go test -json`, JSON, or cargo's result lines):
 
 | Verdict | When | What `file` does at `level: 1` |
 |---|---|---|
-| `validated` | both runs fail as a test failure (exit code 1, no import, syntax or collection error) | files the issue with the repro test, the command and the end of the output |
-| `not_reproduced` | the test passes, errors, times out or is flaky | does not file it; lists its fingerprint on the night log and skips it in later scans. A `critical` one is still filed, labelled `unconfirmed` |
-| `not_testable` | the model says the runner lacks what the test needs | files it labelled `unconfirmed` |
+| `validated` | both runs fail on an assertion: not a fixture, setup, import or build error, an uncaught exception or a panic, and not a run with no report (a missing runner) | files the issue with the repro test, the command and the end of the output |
+| `not_reproduced` | the test passes, breaks, times out or is flaky, or a file from main was changed or something else was added | does not file it; lists its fingerprint on the night log and skips it in later scans. A `critical` one is still filed, labelled `unconfirmed` |
+| `not_testable` | the model says the runner lacks what the test needs, or names a runner the harness does not support | files it labelled `unconfirmed` |
 
 A finding with no result yet (more than `max_per_run` in one night, or a validation job that failed) is not
 filed, and the scan does not record its position, so the next run covers the range again. `level: 0` is a shadow

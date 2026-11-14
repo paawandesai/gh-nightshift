@@ -650,7 +650,7 @@ def _redteam_validate(ctx: Ctx) -> int:
         answer_file = out / "claude.json"
         answer = validate.claude_result(answer_file.read_text(encoding="utf-8", errors="replace")) \
             if answer_file.is_file() else None
-        result = validate.verify(cfg, Path(ctx.root).resolve(), f, answer)
+        result = validate.verify(cfg, Path(ctx.root).resolve(), f, answer, base=a.sha or "HEAD")
         (out / "result.json").write_text(json.dumps(result), encoding="utf-8")
         ctx.say(f"verdict: {result['verdict']}")   # the verdict alone: no title, path or output
         return 0
@@ -1295,6 +1295,7 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--github-output")
     c = rsub.add_parser("verify", parents=[sub_common], help="(validate job) run the repro test twice and write the verdict")
     c.add_argument("--out-dir", required=True)
+    c.add_argument("--sha", default="", help="the commit the job checked out; the test must be the only change from it")
     c = rsub.add_parser("seal", parents=[sub_common], help="(validate job) encrypt the result for the file job")
     c.add_argument("--index", type=int, required=True, choices=range(3))
     c.add_argument("--out-dir", required=True)
