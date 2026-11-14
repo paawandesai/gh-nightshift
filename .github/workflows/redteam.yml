@@ -3,6 +3,9 @@
 #   scan     (Claude token only)    read-only Claude run -> findings, ENCRYPTED with the Claude token and passed on
 #                                   as a job output (a job output is printed in the next job's log, and logs and
 #                                   artifacts of a public repo are readable by anyone, so plaintext never leaves)
+#   validate (Claude token only)    optional (redteam.validate, private repos): one fresh runner per new finding, at
+#                                   most three. Claude writes a repro test; the harness runs it twice and seals the
+#                                   verdict. The one red-team job where a model has a shell: no GitHub token is used
 #   file     (PAT or App token)     decrypt inside a pipe; file new findings as draft private security advisories
 #                                   (public repo) or `security` + `human` issues (private repo); record the commit
 name: night-shift-redteam
@@ -69,6 +72,7 @@ jobs:
       run: ${{ steps.ctx.outputs.run }}
       sha: ${{ steps.ctx.outputs.sha }}
       base: ${{ steps.ctx.outputs.base }}
+      validate: ${{ steps.ctx.outputs.validate }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -159,8 +163,127 @@ jobs:
           if [ "${#sealed}" -lt 80000 ] || [ "${#sealed}" -gt 120000 ]; then echo "::error::could not seal the findings"; exit 1; fi
           echo "findings=$sealed" >> "$GITHUB_OUTPUT"
 
-  file:
+  validate:
     needs: [context, scan]
+    if: needs.context.outputs.validate == 'true'
+    runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [0, 1, 2]
+    outputs:
+      # Each matrix job sets only its own output, so the three do not overwrite one another.
+      r0: ${{ steps.seal.outputs.r0 }}
+      r1: ${{ steps.seal.outputs.r1 }}
+      r2: ${{ steps.seal.outputs.r2 }}
+    env:
+      INDEX: ${{ matrix.index }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.context.outputs.sha }}
+          persist-credentials: false
+      # The tool lives outside the workspace the model works in. (The model has a shell here, so this keeps honest
+      # runs honest; it is not a wall. See SECURITY.md, "Validation".)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: redteam-context
+          path: ${{ runner.temp }}/redteam
+      - name: Pick this job's finding
+        id: pick
+        env:
+          SEALED: ${{ needs.scan.outputs.findings }}
+          SEAL_KEY: ${{ secrets.claude_token }}
+        run: |
+          set -euo pipefail
+          mv .nightshift-tool "$RUNNER_TEMP/nightshift-tool"
+          export PYTHONPATH="$RUNNER_TEMP/nightshift-tool"
+          printf '%s' "$SEALED" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:SEAL_KEY \
+            | python3 -m nightshift redteam candidate --index "$INDEX" --findings-file - \
+                --seen-file "$RUNNER_TEMP/redteam/seen.json" --out-dir "$RUNNER_TEMP/validate" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.pick.outputs.run == 'true'
+        with:
+          node-version: 22
+      - name: Lane setup commands
+        if: steps.pick.outputs.run == 'true'
+        run: |
+          if [ -s "$RUNNER_TEMP/validate/setup.sh" ]; then bash -euo pipefail "$RUNNER_TEMP/validate/setup.sh"; else echo "no setup commands for the owning lane"; fi
+      - name: Install Claude Code
+        if: steps.pick.outputs.run == 'true'
+        run: |
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
+          echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
+      - name: Note running processes
+        id: procs
+        if: steps.pick.outputs.run == 'true'
+        run: echo "pids=$(ps -u "$(id -u)" -o pid= | tr -s ' \n' ' ')" >> "$GITHUB_OUTPUT"
+      - name: Write the repro test
+        if: steps.pick.outputs.run == 'true'
+        env:
+          TOKEN: ${{ secrets.claude_token }}
+          TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
+          MODEL: ${{ vars.REDTEAM_MODEL || inputs.model }}
+          PERMISSION_FLAGS: ${{ vars.CLAUDE_PERMISSION_FLAGS || '--dangerously-skip-permissions' }}
+        # The finding and the model's work stay out of the log: only the exit code is printed.
+        run: |
+          set -uo pipefail
+          if [ -z "$TOKEN" ]; then echo "::error::red-team Claude token is empty"; exit 1; fi
+          P="$RUNNER_TEMP/validate"
+          if [ "$TOKEN_IN_ENV" = "true" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN"; exec 3< /dev/null; else export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$TOKEN"); fi
+          # shellcheck disable=SC2086  # PERMISSION_FLAGS is intentionally word-split
+          # PYTHONPATH and PYTHONSAFEPATH are for the tool; with them the repo's own tests could not import the repo.
+          env -u TOKEN -u PYTHONPATH -u PYTHONSAFEPATH claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
+            --model "$MODEL" --max-turns 80 --add-dir "$P" $PERMISSION_FLAGS \
+            --disallowedTools "WebFetch,WebSearch,NotebookEdit" > "$P/claude.json" 2> /dev/null \
+            && rc=0 || rc=$?
+          exec 3<&-; unset CLAUDE_CODE_OAUTH_TOKEN; echo "claude exit code: $rc"
+          exit 0   # a run that did not finish gets the verdict not_reproduced below, and is tried again next time
+      # No secret is in this step's environment: it runs a test a model wrote.
+      - name: Run the repro test twice (the harness decides)
+        if: steps.pick.outputs.run == 'true'
+        run: |
+          export PYTHONPATH="$RUNNER_TEMP/nightshift-tool"
+          python3 -m nightshift redteam verify --out-dir "$RUNNER_TEMP/validate"
+      # Anything the model or its test left running could read the next step's environment, which holds the token.
+      - name: Stop processes the run left behind
+        if: always() && steps.pick.outputs.run == 'true' && runner.environment == 'github-hosted'
+        env:
+          BEFORE: ${{ steps.procs.outputs.pids }}
+        run: |
+          KEEP=" ${BEFORE} "
+          P=$$
+          while [ -n "$P" ] && [ "$P" -gt 1 ]; do KEEP="$KEEP $P "; P="$(ps -o ppid= -p "$P" | tr -d ' ')"; done
+          for ROUND in 1 2 3; do
+            for PID in $(ps -u "$(id -u)" -o pid=); do
+              case "$KEEP" in *" $PID "*) continue ;; esac
+              kill -9 "$PID" 2> /dev/null || true
+            done
+            echo "cleanup round $ROUND done"
+          done
+      - name: Seal the result
+        id: seal
+        if: steps.pick.outputs.run == 'true'
+        env:
+          SEAL_KEY: ${{ secrets.claude_token }}
+        run: |
+          export PYTHONPATH="$RUNNER_TEMP/nightshift-tool"
+          python3 -m nightshift redteam seal --index "$INDEX" --out-dir "$RUNNER_TEMP/validate" --github-output "$GITHUB_OUTPUT"
+
+  file:
+    needs: [context, scan, validate]
+    # Runs after validate whether it ran, was skipped or lost a matrix job: a finding without a result waits for
+    # the next run. It never runs without a finished scan.
+    if: always() && needs.context.outputs.run == 'true' && needs.scan.result == 'success'
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     # Environment secrets of the same name replace the caller's: keep the PAT or App key there, limited to
     # the default branch, so a workflow pushed on another branch cannot read it.
@@ -197,7 +320,11 @@ jobs:
           SEAL_KEY: ${{ secrets.claude_token }}       # only to decrypt; this job never runs Claude
           SHA: ${{ needs.context.outputs.sha }}
           BASE: ${{ needs.context.outputs.base }}
+          VALIDATION: ${{ needs.context.outputs.validate == 'true' && 'true' || 'false' }}
+          VALIDATION_0: ${{ needs.validate.outputs.r0 }}   # ciphertext, like SEALED
+          VALIDATION_1: ${{ needs.validate.outputs.r1 }}
+          VALIDATION_2: ${{ needs.validate.outputs.r2 }}
         run: |
           set -euo pipefail
           printf '%s' "$SEALED" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:SEAL_KEY \
-            | python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file -
+            | python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file - --validation "$VALIDATION"

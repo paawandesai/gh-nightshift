@@ -1,5 +1,5 @@
 """Prompt templates and output schemas. A project overrides a prompt by committing
-`.night-shift/prompts/<name>.md` (worker, review, planner, security, reduce, redteam) on the default branch."""
+`.night-shift/prompts/<name>.md` (worker, review, planner, security, reduce, redteam, validate) on the default branch."""
 from __future__ import annotations
 
 import json
@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import Config
 from .planner import PLAN_SCHEMA
 from .redteam import REDTEAM_SCHEMA
+from .validate import VALIDATE_SCHEMA
 
 _STRS = {"type": "array", "items": {"type": "string"}}
 WORKER_SCHEMA = {
@@ -68,8 +69,8 @@ SECURITY_SCHEMA = {
 }
 
 SCHEMAS = {"worker": WORKER_SCHEMA, "review": REVIEW_SCHEMA, "planner": PLAN_SCHEMA, "security": SECURITY_SCHEMA,
-           "reduce": PLAN_SCHEMA, "redteam": REDTEAM_SCHEMA}
-PROMPTS = ("worker", "review", "planner", "security", "reduce", "redteam")
+           "reduce": PLAN_SCHEMA, "redteam": REDTEAM_SCHEMA, "validate": VALIDATE_SCHEMA}
+PROMPTS = ("worker", "review", "planner", "security", "reduce", "redteam", "validate")
 # Appended when a project's own review or security prompt predates the rules file, so its hits are still seen.
 RULES_FALLBACK = ("\n\nRepo review rules: `{path}` lists code this PR adds or changes that the repository's own rules "
                   "selected. Answer every item in `rule_answers` with its key exactly as listed: `yes` only if the "

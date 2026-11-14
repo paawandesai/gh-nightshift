@@ -9,6 +9,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Dynamic validation of red-team findings (`redteam.validate`, private repos): a `validate` job between `scan`
+  and `file` reproduces each new finding (at most 3 a run, each on a fresh runner) with a test that fails while
+  the bug exists. The harness runs the test twice and decides `validated`, `not_reproduced` or `not_testable`;
+  only validated findings are filed, with the repro test attached. Unreproduced critical findings and untestable
+  ones are filed with a new `unconfirmed` label. `redteam.level: 0` reports verdicts without filing anything.
+  A new `redteam-skip` marker remembers what did not reproduce. Run `gh nightshift setup` for the label.
+- A shared security context, `.night-shift/SECURITY.md`, which the red-team scan, the validation runs and the
+  security reviewer read from the base branch before they start. Fingerprints under its "Not a finding" heading
+  are not validated or filed again. `init` (and `init --regenerate`, when the file is missing) writes a starter.
 - Repo review rules: `.night-shift/review-rules.yml` (read from the base branch, protected from agents) holds
   repo-specific checks of four kinds (`regex`, `python-call`, `python-decorator`, `path`). The review job runs
   them deterministically over the PR's added and changed lines and hands every hit to the reviewer, which must

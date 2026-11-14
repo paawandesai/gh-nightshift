@@ -55,6 +55,10 @@ review:
 #   min_severity: high         # file high and critical; lower ones are only counted
 #   claude_token_secret: CLAUDE_TOKEN_SECURITY   # default: security.claude_token_secret, then review's
 #   model: opus                # default: security.model, then models.review
+#   validate:                  # private repos: reproduce each finding with a failing test before filing it
+#     enabled: true
+#     max_per_run: 3           # 1 to 3 findings a run; the rest wait for the next run
+#   level: 1                   # with validate: 0 reports only, 1 files validated findings
 # reduce:                      # optional: nightly cross-lane pass over merged agent PRs (see README, "Reduce")
 #   enabled: true
 #   schedule: "30 6 * * *"     # UTC; no minute in common with planner.schedule

@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
 
-from . import review_rules, scaffold
+from . import config as config_mod
+from . import review_rules, scaffold, security_context
 from .rules import path_is_protected
 from .config import CONFIG_PATH, Config, ConfigError, load
 from .gh import GH, GHError
@@ -279,6 +280,20 @@ def rules_checks(root: Path, cfg: Config) -> list[Check]:
         out.append(Check(WARN, f"on a public repo the red-team scan files draft advisories: {who} needs Repository "
                                "security advisories: Read and write. On a private repo it files `security` issues instead",
                          "App: approve the new permission on the App's installation; PAT: edit it in Developer settings"))
+        if cfg.redteam_validate_enabled:
+            missing = [lane.name for lane in cfg.lanes if not lane.test_command]
+            if missing:
+                out.append(Check(WARN, f"redteam.validate is on but lane(s) {', '.join(missing)} have no test_command: "
+                                       "the validation run has to guess how to run a repro test there",
+                                 "set lanes[].test_command"))
+            if not (root / security_context.PATH).is_file():
+                out.append(Check(WARN, f"redteam.validate is on but {security_context.PATH} is missing: every pass "
+                                       "starts without the shared security context",
+                                 "run `gh nightshift init --regenerate` for a starter file, then fill it in"))
+            if cfg.redteam_token in config_mod.claude_secrets(cfg) | {cfg.review_token_secret}:
+                out.append(Check(WARN, "redteam.validate gives a model a shell in a job that holds the red-team Claude "
+                                       f"token, and {cfg.redteam_token} is also a lane's or the reviewer's token",
+                                 "give the scan its own token: redteam.claude_token_secret"))
     return out
 
 

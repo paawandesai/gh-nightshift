@@ -176,7 +176,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `review` | `reuse_on_update: true` | Keep a passed verdict when update-branch only merged main (see Merge modes) |
-| `redteam` | `enabled: false` | `enabled`, `schedule` (`0 5 * * *`), `min_severity` (`high`), `claude_token_secret` (default the security token; a dedicated token is recommended, see SECURITY.md), `model`. See Review rules and the security gate |
+| `redteam` | `enabled: false` | `enabled`, `schedule` (`0 5 * * *`), `min_severity` (`high`), `claude_token_secret` (default the security token; a dedicated token is recommended, see SECURITY.md), `model`, `validate` (`enabled: false`, `max_per_run: 3`) and `level` (`1`; `0` reports only), see Validation and the shared security context. See Review rules and the security gate |
 | `reduce` | `enabled: false` | `enabled`, `schedule` (`30 6 * * *`, no minute in common with `planner.schedule`), `window_hours` (48). Needs `planner.enabled`. See Reduce |
 | `security` | `enabled: false` | `enabled` (adds the required check `review / security`), `claude_token_secret` (default `review_token_secret`), `model`, `paths` (always reviewed, as are `risk.approve_paths`), `always` (review every PR). See Review rules |
 | `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths` (`init` writes a default list of dependency manifests, lockfiles, package-manager, editor, hook and container config), `auto_labels`, `codeowners` (see Risk tiers) |
@@ -215,7 +215,8 @@ outsider cannot forge attempt counts, unblock an issue or steer work.
 | `handoff-done` | merged PR | Hand-offs went out (makes the step idempotent) |
 | `plan` | night-log issue | A planner run: lane, `complete`, `docs_sha`; a reduce run has `lane: reduce` and `prs` |
 | `redteam` | night-log issue | A red-team scan: `sha` (the commit it reached) and `base` |
-| `redteam-finding` | draft security advisory or `security` issue | The finding's fingerprint `fp` (title + file), `wk` (CWE + file) and `sha`, so it is filed once |
+| `redteam-finding` | draft security advisory or `security` issue | The finding's fingerprint `fp` (title + file), `wk` (CWE + file), `sha` and, with validation on, `validated` (the verdict), so it is filed once |
+| `redteam-skip` | night-log issue | `fps`: fingerprints of findings whose repro test did not fail, so later scans skip them (a full scan tries them again) |
 
 **Hand-off.** When a PR merges, the picker posts a hand-off comment on every open issue whose `Blocked by`
 line lists the merged issue (for PRs merged in the last 72 hours). The comment gives the interface as built
@@ -377,6 +378,33 @@ Findings never appear in a log or an artifact, a fingerprint (title and file, or
 rewords titles) keeps a finding from being filed twice, and a scan that fails or is cut short records nothing, so the next one covers the same range again. The
 scan needs `bot_login` in the config. Dispatches from another branch are skipped. Give the scan its own
 Claude token (`redteam.claude_token_secret`): the encrypted findings in public logs are only as safe as that token.
+
+**Validation and the shared security context.** A scan that only reads code reports some things that cannot
+be reached in practice. With `redteam: {validate: {enabled: true}}` on a **private** repo, a `validate` job runs
+between `scan` and `file`. Each new finding (at most `validate.max_per_run`, default and maximum 3, each on its
+own fresh runner) gets main checked out and the owning lane's `setup.commands` run, and Claude writes one test
+that performs the attack and asserts the safe behaviour, so it fails while the bug exists. Then the harness, not
+the model, runs that test twice and decides:
+
+| Verdict | When | What `file` does at `level: 1` |
+|---|---|---|
+| `validated` | both runs fail as a test failure (exit code 1, no import, syntax or collection error) | files the issue with the repro test, the command and the end of the output |
+| `not_reproduced` | the test passes, errors, times out or is flaky | does not file it; lists its fingerprint on the night log and skips it in later scans. A `critical` one is still filed, labelled `unconfirmed` |
+| `not_testable` | the model says the runner lacks what the test needs | files it labelled `unconfirmed` |
+
+A finding with no result yet (more than `max_per_run` in one night, or a validation job that failed) is not
+filed, and the scan does not record its position, so the next run covers the range again. `level: 0` is a shadow
+mode: everything runs, the night log reports each verdict, nothing is filed and the scan's position does not
+move. Start there, read a few nights of results, then set `level: 1`. On a public repo validation stays off and
+findings are filed as before.
+
+Every security pass (the scan, the validation runs and `review / security`) first reads
+`.night-shift/SECURITY.md` from the default branch: a system map, the invariants the code must keep, the checks
+that guard fixed findings, and a "Not a finding" list. `init` writes a starter. An entry under "Not a finding"
+that names a fingerprint (`fp:` and the 16 characters the night log prints) stops that finding from being
+validated or filed again. The file is under `.night-shift/`, so agents cannot change it: only a PR a person
+merges does. Never put an open finding or an attack path in it. `doctor` warns when validation is on and a lane
+has no `test_command`, the file is missing, or the scan shares its Claude token with a lane or the reviewer.
 
 ## Merge modes
 

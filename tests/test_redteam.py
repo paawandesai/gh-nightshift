@@ -439,6 +439,7 @@ class SealTests(unittest.TestCase):
     def test_workflow_never_passes_plaintext_between_jobs(self):
         text = (Path(__file__).parent.parent / ".github/workflows/redteam.yml").read_text()
         scan, file_job = text.split("\n  scan:")[1].split("\n  file:")
+        scan = scan.split("\n  validate:")[0]   # the validate job has its own tests (test_validate.py)
         self.assertIn("openssl enc -aes-256-cbc", scan)
         self.assertIn("trap 'rm -f", scan)
         self.assertIn("truncate -s 65536", scan)
@@ -452,7 +453,8 @@ class SealTests(unittest.TestCase):
         self.assertEqual([ln.strip() for ln in run], [
             "set -euo pipefail",
             "printf '%s' \"$SEALED\" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:SEAL_KEY \\",
-            '| python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file -'])
+            '| python3 -m nightshift redteam publish --sha "$SHA" --base "$BASE" --findings-file - '
+            '--validation "$VALIDATION"'])
 
     @unittest.skipUnless(all(shutil.which(t) for t in ("openssl", "jq", "truncate")), "no openssl, jq or truncate")
     def test_seal_round_trip_matches_the_workflow(self):
