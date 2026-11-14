@@ -34,30 +34,84 @@ def read(root: str | Path) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
+_FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
+_HEADING_RE = re.compile(r" {0,3}(#{1,2})\s+(.*?)\s*#*\s*$")
+
+
+def visible(text: str) -> str:
+    """The text a person sees when the file is rendered: HTML comments (`<!-- ... -->`, also one never closed) are
+    removed. Inside a code fence a comment is shown as text, so it stays."""
+    out: list[str] = []
+    fence = ""            # the opening fence while inside a fenced block
+    in_comment = False
+    for line in text.splitlines():
+        if in_comment:
+            end = line.find("-->")
+            if end < 0:
+                continue
+            line, in_comment = line[end + 3:], False
+        elif fence:
+            m = _FENCE_RE.match(line)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not line[m.end():].strip():
+                fence = ""
+            out.append(line)
+            continue
+        m = _FENCE_RE.match(line)
+        if m and not (m.group(1)[0] == "`" and "`" in line[m.end():]):
+            fence = m.group(1)
+            out.append(line)
+            continue
+        kept = ""
+        while True:
+            start = line.find("<!--")
+            if start < 0:
+                kept += line
+                break
+            kept += line[:start]
+            end = line.find("-->", start + 4)
+            if end < 0:
+                in_comment = True
+                break
+            line = line[end + 3:]
+        out.append(kept)
+    return "\n".join(out)
+
+
 def section(text: str, heading: str) -> str:
-    """The body under a `## heading` (case folded), up to the next heading of the same or a higher level."""
+    """The body under a `## heading` (case folded, a trailing colon allowed), up to the next heading of the same or
+    a higher level. A `#` line inside a code fence is not a heading. Pass `visible(text)` to leave comments out."""
     out: list[str] = []
     inside = False
+    fence = ""
     for line in text.splitlines():
-        m = re.match(r"(#{1,2})\s+(.*?)\s*#*\s*$", line)
-        if m:
-            inside = len(m.group(1)) == 2 and m.group(2).strip().lower() == heading.lower()
-            continue
+        m = _FENCE_RE.match(line)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not line[m.end():].strip():
+                fence = ""
+        elif m and not (m.group(1)[0] == "`" and "`" in line[m.end():]):
+            fence = m.group(1)
+        else:
+            h = _HEADING_RE.match(line)
+            if h:
+                inside = len(h.group(1)) == 2 and h.group(2).strip().rstrip(":").strip().lower() == heading.lower()
+                continue
         if inside:
             out.append(line)
     return "\n".join(out).strip()
 
 
 def not_findings(text: str) -> set[str]:
-    """Fingerprints and weakness keys listed under "Not a finding". Only that section counts: an `fp:` anywhere
-    else in the file suppresses nothing."""
-    return set(_FP_RE.findall(section(text, NOT_A_FINDING)))
+    """Fingerprints and weakness keys listed under "Not a finding", as a person reading the rendered file sees
+    them: only that section counts (an `fp:` anywhere else suppresses nothing), a heading inside a code fence is
+    not a heading, and an `fp:` inside an HTML comment, which the rendered file hides, counts for nothing."""
+    return set(_FP_RE.findall(section(visible(text), NOT_A_FINDING)))
 
 
 def for_prompt(text: str) -> list[str]:
     """Context-file lines for a prompt's context document: fenced and defanged, like any other repo content."""
     from .planner import _fenced
 
+    text = visible(text)   # what a person reviewing the file sees, and nothing hidden from them
     if not text.strip():
         return [f"## Shared security context (`{PATH}`)", "", "(none yet: this repo has no shared security context)", ""]
     return [f"## Shared security context (`{PATH}`, from the base branch)", "",

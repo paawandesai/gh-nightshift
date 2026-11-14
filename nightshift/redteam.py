@@ -141,20 +141,34 @@ def range_diff(git: Git, sc: Scope) -> str:
     return text
 
 
-def skipped_fingerprints(gh: GH, cfg: Config) -> set[str]:
-    """Fingerprints an earlier run could not reproduce (trusted `redteam-skip` markers on the night log)."""
+def _marked(gh: GH, cfg: Config, kind: str) -> set[str]:
     log = gh.night_log(cfg.label("night_log"))
     out: set[str] = set()
-    for m in ns.trusted(gh.comments(log), gh.trusted, "redteam-skip") if log else []:
+    for m in ns.trusted(gh.comments(log), gh.trusted, kind) if log else []:
         out.update(x for x in str(m.get("fps") or "").split(",") if re.fullmatch(r"[0-9a-f]{16}", x))
     return out
 
 
+def skipped_fingerprints(gh: GH, cfg: Config) -> set[str]:
+    """Fingerprints an earlier run could not reproduce (trusted `redteam-skip` markers on the night log)."""
+    return _marked(gh, cfg, "redteam-skip")
+
+
+def shadow_fingerprints(gh: GH, cfg: Config) -> set[str]:
+    """Fingerprints a level-0 run already validated, whatever the verdict (trusted `redteam-shadow` markers)."""
+    return _marked(gh, cfg, "redteam-shadow")
+
+
 def known_fingerprints(gh: GH, cfg: Config, root: Path, full: bool) -> set[str]:
     """What the validate job need not look at again: findings already filed, entries under "Not a finding" in the
-    shared context, and (except on a full scan, which gives them a second chance) ones a run could not reproduce."""
+    shared context and, except on a full scan (which gives them a second chance), ones a run could not reproduce
+    and, at level 0 only, ones the shadow period already validated. Shadow records stop counting at level 1: the
+    scan's position never moved while they were made, so the first level-1 run validates those findings again and
+    files them."""
     seen = existing_fingerprints(gh, public=False) | security_context.not_findings(security_context.read(root))
-    return seen if full else seen | skipped_fingerprints(gh, cfg)
+    if full:
+        return seen
+    return seen | skipped_fingerprints(gh, cfg) | (shadow_fingerprints(gh, cfg) if cfg.redteam_level == 0 else set())
 
 
 def context(gh: GH, cfg: Config, git: Git, root: Path, sc: Scope, rules: list[review_rules.Rule]) -> tuple[str, dict]:
@@ -286,7 +300,9 @@ def _description(f: dict, fp: str, head: str, base: str, validation: dict | None
     desc = [f"Found by the night-shift red-team scan ({rng}). An unattended model wrote this; confirm it before "
             "acting. Severity is the model's estimate.", "",
             f"**Location:** `{ns.defang(f['location']).replace('`', '')}`"
-            + (f"  \n**CWE:** {ns.defang(f['cwe']).replace('`', '')}" if f["cwe"] else ""), "",
+            + (f"  \n**CWE:** {ns.defang(f['cwe']).replace('`', '')}" if f["cwe"] else "")
+            + f"  \n**Fingerprint:** `fp:{fp}` (if this is not a real problem, list it with the reason under "
+            f"\"Not a finding\" in `{security_context.PATH}` and later scans drop it)", "",
             *block("Evidence", f["evidence"]), *block("Attack path", f["attack_path"]), *block("Suggested fix", f["fix"]),
             *_repro(validation),
             ns.marker("redteam-finding", fp=fp, sha=head, **({"wk": wk} if wk else {}),
@@ -310,18 +326,24 @@ class FileResult:
     unconfirmed: int = 0                                     # filed with the `unconfirmed` label
     unreproduced: list[tuple[str, str]] = field(default_factory=list)   # (fingerprint, title): not filed
     deferred: int = 0                                        # no validation result yet: the next run takes them
+    known: int = 0                                           # not validated: already decided (see known_fingerprints)
     shadow: list[str] = field(default_factory=list)          # level 0: what would have happened, nothing filed
+    shadow_fps: list[str] = field(default_factory=list)      # level 0: fingerprints validated this run
 
 
 UNCONFIRMED = "unconfirmed"
 
 
 def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public: bool,
-                  validation: dict[str, dict] | None = None) -> FileResult:
+                  validation: dict[str, dict] | None = None, known: set[str] | None = None) -> FileResult:
     """File what the scan found. With `validation` (results by fingerprint, private repos only) a finding is filed
     only when its repro test failed on main; one that could not be tested, or a critical one that did not
     reproduce, is filed with the `unconfirmed` label; the rest are left out and remembered. At `redteam.level` 0
-    nothing is filed at all."""
+    nothing is filed at all.
+
+    `known`: the fingerprints the validate jobs were told to skip (seen.json from the context job). A finding
+    listed there got no result on purpose, so it is counted as decided, not left waiting. "Not a finding" entries
+    in the shared context are always in it; without validation the caller passes those alone."""
     floor = SEVERITIES.index(cfg.redteam_min_severity)
     result = FileResult()
     found = findings_of(data)
@@ -334,10 +356,14 @@ def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public:
     except GHError as err:
         result.failed.append(f"cannot list earlier findings: {err}")
         return result
+    decided: set[str] = set(known or ())
     for f in keep:
         fp, wk = fingerprint(f), weakness_key(f)
         if fp in seen or (wk and wk in seen):
             result.duplicates += 1
+            continue
+        if fp in decided or (wk and wk in decided):
+            result.known += 1
             continue
         labels = [LABEL, cfg.label("human")]
         v = None
@@ -348,9 +374,12 @@ def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public:
                 continue
             if cfg.redteam_level == 0:
                 result.shadow.append(f"{f['severity']} `{fp}`: {v['verdict']} ({ns.one_line(ns.defang(v['reason']), 120)})")
+                result.shadow_fps.append(fp)
+                decided.update(k for k in (fp, wk) if k)
                 continue
             if v["verdict"] == "not_reproduced" and f["severity"] != "critical":
                 result.unreproduced.append((fp, ns.one_line(ns.defang(f["title"]), 120)))
+                decided.update(k for k in (fp, wk) if k)
                 continue
             if v["verdict"] != "validated":
                 labels.append(UNCONFIRMED)
@@ -395,13 +424,17 @@ def summary(result: FileResult, head: str, base: str, cfg: Config, public: bool)
     lines += [f"  - {x}" for x in result.filed]
     if result.duplicates:
         lines.append(f"- {result.duplicates} already filed earlier")
+    if result.known:
+        lines.append(f"- {result.known} skipped: listed under \"Not a finding\", not reproduced by an earlier run"
+                     + (" or already validated in shadow mode" if cfg.redteam_level == 0 else ""))
     if result.below:
         lines.append(f"- {result.below} below {cfg.redteam_min_severity} (not filed; lower `redteam.min_severity` to file them)")
     if result.failed:
         lines.append(f"- {len(result.failed)} could not be filed (see the workflow log)")
     if result.shadow:
         lines += ["", f"Level 0 (report only): {len(result.shadow)} finding(s) went through validation, nothing was "
-                  "filed and the scan's position was not moved:", *[f"- {x}" for x in result.shadow]]
+                  "filed and the scan's position was not moved. Later level-0 scans do not validate these again; "
+                  "the first scan at `redteam.level: 1` does, and files them:", *[f"- {x}" for x in result.shadow]]
     if result.unreproduced:
         lines += ["", f"{len(result.unreproduced)} finding(s) did not reproduce and were not filed. Later scans skip "
                   "them (a full scan tries them again). If one is real, file it by hand; if one keeps coming back, "
@@ -414,6 +447,11 @@ def summary(result: FileResult, head: str, base: str, cfg: Config, public: bool)
 
 
 def skip_marker(result: FileResult) -> str:
-    """The trusted record of what did not reproduce ('' when there is nothing to record)."""
-    fps = ",".join(fp for fp, _ in result.unreproduced)
-    return ns.marker("redteam-skip", fps=fps) + "\n" if fps else ""
+    """The trusted records of what this run decided without filing ('' when there is nothing to record): what did
+    not reproduce (`redteam-skip`) and, at level 0, what was validated at all (`redteam-shadow`)."""
+    out = ""
+    if result.unreproduced:
+        out += ns.marker("redteam-skip", fps=",".join(fp for fp, _ in result.unreproduced)) + "\n"
+    if result.shadow_fps:
+        out += ns.marker("redteam-shadow", fps=",".join(result.shadow_fps)) + "\n"
+    return out
