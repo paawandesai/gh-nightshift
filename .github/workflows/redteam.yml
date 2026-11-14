@@ -4,8 +4,9 @@
 #                                   as a job output (a job output is printed in the next job's log, and logs and
 #                                   artifacts of a public repo are readable by anyone, so plaintext never leaves)
 #   validate (Claude token only)    optional (redteam.validate, private repos): one fresh runner per new finding, at
-#                                   most three. Claude writes a repro test; the harness runs it twice and seals the
-#                                   verdict. The one red-team job where a model has a shell: no GitHub token is used
+#                                   most three, none when nothing is new, each with its lane's setup and database.
+#                                   Claude writes a repro test; the harness runs it twice and seals the verdict.
+#                                   The one red-team job where a model has a shell: no GitHub token is used
 #   file     (PAT or App token)     decrypt inside a pipe; file new findings as draft private security advisories
 #                                   (public repo) or `security` + `human` issues (private repo); record the commit
 name: night-shift-redteam
@@ -107,8 +108,11 @@ jobs:
     if: needs.context.outputs.run == 'true'
     runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
     timeout-minutes: 60
+    # validate_plan, private repos only (validation is on only there): the validate matrix, one entry per new finding
+    # with its lane's Postgres image. A count and an image name; nothing about a finding itself.
     outputs:
       findings: ${{ steps.scan.outputs.findings }}
+      validate_plan: ${{ steps.scan.outputs.validate_plan }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -118,6 +122,17 @@ jobs:
         with:
           name: redteam-context
           path: ${{ runner.temp }}/redteam
+      # The tool plans the validate matrix after the scan. It goes outside the tree the scan reads.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: needs.context.outputs.validate == 'true'
+        with:
+          repository: ${{ inputs.tool_repo }}
+          ref: ${{ inputs.tool_ref }}
+          path: .nightshift-tool
+          persist-credentials: false
+      - name: Move the tool out of the scanned tree
+        if: needs.context.outputs.validate == 'true'
+        run: mv .nightshift-tool "$RUNNER_TEMP/nightshift-tool"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -131,6 +146,7 @@ jobs:
           TOKEN: ${{ secrets.claude_token }}
           TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
           MODEL: ${{ vars.REDTEAM_MODEL || inputs.model }}
+          VALIDATE: ${{ needs.context.outputs.validate }}
         # Findings stay out of the log: only the exit code is printed. What leaves the job is the result fields
         # only, gzip'd, zero-padded to a fixed 64 KiB (so its size does not say whether anything was found) and
         # AES-256 encrypted with the Claude token (a masked secret the file job also holds).
@@ -162,18 +178,29 @@ jobs:
           # 64 KiB sealed is about 87,500 characters, under the 128 KiB limit for one environment variable in the file job.
           if [ "${#sealed}" -lt 80000 ] || [ "${#sealed}" -gt 120000 ]; then echo "::error::could not seal the findings"; exit 1; fi
           echo "findings=$sealed" >> "$GITHUB_OUTPUT"
+          # The validate matrix (G-15: no idle runners; G-13: `services:` are fixed before a job starts, so each
+          # finding's database is decided here). A plan that fails starts no validation; the findings wait.
+          if [ "$VALIDATE" = "true" ]; then
+            env -u TOKEN PYTHONPATH="$RUNNER_TEMP/nightshift-tool" python3 -m nightshift redteam plan \
+              --findings-file "$P/slim.gz" --seen-file "$P/seen.json" --github-output "$GITHUB_OUTPUT" \
+              || { echo "::warning::could not plan validation; these findings are validated next run"; echo "validate_plan=[]" >> "$GITHUB_OUTPUT"; }
+          fi
 
   validate:
     needs: [context, scan]
-    if: needs.context.outputs.validate == 'true'
+    # One runner per finding to validate, none when there is nothing new (G-15).
+    if: >-
+      needs.context.outputs.validate == 'true'
+      && needs.scan.outputs.validate_plan != '' && needs.scan.outputs.validate_plan != '[]'
     runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
     timeout-minutes: 40
     permissions:
       contents: read
     strategy:
       fail-fast: false
+      # Entries {index, postgres_image}; index is 0, 1 or 2 (MAX_PER_RUN), so at most three runners.
       matrix:
-        index: [0, 1, 2]
+        include: ${{ fromJSON(needs.scan.outputs.validate_plan) }}
     outputs:
       # Each matrix job sets only its own output, so the three do not overwrite one another.
       r0: ${{ steps.seal.outputs.r0 }}
@@ -181,6 +208,21 @@ jobs:
       r2: ${{ steps.seal.outputs.r2 }}
     env:
       INDEX: ${{ matrix.index }}
+      DATABASE_URL: ${{ matrix.postgres_image != '' && 'postgres://postgres:postgres@localhost:5432' || '' }}
+    # The lane's database, as lane.yml's agent job has it. An empty image means "no service".
+    services:
+      postgres:
+        image: ${{ matrix.postgres_image }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -218,6 +260,18 @@ jobs:
         if: steps.pick.outputs.run == 'true'
         run: |
           if [ -s "$RUNNER_TEMP/validate/setup.sh" ]; then bash -euo pipefail "$RUNNER_TEMP/validate/setup.sh"; else echo "no setup commands for the owning lane"; fi
+      # As in lane.yml: the lane's composite action is copied to a fixed path (a `uses:` path cannot be an expression)
+      # and kept out of git.
+      - name: Stage lane setup action
+        if: steps.pick.outputs.run == 'true' && steps.pick.outputs.setup_action != ''
+        env:
+          SETUP_ACTION: ${{ steps.pick.outputs.setup_action }}
+        run: |
+          cp -r "$SETUP_ACTION" .ns-lane-setup
+          echo ".ns-lane-setup/" >> .git/info/exclude
+      - name: Lane setup action
+        if: steps.pick.outputs.run == 'true' && steps.pick.outputs.setup_action != ''
+        uses: ./.ns-lane-setup
       - name: Install Claude Code
         if: steps.pick.outputs.run == 'true'
         run: |

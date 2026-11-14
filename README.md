@@ -382,7 +382,10 @@ Claude token (`redteam.claude_token_secret`): the encrypted findings in public l
 **Validation and the shared security context.** A scan that only reads code reports some things that cannot
 be reached in practice. With `redteam: {validate: {enabled: true}}` on a **private** repo, a `validate` job runs
 between `scan` and `file`. Each new finding (at most `validate.max_per_run`, default and maximum 3, each on its
-own fresh runner) gets main checked out and the owning lane's `setup.commands` run, and Claude writes one test
+own fresh runner; no runner starts when nothing is new) gets main checked out and the owning lane's environment
+as a lane agent has it (`setup.commands`, `setup.action`, and a Postgres service with `DATABASE_URL` when the lane
+sets `postgres_image`). A file no lane lists gets the first lane with a `test_command`, labelled a guess in the
+task. Claude writes one test
 that performs the attack and asserts the safe behaviour, so it fails while the bug exists. Then the harness, not
 the model, runs that test twice and decides:
 

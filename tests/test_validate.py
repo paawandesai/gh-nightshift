@@ -162,6 +162,64 @@ class CandidateTests(unittest.TestCase):
             self.assertIsNone(validate.lane_for(cfg, "apiary/x.py"))   # a prefix of the name is not the folder
 
 
+class LaneEnvironmentTests(unittest.TestCase):
+    """G-13 and G-14: the validate job gets the lane environment a lane agent gets, and a file no lane lists gets
+    a labelled guess instead of nothing."""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def cfg(self, **lane_extra):
+        return write_config(self.tmp.name, lane_extra=lane_extra)
+
+    def test_task_names_the_setup_action_and_the_database(self):
+        cfg = self.cfg(api={"setup": {"action": ".github/actions/setup", "commands": "make deps"},
+                            "postgres_image": "postgres:16"})
+        with_db = validate.task(cfg, FINDING, [], database=True)
+        self.assertIn("setup action (`.github/actions/setup`) has run", with_db)
+        self.assertIn("setup commands have run", with_db)
+        self.assertIn("`postgres:16`) is running; its URL is in $DATABASE_URL", with_db)
+        # Without the service (a plan that did not reach this job), the model is told to stop early.
+        without = " ".join(validate.task(cfg, FINDING, [], database=False).split())
+        self.assertIn("needs a Postgres database, but this job has none", without)
+        self.assertIn("testable=false at once", without)
+        self.assertEqual(validate.setup_action(cfg, FINDING), ".github/actions/setup")
+        self.assertEqual(validate.setup_script(cfg, FINDING), "make deps\n")
+
+    def test_lane_without_extras_says_nothing_about_them(self):
+        task = validate.task(self.cfg(), FINDING, [])
+        for word in ("setup action", "DATABASE_URL", "Postgres"):
+            self.assertNotIn(word, task)
+        self.assertEqual(validate.setup_action(self.cfg(), FINDING), "")
+
+    def test_unowned_file_falls_back_to_the_first_lane_with_a_test_command(self):
+        cfg = self.cfg(api={"test_command": ""}, web={"setup": {"commands": "npm ci"}, "postgres_image": "postgres:15"})
+        f = {**FINDING, "location": "scripts/deploy.sh:3"}
+        lane, guessed = validate.test_lane(cfg, f["location"])
+        self.assertEqual((lane.name, guessed), ("web", True))   # api has no test command
+        task = validate.task(cfg, f, [], database=True)
+        self.assertIn("none lists this file. This job set up lane `web` as a GUESS", " ".join(task.split()))
+        self.assertIn("That lane's test command: `pytest`", task)
+        self.assertEqual(validate.setup_script(cfg, f), "npm ci\n")
+        self.assertEqual(validate.plan(cfg, [f]), [{"index": 0, "postgres_image": "postgres:15"}])
+        # An owned file is never labelled a guess.
+        self.assertEqual(validate.test_lane(cfg, "api/x.py"), (cfg.lanes[0], False))
+        self.assertNotIn("GUESS", validate.task(cfg, FINDING, []))
+
+    def test_no_lane_with_a_test_command_leaves_the_model_to_find_one(self):
+        cfg = self.cfg(api={"test_command": ""}, web={"test_command": ""})
+        f = {**FINDING, "location": "scripts/deploy.sh:3"}
+        self.assertEqual(validate.test_lane(cfg, f["location"]), (None, False))
+        task = validate.task(cfg, f, [])
+        self.assertIn("no lane has a test command", task)
+        self.assertIn("No test command is configured", task)
+        self.assertEqual((validate.setup_script(cfg, f), validate.setup_action(cfg, f)), ("", ""))
+        self.assertEqual(validate.plan(cfg, [f]), [{"index": 0, "postgres_image": ""}])
+
+
 class SealTests(unittest.TestCase):
     def result(self, **over):
         return {"fp": "0123456789abcdef", "verdict": "validated", "reason": "fails", "test_path": "tests/t.py",
@@ -308,7 +366,35 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("permissions:\n      contents: read\n", job)
         self.assertEqual(job.count("persist-credentials: false"), job.count("actions/checkout@"))
         self.assertIn("runs-on: ${{ fromJSON(inputs.agent_runs_on) }}", job)   # never the token jobs' runner class
-        self.assertIn("index: [0, 1, 2]", job)
+
+    def test_one_runner_per_finding_and_none_for_an_empty_plan(self):
+        # G-15: the matrix is the scan job's plan, and the job does not start when the plan is empty.
+        job = self.job()
+        self.assertIn("include: ${{ fromJSON(needs.scan.outputs.validate_plan) }}", job)
+        cond = job.split("if: >-")[1].split("runs-on:")[0]
+        for part in ("needs.context.outputs.validate == 'true'", "needs.scan.outputs.validate_plan != ''",
+                     "needs.scan.outputs.validate_plan != '[]'"):
+            self.assertIn(part, cond)
+        self.assertNotIn("index: [0, 1, 2]", job)
+
+    def test_lane_database_and_setup_action_as_in_the_lane_workflow(self):
+        # G-13: the same service, DATABASE_URL and staged composite action as lane.yml's agent job.
+        job = self.job()
+        lane = (Path(__file__).parent.parent / ".github/workflows/lane.yml").read_text()
+        service = job[job.index("    services:"):job.index("    steps:")]
+        lane_service = lane[lane.index("    services:"):lane.index("    steps:", lane.index("    services:"))]
+        self.assertEqual([ln for ln in service.splitlines() if "image:" not in ln and "#" not in ln],
+                         [ln for ln in lane_service.splitlines() if "image:" not in ln and "#" not in ln])
+        self.assertIn("image: ${{ matrix.postgres_image }}", service)
+        self.assertIn("DATABASE_URL: ${{ matrix.postgres_image != '' && 'postgres://postgres:postgres@localhost:5432' "
+                      "|| '' }}", job)
+        self.assertIn('cp -r "$SETUP_ACTION" .ns-lane-setup', job)
+        self.assertIn('echo ".ns-lane-setup/" >> .git/info/exclude', job)
+        self.assertIn("uses: ./.ns-lane-setup", job)
+        self.assertIn("SETUP_ACTION: ${{ steps.pick.outputs.setup_action }}", job)
+        # Setup runs before the process snapshot and before the model, so cleanup stops only what the model started.
+        self.assertLess(job.index("- name: Lane setup action"), job.index("- name: Note running processes"))
+        self.assertLess(job.index("- name: Lane setup action"), job.index("- name: Write the repro test"))
 
     def test_no_secret_where_model_written_code_runs(self):
         job = self.job()
@@ -520,6 +606,43 @@ class ValidateJobCliTests(RedteamCase):
         self.assertEqual((rc, outputs.strip()), (0, "run=false"))
         rc, _, _ = self.candidate([FINDING], index=0)
         self.assertEqual(Path(self.out, "setup.sh").read_text(), "pip install -e .\n")
+
+    def plan(self, findings):
+        path = os.path.join(self.root, "findings.gz")
+        Path(path).write_bytes(redteam.encode({"findings": findings}))
+        Path(self.gh_out).write_text("")
+        before = len(self.fake.calls)
+        rc, text = self.run_cli("redteam", "plan", "--findings-file", path, "--seen-file", self.seen,
+                                "--github-output", self.gh_out)
+        self.assertEqual(len(self.fake.calls), before)   # the scan job's plan never calls GitHub
+        name, value = Path(self.gh_out).read_text().strip().split("=", 1)
+        self.assertEqual(name, "validate_plan")
+        return rc, text, json.loads(value)
+
+    def test_plan_has_one_entry_per_finding_to_validate_and_nothing_about_them(self):
+        write_config(self.root, bot_login="night-bot", lane_extra={"web": {"postgres_image": "postgres:16"}},
+                     redteam={"enabled": True, "validate": {"enabled": True, "max_per_run": 2}})
+        other = {**FINDING, "title": "SSRF in webhook", "location": "web/hook.py:8", "cwe": "CWE-918"}
+        third = {**FINDING, "title": "IDOR", "location": "api/c.py:9", "cwe": "CWE-639"}
+        rc, text, got = self.plan([FINDING, other, third])
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(got, [{"index": 0, "postgres_image": ""}, {"index": 1, "postgres_image": "postgres:16"}])
+        for word in ("SSRF", "hook.py", "export", "IDOR"):
+            self.assertNotIn(word, text + self.stdout + Path(self.gh_out).read_text())
+        Path(self.seen).write_text(json.dumps([redteam.fingerprint(f) for f in (FINDING, other, third)]))
+        rc, _, got = self.plan([FINDING, other, third])
+        self.assertEqual((rc, got), (0, []))   # nothing new: the validate job does not start
+
+    def test_plan_and_candidate_agree_on_the_lane_environment(self):
+        write_config(self.root, bot_login="night-bot",
+                     lane_extra={"api": {"setup": {"action": ".github/actions/api-setup"}, "postgres_image": "postgres:16"}},
+                     redteam={"enabled": True, "validate": {"enabled": True, "max_per_run": 2}})
+        _, _, got = self.plan([FINDING])
+        self.assertEqual(got, [{"index": 0, "postgres_image": "postgres:16"}])
+        with mock.patch.dict(os.environ, {"DATABASE_URL": "postgres://postgres:postgres@localhost:5432"}):
+            rc, _, outputs = self.candidate([FINDING])
+        self.assertEqual((rc, outputs.split()), (0, ["run=true", "setup_action=.github/actions/api-setup"]))
+        self.assertIn("$DATABASE_URL", Path(self.out, "task.md").read_text())
 
     def test_candidate_skips_what_is_already_known(self):
         Path(self.seen).write_text(json.dumps([redteam.fingerprint(FINDING)]))

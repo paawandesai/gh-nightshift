@@ -507,8 +507,8 @@ def cmd_redteam(ctx: Ctx) -> int:
     from .review_tools import git_in
 
     a, cfg = ctx.args, ctx.cfg
-    if a.redteam_action in ("candidate", "verify", "seal"):
-        return _redteam_validate(ctx)   # the validate job: no GitHub access at all
+    if a.redteam_action in ("plan", "candidate", "verify", "seal"):
+        return _redteam_validate(ctx)   # the scan and validate jobs: no GitHub access at all
     gh = ctx.gh
     if not gh.trusted:
         raise SystemExit("this token cannot read GET /user and the config names no bot_login or trusted_logins, "
@@ -605,17 +605,18 @@ def cmd_redteam(ctx: Ctx) -> int:
 
 
 def _redteam_validate(ctx: Ctx) -> int:
-    """The validate job's three steps. `candidate`: pick this matrix job's finding from the decrypted scan output
-    and write its task; `verify`: run the repro test twice and write the verdict (no secret in this step's
+    """The validate job's three steps, and the scan job's plan for it. `plan`: the validate matrix, one entry per
+    finding to validate with its lane's Postgres image; `candidate`: pick this matrix job's finding from the decrypted
+    scan output and write its task; `verify`: run the repro test twice and write the verdict (no secret in this step's
     environment: it runs code a model wrote); `seal`: encrypt the result for the file job. Nothing about a finding
     is printed."""
     from . import redteam, security_context, validate
 
     a, cfg = ctx.args, ctx.cfg
-    out = Path(a.out_dir)
-    if a.redteam_action == "candidate":
+    out = Path(getattr(a, "out_dir", None) or ".")
+    if a.redteam_action in ("plan", "candidate"):
         if a.findings_file == "-" and sys.stdin.isatty():
-            raise ConfigError("redteam candidate reads the decrypted scan output from a pipe")
+            raise ConfigError(f"redteam {a.redteam_action} reads the decrypted scan output from a pipe")
         raw = sys.stdin.buffer.read() if a.findings_file == "-" else Path(a.findings_file).read_bytes()
         try:
             found = redteam.findings_of(redteam.decode(raw))
@@ -625,6 +626,12 @@ def _redteam_validate(ctx: Ctx) -> int:
             return 1
         limit = min(cfg.redteam_validate_max, validate.MAX_PER_RUN)
         picked = validate.candidates(found, seen, cfg.redteam_min_severity, limit)
+        if a.redteam_action == "plan":
+            # The scan job: one validate runner per finding to validate, each with its lane's database (G-13, G-15).
+            # Private repos only (the context job turns validation on only there), so the count may be in a log.
+            write_outputs(a.github_output, {"validate_plan": json.dumps(validate.plan(cfg, picked), separators=(",", ":"))})
+            ctx.say(f"{len(picked)} finding(s) to validate")
+            return 0
         if a.index >= len(picked):
             write_outputs(a.github_output, {"run": "false"})
             ctx.say("nothing to validate at this index")
@@ -632,13 +639,15 @@ def _redteam_validate(ctx: Ctx) -> int:
         f = picked[a.index]
         out.mkdir(parents=True, exist_ok=True)
         (out / "finding.json").write_text(json.dumps(f), encoding="utf-8")
-        (out / "task.md").write_text(validate.task(cfg, f, security_context.for_prompt(security_context.read(ctx.root))),
-                                     encoding="utf-8")
+        database = bool(os.environ.get("DATABASE_URL"))   # set by the job when its Postgres service runs
+        (out / "task.md").write_text(validate.task(cfg, f, security_context.for_prompt(security_context.read(ctx.root)),
+                                                   database), encoding="utf-8")
         (out / "prompt.md").write_text(prompts.render("validate", {"TASK_FILE": str(out / "task.md")}, ctx.root),
                                        encoding="utf-8")
         (out / "schema.json").write_text(prompts.schema_json("validate"), encoding="utf-8")
         (out / "setup.sh").write_text(validate.setup_script(cfg, f), encoding="utf-8")
-        write_outputs(a.github_output, {"run": "true"})
+        action = validate.setup_action(cfg, f)
+        write_outputs(a.github_output, {"run": "true", **({"setup_action": action} if action else {})})
         ctx.say("one finding to validate")
         return 0
     try:
@@ -1272,7 +1281,7 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--prs", default="", help="(reduce) the merged PR numbers the context covered, comma-separated")
 
     s = sub.add_parser("redteam", parents=[common],
-                       help="(workflow) red-team scan: context | candidate | verify | seal | publish")
+                       help="(workflow) red-team scan: context | plan | candidate | verify | seal | publish")
     rsub = s.add_subparsers(dest="redteam_action", required=True)
     c = rsub.add_parser("context", parents=[sub_common], help="decide whether to scan and write the context")
     c.add_argument("--out-dir", required=True)
@@ -1287,6 +1296,11 @@ def parser() -> argparse.ArgumentParser:
                         "--dry-run prints the full advisory bodies, so never use it in a public CI log")
     c.add_argument("--validation", default="false", choices=["true", "false"],
                    help="true: the validate job ran; its sealed results are in VALIDATION_0..2 and SEAL_KEY decrypts them")
+    c = rsub.add_parser("plan", parents=[sub_common],
+                        help="(scan job) the validate matrix: one entry per finding to validate, with its lane's database")
+    c.add_argument("--findings-file", required=True, metavar="PATH", help="gzip'd scan output")
+    c.add_argument("--seen-file", required=True, help="seen.json from the context job")
+    c.add_argument("--github-output")
     c = rsub.add_parser("candidate", parents=[sub_common], help="(validate job) pick this job's finding and write its task")
     c.add_argument("--index", type=int, required=True, choices=range(3))
     c.add_argument("--findings-file", default="-", metavar="PATH")
