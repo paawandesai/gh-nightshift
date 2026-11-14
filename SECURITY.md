@@ -259,6 +259,24 @@ its own token with `redteam.claude_token_secret`, and rotate it if it may have l
 In App mode the filing job always asks for Repository security advisories, so approve that permission on the
 installation even for private repos.
 
+**Validation** (`redteam.validate`, private repos only) adds the one red-team job where a model has a shell: it
+must run the repro test it writes. That job is built like a lane's agent job. It holds the red-team Claude token
+only (on a pipe, not in Claude's environment), a read-only `GITHUB_TOKEN` that no step uses, and no PAT or App
+key; it runs on the `agent` runner class; and nothing it produces is uploaded or printed. The step that runs the
+repro test has no secret in its environment and a scrubbed one for the test itself, and every process the model
+or its test started is stopped before the step that holds the token again to seal the result. A result that
+contains the token (or its base64 form) is refused when it is sealed and again when it is opened, so a test
+file cannot carry the token into an issue. The verdict comes from the harness's two runs, never from the
+model's account of them, and the filing job reads it only from results sealed with the scan's token. The
+prompt limits attacks to the checkout and localhost; the runner still has internet access, as lane agents do.
+A finding without a result is never filed and never dropped: the scan does not record progress until every
+finding has a verdict.
+
+The shared context in `.night-shift/SECURITY.md` is read from the base branch, capped at 32 KiB, fenced and
+defanged, and presented to every reader as material under review. It is a protected path, so an agent PR that
+touches it is rejected. Its "Not a finding" list can hide a real bug from later scans, which is why only a
+person's merge can change it and why only that section's fingerprints count.
+
 ## Auto-merge
 
 The picker merges a lane's PR itself (squash, via the PAT) when it is green. It does not use GitHub's
@@ -375,6 +393,14 @@ These are not enforced. They are listed so you can judge the risk yourself.
     writer wrote is planned from directly.
 19. **Cross-repo `Blocked by`** copies the title and `## Interface` section of an issue from another
     repository, but only from repositories listed in `cross_repos`. That text is quoted as data.
+
+20. **A model that sets out to fake a validation can.** In the validate job the model has a shell on the same
+    machine the harness runs on, so it could tamper with the test runner or the tool. The harness catches
+    honest mistakes (a test that passes, errors or is flaky), not that. A person should read each repro test
+    before trusting it, and a fix that turns the same test green is the independent check.
+21. **Unreproduced findings are skipped by later scans.** Their fingerprints are listed on the night log with
+    the titles, and a full scan tries them again, but a real bug whose repro test was badly written stays
+    unfiled until someone reads that list. Critical ones are filed anyway, labelled `unconfirmed`.
 
 ## Reporting a vulnerability
 

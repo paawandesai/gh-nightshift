@@ -488,6 +488,32 @@
         "model": {
           "type": "string",
           "description": "default: security.model, then models.review"
+        },
+        "level": {
+          "enum": [
+            0,
+            1
+          ],
+          "description": "with validate on: 0 reports what validation found and files nothing, 1 (default) files validated findings"
+        },
+        "validate": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Reproduce each new finding with a failing test on a fresh runner before it is filed (private repos only)",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "default false"
+            },
+            "max_per_run": {
+              "enum": [
+                1,
+                2,
+                3
+              ],
+              "description": "findings validated per run (default 3); the rest wait for the next run"
+            }
+          }
         }
       }
     },

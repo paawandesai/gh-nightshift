@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from collections.abc import Callable
 
-from . import __version__, digest, planner, prompts, repo_setup, roadmap, scaffold
+from . import __version__, digest, planner, prompts, repo_setup, roadmap, scaffold, security_context
 from . import protocol as ns
 from .config import BASE_PATH, CONFIG_PATH, Config, ConfigError, load, loads
 from .gh import GH, GHError
@@ -311,7 +311,9 @@ def cmd_init(ctx: Ctx, ask: Ask = _default_ask, secret_ask=None, secret_setter=N
     if a.regenerate:
         cfg = ctx.cfg
         text = cfg_path.read_text(encoding="utf-8")
-        files = {k: v for k, v in scaffold.files(cfg, text, ctx.root).items() if k.startswith(".github/workflows/")}
+        # Workflows, plus the shared security context's starter (listed only while the file is missing).
+        files = {k: v for k, v in scaffold.files(cfg, text, ctx.root).items()
+                 if k.startswith(".github/workflows/") or k == security_context.PATH}
         ctx.say(*write_files(ctx, files, overwrite=True))
         return 0
     if cfg_path.exists() and not a.force:
@@ -501,10 +503,13 @@ def cmd_rules(ctx: Ctx) -> int:
 def cmd_redteam(ctx: Ctx) -> int:
     """(workflow) `context`: decide whether to scan and write the scan context; `publish`: file the findings as
     draft private security advisories and record the commit the scan reached."""
-    from . import redteam, review_rules
+    from . import redteam, review_rules, validate
     from .review_tools import git_in
 
-    a, cfg, gh = ctx.args, ctx.cfg, ctx.gh
+    a, cfg = ctx.args, ctx.cfg
+    if a.redteam_action in ("candidate", "verify", "seal"):
+        return _redteam_validate(ctx)   # the validate job: no GitHub access at all
+    gh = ctx.gh
     if not gh.trusted:
         raise SystemExit("this token cannot read GET /user and the config names no bot_login or trusted_logins, "
                          "so red-team markers cannot be trusted; set bot_login in .night-shift/config.yml")
@@ -544,7 +549,19 @@ def cmd_redteam(ctx: Ctx) -> int:
                                                                   "DIFF_FILE": str(out / "diff.patch")}, ctx.root),
                                        encoding="utf-8")
         (out / "schema.json").write_text(prompts.schema_json("redteam"), encoding="utf-8")
-        write_outputs(a.github_output, {"run": "true", "sha": sc.head, "base": sc.base})
+        # Validation: private repos only (a repro test for a public repo would have to stay out of every log,
+        # artifact and PR until its advisory is published). The fingerprints the validate job may skip travel in
+        # the context artifact; they are hashes and say nothing about a finding.
+        validating = "false"
+        if cfg.redteam_validate_enabled:
+            if (gh.get(gh.r("")) or {}).get("private") is True:
+                seen = redteam.known_fingerprints(gh, cfg, Path(ctx.root), full=a.full)
+                (out / "seen.json").write_text(json.dumps(sorted(seen)), encoding="utf-8")
+                validating = "true"
+            else:
+                ctx.say("::notice::redteam.validate is on, but validation runs on private repos only; findings are "
+                        "filed as draft advisories without it")
+        write_outputs(a.github_output, {"run": "true", "sha": sc.head, "base": sc.base, "validate": validating})
         ctx.say(f"red-team context written ({'since ' + sc.base[:12] if sc.base else 'baseline'}, "
                 f"{len(sc.changed)} file(s))")
         return 0
@@ -565,7 +582,12 @@ def cmd_redteam(ctx: Ctx) -> int:
         ctx.say("::error::cannot tell whether the repo is public; recording nothing")
         return 1
     public = not private
-    result = redteam.file_findings(gh, cfg, data, a.sha, a.base, public)
+    validation = None
+    if a.validation == "true" and not public:
+        # Sealed results arrive in the environment (ciphertext) and are decrypted in memory, never on disk.
+        sealed = [os.environ.get(f"VALIDATION_{i}", "") for i in range(validate.MAX_PER_RUN)]
+        validation = validate.unseal_all(sealed, os.environ.get("SEAL_KEY", ""))
+    result = redteam.file_findings(gh, cfg, data, a.sha, a.base, public, validation)
     if result.failed and public:
         # One line, no severity, no count: a public log must not say what the scan found.
         ctx.say("::error::could not file the red-team results; the PAT or App needs Repository security advisories: "
@@ -575,10 +597,76 @@ def cmd_redteam(ctx: Ctx) -> int:
     text = redteam.summary(result, a.sha, a.base, cfg, public)
     # The scan only counts as done when every finding is filed; otherwise the next run covers this range again
     # (fingerprints keep it from filing the same one twice).
-    marker = "" if result.failed else ns.marker("redteam", sha=a.sha, base=a.base) + "\n"
-    gh.comment(log, marker + text)
+    moved = redteam.progress(result, cfg, validation is not None)
+    marker = ns.marker("redteam", sha=a.sha, base=a.base) + "\n" if moved else ""
+    gh.comment(log, marker + redteam.skip_marker(result) + text)
     ctx.say("done" if not result.failed else "could not finish filing")
     return 1 if result.failed else 0
+
+
+def _redteam_validate(ctx: Ctx) -> int:
+    """The validate job's three steps. `candidate`: pick this matrix job's finding from the decrypted scan output
+    and write its task; `verify`: run the repro test twice and write the verdict (no secret in this step's
+    environment: it runs code a model wrote); `seal`: encrypt the result for the file job. Nothing about a finding
+    is printed."""
+    from . import redteam, security_context, validate
+
+    a, cfg = ctx.args, ctx.cfg
+    out = Path(a.out_dir)
+    if a.redteam_action == "candidate":
+        if a.findings_file == "-" and sys.stdin.isatty():
+            raise ConfigError("redteam candidate reads the decrypted scan output from a pipe")
+        raw = sys.stdin.buffer.read() if a.findings_file == "-" else Path(a.findings_file).read_bytes()
+        try:
+            found = redteam.findings_of(redteam.decode(raw))
+            seen = set(json.loads(Path(a.seen_file).read_text(encoding="utf-8")))
+        except (ValueError, OSError, TypeError) as err:
+            ctx.say(f"::error::cannot read the scan output or the known fingerprints ({type(err).__name__})")
+            return 1
+        limit = min(cfg.redteam_validate_max, validate.MAX_PER_RUN)
+        picked = validate.candidates(found, seen, cfg.redteam_min_severity, limit)
+        if a.index >= len(picked):
+            write_outputs(a.github_output, {"run": "false"})
+            ctx.say("nothing to validate at this index")
+            return 0
+        f = picked[a.index]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "finding.json").write_text(json.dumps(f), encoding="utf-8")
+        (out / "task.md").write_text(validate.task(cfg, f, security_context.for_prompt(security_context.read(ctx.root))),
+                                     encoding="utf-8")
+        (out / "prompt.md").write_text(prompts.render("validate", {"TASK_FILE": str(out / "task.md")}, ctx.root),
+                                       encoding="utf-8")
+        (out / "schema.json").write_text(prompts.schema_json("validate"), encoding="utf-8")
+        (out / "setup.sh").write_text(validate.setup_script(cfg, f), encoding="utf-8")
+        write_outputs(a.github_output, {"run": "true"})
+        ctx.say("one finding to validate")
+        return 0
+    try:
+        f = json.loads((out / "finding.json").read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        ctx.say("::error::no finding to work on")
+        return 1
+    if a.redteam_action == "verify":
+        answer_file = out / "claude.json"
+        answer = validate.claude_result(answer_file.read_text(encoding="utf-8", errors="replace")) \
+            if answer_file.is_file() else None
+        result = validate.verify(cfg, Path(ctx.root).resolve(), f, answer)
+        (out / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        ctx.say(f"verdict: {result['verdict']}")   # the verdict alone: no title, path or output
+        return 0
+    # seal
+    try:
+        result = json.loads((out / "result.json").read_text(encoding="utf-8"))
+        if not isinstance(result, dict) or result.get("fp") != redteam.fingerprint(f) \
+                or result.get("verdict") not in validate.VERDICTS:
+            raise ValueError("not this finding's result")
+        sealed = validate.seal(result, os.environ.get("SEAL_KEY", ""))
+    except (ValueError, OSError) as err:
+        ctx.say(f"::error::{err if 'token' in str(err) else 'could not seal the validation result'}")
+        return 1
+    write_outputs(a.github_output, {f"r{a.index}": sealed})
+    ctx.say("sealed")
+    return 0
 
 
 # --- planner --------------------------------------------------------------------------
@@ -1183,7 +1271,8 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--mode", default="", help="reduce: file every ticket as proposed and record --prs as reduced")
     c.add_argument("--prs", default="", help="(reduce) the merged PR numbers the context covered, comma-separated")
 
-    s = sub.add_parser("redteam", parents=[common], help="(workflow) scheduled red-team scan: context | publish")
+    s = sub.add_parser("redteam", parents=[common],
+                       help="(workflow) red-team scan: context | candidate | verify | seal | publish")
     rsub = s.add_subparsers(dest="redteam_action", required=True)
     c = rsub.add_parser("context", parents=[sub_common], help="decide whether to scan and write the context")
     c.add_argument("--out-dir", required=True)
@@ -1196,6 +1285,20 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--findings-file", default="-", metavar="PATH",
                    help="gzip'd scan output; '-' (default) reads stdin, where the workflow pipes the decrypted findings. "
                         "--dry-run prints the full advisory bodies, so never use it in a public CI log")
+    c.add_argument("--validation", default="false", choices=["true", "false"],
+                   help="true: the validate job ran; its sealed results are in VALIDATION_0..2 and SEAL_KEY decrypts them")
+    c = rsub.add_parser("candidate", parents=[sub_common], help="(validate job) pick this job's finding and write its task")
+    c.add_argument("--index", type=int, required=True, choices=range(3))
+    c.add_argument("--findings-file", default="-", metavar="PATH")
+    c.add_argument("--seen-file", required=True, help="seen.json from the context job")
+    c.add_argument("--out-dir", required=True)
+    c.add_argument("--github-output")
+    c = rsub.add_parser("verify", parents=[sub_common], help="(validate job) run the repro test twice and write the verdict")
+    c.add_argument("--out-dir", required=True)
+    c = rsub.add_parser("seal", parents=[sub_common], help="(validate job) encrypt the result for the file job")
+    c.add_argument("--index", type=int, required=True, choices=range(3))
+    c.add_argument("--out-dir", required=True)
+    c.add_argument("--github-output")
 
     s = sub.add_parser("audit", parents=[common], help="sample merged agent PRs and measure quality")
     s.add_argument("--sample", type=int, default=25)

@@ -12,7 +12,7 @@ import re
 from importlib import resources
 from pathlib import Path
 
-from . import yamlish
+from . import security_context, yamlish
 from .config import Config
 
 TOOL_REPO = "paawandesai/gh-nightshift"
@@ -31,6 +31,7 @@ LABEL_COLORS = {
     "review-error": ("e99695", "The review gate itself failed; attempt not counted"),
     "night-log": ("000000", "Running log of night-shift activity"),
     "security": ("b60205", "Red-team finding (private repos); agents skip it"),
+    "unconfirmed": ("fbca04", "Red-team finding that validation could not confirm; a person decides"),
     "needs-approval": ("d4c5f9", "Green, waiting for one human approval (risk tiers)"),
     "roadmap": ("0052cc", "The night-shift roadmap: waves, dependencies, status per lane"),
     "frozen": ("bfdadc", "Taken off the night shift by `gh nightshift freeze`"),
@@ -372,6 +373,9 @@ def files(cfg: Config, config_text: str, root: Path) -> dict[str, str]:
     out[".github/workflows/night-shift-commands.yml"] = commands_workflow(cfg)
     if cfg.redteam_enabled:
         out[".github/workflows/night-shift-redteam.yml"] = redteam_workflow(cfg)
+        if not (root / security_context.PATH).exists():
+            # A starter for people to fill in; never regenerated over what a person wrote.
+            out[security_context.PATH] = template("SECURITY_CONTEXT.md")
     if cfg.digest_enabled:
         out[".github/workflows/night-shift-digest.yml"] = digest_workflow(cfg)
     if not (root / ".github/workflows" / cfg.ci_workflow).exists():

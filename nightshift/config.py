@@ -121,6 +121,9 @@ class Config:
     redteam_min_severity: str = "high"
     redteam_token_secret: str = ""  # default: the security reviewer's token
     redteam_model: str = ""  # default: security.model, then models.review
+    redteam_level: int = 1  # with validation on: 0 reports only, 1 files what was validated (see validate.py)
+    redteam_validate_enabled: bool = False  # reproduce each finding with a failing test before filing (private repos)
+    redteam_validate_max: int = 3  # findings validated per run (1 to 3); the rest wait for the next run
     reduce_window_hours: int = 48  # above the daily period, so a late or failed run is caught up
     extends: str = ""  # owner/repo whose .night-shift/config.yml is the org-wide base (`gh nightshift config pull`)
     digest_enabled: bool = True
@@ -362,6 +365,9 @@ def parse(data: dict) -> Config:
         redteam_min_severity=str((data.get("redteam") or {}).get("min_severity", "high")),
         redteam_token_secret=str((data.get("redteam") or {}).get("claude_token_secret", "")),
         redteam_model=str((data.get("redteam") or {}).get("model", "")),
+        redteam_level=(data.get("redteam") or {}).get("level", 1),
+        redteam_validate_enabled=((data.get("redteam") or {}).get("validate") or {}).get("enabled") is True,
+        redteam_validate_max=((data.get("redteam") or {}).get("validate") or {}).get("max_per_run", 3),
         reduce_schedule=" ".join(str((data.get("reduce") or {}).get("schedule", "30 6 * * *")).split()),
         reduce_window_hours=int((data.get("reduce") or {}).get("window_hours", 48)),
         extends=data.get("extends", ""),
@@ -412,6 +418,10 @@ def parse(data: dict) -> Config:
         raise ConfigError(f"redteam.schedule {cfg.redteam_schedule!r} is not a 5-field cron expression")
     if cfg.redteam_min_severity not in ("low", "medium", "high", "critical"):
         raise ConfigError("redteam.min_severity must be low, medium, high or critical")
+    if cfg.redteam_level not in (0, 1) or isinstance(cfg.redteam_level, bool):
+        raise ConfigError("redteam.level must be 0 (report only) or 1 (file validated findings)")
+    if isinstance(cfg.redteam_validate_max, bool) or cfg.redteam_validate_max not in (1, 2, 3):
+        raise ConfigError("redteam.validate.max_per_run must be 1, 2 or 3")
     if cfg.redteam_model and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", cfg.redteam_model):
         raise ConfigError("redteam.model must be a model name or alias (letters, digits, . _ -)")
     if cfg.redteam_token_secret and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cfg.redteam_token_secret):

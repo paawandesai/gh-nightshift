@@ -47,6 +47,10 @@ class Workflows(unittest.TestCase):
     def test_read_only_claude_steps_deny_write_and_network_tools(self):
         for name in ("review.yml", "planner.yml", "redteam.yml"):
             text = workflow(name)
+            if name == "redteam.yml":
+                # The validate job is the one place in this workflow where a model has a shell: it has to run the
+                # repro test it writes. It holds no GitHub token and has its own checks in test_validate.py.
+                text = text[:text.index("\n  validate:")] + text[text.index("\n  file:"):]
             with self.subTest(name=name):
                 self.assertIn('--disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,'
                               'Read(//proc/**),Read(//sys/**)"', text)

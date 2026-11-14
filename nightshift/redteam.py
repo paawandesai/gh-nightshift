@@ -23,6 +23,11 @@ new finding at or above `redteam.min_severity`:
 Dedupe: each advisory or issue carries a `redteam-finding` marker with a fingerprint (title + file) and,
 when the model gave a CWE, a weakness key (CWE + file); a match on either is a duplicate. Only
 ones authored by a trusted login count, so an outsider's private vulnerability report cannot suppress a finding.
+
+With `redteam.validate.enabled` on a private repo, a `validate` job sits between `scan` and `file` (see
+validate.py): each new finding is reproduced with a failing test before it is filed, and `redteam.level` says how
+far the run goes on its own (0: report only, 1: file what was validated). Every pass first reads the shared
+context in `.night-shift/SECURITY.md` (see security_context.py).
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import protocol as ns
-from . import review_rules
+from . import review_rules, security_context
 from .config import Config
 from .gh import GH, GHError
 
@@ -136,6 +141,22 @@ def range_diff(git: Git, sc: Scope) -> str:
     return text
 
 
+def skipped_fingerprints(gh: GH, cfg: Config) -> set[str]:
+    """Fingerprints an earlier run could not reproduce (trusted `redteam-skip` markers on the night log)."""
+    log = gh.night_log(cfg.label("night_log"))
+    out: set[str] = set()
+    for m in ns.trusted(gh.comments(log), gh.trusted, "redteam-skip") if log else []:
+        out.update(x for x in str(m.get("fps") or "").split(",") if re.fullmatch(r"[0-9a-f]{16}", x))
+    return out
+
+
+def known_fingerprints(gh: GH, cfg: Config, root: Path, full: bool) -> set[str]:
+    """What the validate job need not look at again: findings already filed, entries under "Not a finding" in the
+    shared context, and (except on a full scan, which gives them a second chance) ones a run could not reproduce."""
+    seen = existing_fingerprints(gh, public=False) | security_context.not_findings(security_context.read(root))
+    return seen if full else seen | skipped_fingerprints(gh, cfg)
+
+
 def context(gh: GH, cfg: Config, git: Git, root: Path, sc: Scope, rules: list[review_rules.Rule]) -> tuple[str, dict]:
     """(context markdown, rule items {"items": [...]} the scanner must check)."""
     security_rules = [r for r in rules if r.security]
@@ -155,7 +176,8 @@ def context(gh: GH, cfg: Config, git: Git, root: Path, sc: Scope, rules: list[re
     names = sorted(sc.changed)
     out += [f"## Files in scope ({len(names)}{', first ' + str(MAX_LIST) if len(names) > MAX_LIST else ''})"]
     out += _fenced("\n".join(ns.defang(n) for n in names[:MAX_LIST]) or "(none)")
-    out += ["", review_rules.render(hits, review_rules.MAX_HITS, "Security rule hits (answer every one)")]
+    out += ["", review_rules.render(hits, review_rules.MAX_HITS, "Security rule hits (answer every one)"), ""]
+    out += security_context.for_prompt(security_context.read(root))
     return "\n".join(out) + "\n", listed
 
 
@@ -232,7 +254,29 @@ def existing_fingerprints(gh: GH, public: bool) -> set[str]:
     return seen
 
 
-def _description(f: dict, fp: str, head: str, base: str) -> str:
+def _repro(v: dict | None) -> list[str]:
+    """The validation section of a filed finding."""
+    if not v:
+        return []
+    if v["verdict"] == "validated":
+        head = ("**Validated:** a repro test fails on main (run twice by the harness, not by the model). Read the "
+                "test before trusting it; a fix should turn it green.")
+    elif v["verdict"] == "not_testable":
+        head = "**Unconfirmed:** this could not be tested on the runner. A person needs to judge it."
+    else:
+        head = "**Unconfirmed:** the repro test did not fail on main. Filed anyway because of its severity."
+    out = ["### Validation", head, "", f"Result: {ns.defang(v.get('reason') or v['verdict'])}", ""]
+    if v.get("notes"):
+        out += ["Notes from the validation run:", *_fenced(ns.defang(v["notes"])), ""]
+    if v.get("test"):
+        out += [f"Repro test `{ns.defang(v['test_path']).replace('`', '')}`, run with "
+                f"`{ns.defang(v['run_command']).replace('`', '')}`:", *_fenced(ns.defang(v["test"])), ""]
+    if v.get("output") and v["verdict"] != "not_testable":
+        out += ["End of the last run's output:", *_fenced(ns.defang(v["output"])), ""]
+    return out
+
+
+def _description(f: dict, fp: str, head: str, base: str, validation: dict | None = None) -> str:
     wk = weakness_key(f)
     rng = f"{base[:12]}..{head[:12]}" if base else f"baseline at {head[:12]}"
 
@@ -244,7 +288,9 @@ def _description(f: dict, fp: str, head: str, base: str) -> str:
             f"**Location:** `{ns.defang(f['location']).replace('`', '')}`"
             + (f"  \n**CWE:** {ns.defang(f['cwe']).replace('`', '')}" if f["cwe"] else ""), "",
             *block("Evidence", f["evidence"]), *block("Attack path", f["attack_path"]), *block("Suggested fix", f["fix"]),
-            ns.marker("redteam-finding", fp=fp, sha=head, **({"wk": wk} if wk else {}))]
+            *_repro(validation),
+            ns.marker("redteam-finding", fp=fp, sha=head, **({"wk": wk} if wk else {}),
+                      **({"validated": validation["verdict"]} if validation else {}))]
     return "\n".join(desc)
 
 
@@ -259,9 +305,23 @@ class FileResult:
     duplicates: int = 0
     below: int = 0
     failed: list[str] = field(default_factory=list)
+    # Only with validation on (None from the caller means off):
+    validated: int = 0
+    unconfirmed: int = 0                                     # filed with the `unconfirmed` label
+    unreproduced: list[tuple[str, str]] = field(default_factory=list)   # (fingerprint, title): not filed
+    deferred: int = 0                                        # no validation result yet: the next run takes them
+    shadow: list[str] = field(default_factory=list)          # level 0: what would have happened, nothing filed
 
 
-def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public: bool) -> FileResult:
+UNCONFIRMED = "unconfirmed"
+
+
+def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public: bool,
+                  validation: dict[str, dict] | None = None) -> FileResult:
+    """File what the scan found. With `validation` (results by fingerprint, private repos only) a finding is filed
+    only when its repro test failed on main; one that could not be tested, or a critical one that did not
+    reproduce, is filed with the `unconfirmed` label; the rest are left out and remembered. At `redteam.level` 0
+    nothing is filed at all."""
     floor = SEVERITIES.index(cfg.redteam_min_severity)
     result = FileResult()
     found = findings_of(data)
@@ -279,20 +339,45 @@ def file_findings(gh: GH, cfg: Config, data: dict, head: str, base: str, public:
         if fp in seen or (wk and wk in seen):
             result.duplicates += 1
             continue
+        labels = [LABEL, cfg.label("human")]
+        v = None
+        if validation is not None:
+            v = validation.get(fp)
+            if v is None:
+                result.deferred += 1
+                continue
+            if cfg.redteam_level == 0:
+                result.shadow.append(f"{f['severity']} `{fp}`: {v['verdict']} ({ns.one_line(ns.defang(v['reason']), 120)})")
+                continue
+            if v["verdict"] == "not_reproduced" and f["severity"] != "critical":
+                result.unreproduced.append((fp, ns.one_line(ns.defang(f["title"]), 120)))
+                continue
+            if v["verdict"] != "validated":
+                labels.append(UNCONFIRMED)
         try:
             if public:
                 adv = gh.post(gh.r("security-advisories"), advisory_body(f, fp, head, base, gh.repo)) or {}
                 where = f"{adv.get('ghsa_id') or '(draft)'} {adv.get('html_url', '')}"
             else:
                 title = f"[{f['severity']}] {ns.one_line(ns.defang(f['title']), 240)}"[:250]
-                issue = gh.create_issue(title, _description(f, fp, head, base), [LABEL, cfg.label("human")]) or {}
+                issue = gh.create_issue(title, _description(f, fp, head, base, v), labels) or {}
                 where = f"#{issue.get('number', '?')}"
         except GHError as err:
             result.failed.append(f"{f['severity']}: {err}")
             continue
         seen.update(k for k in (fp, wk) if k)
+        if v is not None:
+            result.validated += v["verdict"] == "validated"
+            result.unconfirmed += v["verdict"] != "validated"
+            where += " (validated)" if v["verdict"] == "validated" else f" ({UNCONFIRMED})"
         result.filed.append(f"{f['severity']} {where}".strip())
     return result
+
+
+def progress(result: FileResult, cfg: Config, validating: bool) -> bool:
+    """Whether the run may record the commit it reached. Not when filing failed, when a finding still waits for
+    validation (the next run must see it again), or at level 0, which only reports."""
+    return not result.failed and not result.deferred and not (validating and cfg.redteam_level == 0)
 
 
 def summary(result: FileResult, head: str, base: str, cfg: Config, public: bool) -> str:
@@ -314,4 +399,21 @@ def summary(result: FileResult, head: str, base: str, cfg: Config, public: bool)
         lines.append(f"- {result.below} below {cfg.redteam_min_severity} (not filed; lower `redteam.min_severity` to file them)")
     if result.failed:
         lines.append(f"- {len(result.failed)} could not be filed (see the workflow log)")
+    if result.shadow:
+        lines += ["", f"Level 0 (report only): {len(result.shadow)} finding(s) went through validation, nothing was "
+                  "filed and the scan's position was not moved:", *[f"- {x}" for x in result.shadow]]
+    if result.unreproduced:
+        lines += ["", f"{len(result.unreproduced)} finding(s) did not reproduce and were not filed. Later scans skip "
+                  "them (a full scan tries them again). If one is real, file it by hand; if one keeps coming back, "
+                  f"explain it under \"Not a finding\" in `{security_context.PATH}` with its fingerprint:"]
+        lines += [f"- `fp:{fp}` {title}" for fp, title in result.unreproduced]
+    if result.deferred:
+        lines.append(f"- {result.deferred} more wait for validation (at most `redteam.validate.max_per_run` a run); "
+                     "the next scan covers this range again")
     return "\n".join(lines)
+
+
+def skip_marker(result: FileResult) -> str:
+    """The trusted record of what did not reproduce ('' when there is nothing to record)."""
+    fps = ",".join(fp for fp, _ in result.unreproduced)
+    return ns.marker("redteam-skip", fps=fps) + "\n" if fps else ""
