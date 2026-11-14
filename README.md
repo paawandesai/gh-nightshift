@@ -154,21 +154,23 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 
 | Key | Default | What it does |
 |---|---|---|
+| `version` | required | Always `1` |
 | `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `fallback_token_secret` (a second Claude token used only when the first cannot start a run), `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image`, `sudo` (`false`: the agent runs without sudo or, on lanes without `postgres_image`, Docker; setup still has them. GitHub-hosted runners only) |
-| `main_branch` | `main` | Branch the lanes build on and protect |
+| `main_branch` | `main` | Branch the lanes build on and protect. A git branch name (letters, digits, `. _ / + -`) |
 | `ci_workflow` | `ci.yml` | CI file whose runs on main gate every lane |
+| `ci_workflow_name` | the `name:` in `ci_workflow`, else `CI` | The CI workflow's display name, which the lane workflow's `workflow_run` trigger listens for. Set it only when it cannot be read from the file. Letters, digits, spaces and `. _ ( ) / + & : , -` |
 | `required_checks` | `[test, "review / verdict"]` | Required status checks; a PR counts as green only when all have reported |
 | `fix_lane` | first lane | The only lane that works while main is red |
 | `merge.mode` | `strict` | `strict` or `queue` (see below) |
 | `merge.allow_unenforced` | `false` | The picker merges a green PR only when main's branch protection or a ruleset enforces every required check. `true` merges anyway (a free private repo cannot have branch protection) |
-| `protected_paths` | `[]` | Added to the built-in list (`.github/`, `.claude/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENT_RULES.md`, `.mcp.json`, `.night-shift/`, plus `planner.docs` when `planner.refill_below` is on); never replaces it. `dir/` covers a folder, a glob such as `**/package.json` matches at any depth |
+| `protected_paths` | `[]` | Added to the built-in list (`.github/`, `.claude/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENT_RULES.md`, `.mcp.json`, `.night-shift/`, plus `planner.docs` when `planner.refill_below` is on); never replaces it. Built-in names match in any case (`.GitHub/`, `claude.md`), since a macOS or Windows clone treats them as the same file; your own entries are case-sensitive. `dir/` covers a folder, a glob such as `**/package.json` matches at any depth |
 | `models` | `sonnet` / `opus` / `opus` / `opus` | `default`, `escalate`, `review`, `planner` |
 | `limits` | 3, 6, 45, 80, 2, 2, `true` | `max_attempts`, `infra_cap`, `stale_minutes`, `max_turns`, `max_needs_per_issue`, `max_notes_per_issue`, `auto_ready_needs` (`false`: an agent's request to another lane waits as `proposed` until a person promotes it) |
 | `planner` | | `docs`, `max_tickets_per_run` (8), `refill_below` (0 = off), `id_prefixes`, `human_paths` (`[contracts/]`), `claude_token_secret`, `schedule`, `enabled` |
-| `labels` | | Rename any of the standard labels (`ready` is `night-safe` by default) |
+| `labels` | | Rename any of the standard labels: `ready` (`night-safe`), `blocked` (`blocked`), `needs_human` (`needs-human`), `human` (`human`), `proposed` (`proposed`), `agent` (`agent`), `in_progress` (`agent:in-progress`), `night_log` (`night-log`) |
 | `review_token_secret` | `CLAUDE_TOKEN_REVIEW` | Claude token secret for the review gate |
-| `timezone` | `UTC` | Time zone for night-log lines |
-| `tool_ref` | `main` (`init` writes the installed release's commit) | Ref of gh-nightshift the workflows use. Pin a 40-character commit SHA; `doctor` warns about a tag (which can be moved) or a branch. |
+| `timezone` | `UTC` | IANA time zone (such as `Europe/Berlin`) for night-log lines and the noon-to-noon night of lane budgets. An unknown zone is refused when the config loads; `doctor` warns when this machine has no time zone database to check it with |
+| `tool_ref` | `main` (`init` writes the installed release's commit) | Ref of gh-nightshift the workflows use: a tag, branch or 40-character commit SHA (letters, digits, `. _ / + -`). Pin a SHA; `doctor` warns about a tag (which can be moved) or a branch. |
 | `bot_login` | you | The PAT's login, for read-only commands run as someone else (`stats`, `audit`, `digest`) |
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
 | `cross_repos` | `[]` | Repos (`owner/name`) whose issues a ticket may depend on with `Blocked by: owner/repo#N` (see Cross-repo dependencies) |

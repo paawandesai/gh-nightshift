@@ -2,6 +2,9 @@
 version: 1
 main_branch: main
 ci_workflow: ci.yml            # its runs on main gate every lane
+# ci_workflow_name: CI         # optional: the CI workflow's `name:`; default read from ci_workflow, else CI
+timezone: UTC                  # IANA zone for night-log lines and lane budgets' noon-to-noon night
+review_token_secret: CLAUDE_TOKEN_REVIEW   # Claude token for the review gate (must not be a lane's)
 required_checks: [test, "review / verdict"]
 fix_lane: api                  # the only lane that works while main is red
 tool_ref: 7097423d839d36c0d37573bd9330581798b1b460  # v0.1.4 (init writes the release's commit; a tag can be moved)
@@ -12,6 +15,16 @@ bot_login: night-bot            # login of the account that owns AGENT_PAT (stat
 trusted_logins: [bob]          # other PAT logins to trust (here Bob's own PAT for the web lane)
 merge:
   mode: strict                 # strict: PRs must be up to date with main; queue: GitHub merge queue
+  allow_unenforced: false      # true: merge even when main does not enforce the required checks
+# labels:                      # optional: rename the standard labels (defaults shown)
+#   ready: night-safe
+#   blocked: blocked
+#   needs_human: needs-human
+#   human: human
+#   proposed: proposed
+#   agent: agent
+#   in_progress: agent:in-progress
+#   night_log: night-log
 protected_paths: [contracts/]  # added to .github/, .claude/, CLAUDE.md, AGENTS.md, .mcp.json, .night-shift/
 models:
   default: sonnet
@@ -74,6 +87,7 @@ lanes:
     claude_token_secret: CLAUDE_TOKEN_ALICE
     fallback_token_secret: CLAUDE_TOKEN_ALICE_2   # optional: used only when Alice's token hits a usage limit
     model: sonnet
+    # escalate_model: opus       # optional: retries and fix-main; default models.escalate
     postgres_image: "postgres:16"
     setup:
       commands: |

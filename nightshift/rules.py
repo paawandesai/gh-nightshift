@@ -132,6 +132,11 @@ def age_minutes(created_at: str | None, now: dt.datetime | None = None) -> float
 
 # Files Claude Code (and similar agents) read as instructions wherever they sit in the tree.
 AGENT_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json", ".claude/")
+# Built-in protected names compared without regard to case (W-03): on a macOS or Windows clone `.GitHub/` or
+# `claude.md` lands on the real file. Keep in step with config.BUILTIN_PROTECTED (a test checks this).
+# User-configured protected_paths stay case-sensitive: they name the repo's own files, as git stores them.
+CASELESS_NAMES = frozenset(n.casefold() for n in AGENT_FILES + (".github/", ".night-shift/", "AGENT_RULES.md"))
+CASELESS_AGENT_FILES = frozenset(n.casefold() for n in AGENT_FILES)
 
 
 def normalize_path(path: str) -> str | None:
@@ -151,12 +156,14 @@ def split_paths(entry: str) -> list[str]:
 def path_is_protected(path: str, protected: list[str]) -> bool:
     """`dir/` protects everything under it, `file` protects that exact path; a path that cannot be
     normalised (e.g. escapes with `..`) counts as protected. Agent instruction files (CLAUDE.md,
-    CLAUDE.local.md, AGENTS.md, .mcp.json, .claude/) are protected at any depth when they are in the protected list.
+    CLAUDE.local.md, AGENTS.md, .mcp.json, .claude/) are protected at any depth when they are in the protected list,
+    and built-in names (CASELESS_NAMES) match in any case; other entries are case-sensitive.
     An entry with `*`, `?` or `[` is a glob over the whole path; `**/name` matches `name` at any depth
     (`**/package.json`, `**/requirements*.txt`)."""
     norm = normalize_path(path)
     if norm is None:
         return True
+    folded = norm.casefold()
     for p in protected:
         p = p.strip().lstrip("/")
         if not p:
@@ -169,12 +176,17 @@ def path_is_protected(path: str, protected: list[str]) -> bool:
             elif fnmatch.fnmatchcase(norm, p):
                 return True
             continue
+        caseless = p.casefold() in CASELESS_NAMES
+        target = folded if caseless else norm
+        if caseless:
+            p = p.casefold()
+        agent = caseless and p in CASELESS_AGENT_FILES
         if p.endswith("/"):
-            if norm.startswith(p) or norm == p.rstrip("/"):
+            if target.startswith(p) or target == p.rstrip("/"):
                 return True
-            if p in AGENT_FILES and f"/{p}" in f"/{norm}":
+            if agent and f"/{p}" in f"/{target}":
                 return True
-        elif norm == p or (p in AGENT_FILES and norm.endswith("/" + p)):
+        elif target == p or (agent and target.endswith("/" + p)):
             return True
     return False
 
