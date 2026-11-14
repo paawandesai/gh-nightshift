@@ -128,6 +128,41 @@ Fixes from the wider gap test (W-03, W-04, W-06, W-07, W-08):
 - Every config key is now in the README's Config reference and in `examples/config.yml`, and
   `tests/test_docs.py` fails when the schema gains a key that is in neither (W-08).
 
+Fixes from the second gap test of the validation harness (R2-01 to R2-05):
+
+- The tree check compares tracked files with the scanned commit's own objects, each object's hash checked and
+  each working file hashed by the tool, so `git update-index --skip-worktree` or `--assume-unchanged`, a staged
+  change, a clean filter or an object file rewritten in place no longer hides a change. A CRLF checkout and a
+  Git LFS file checked out in full still count as unchanged (R2-01).
+- The validate job records every file git does not track (ignored, hidden through `.git/info/exclude`,
+  `node_modules` included) after lane setup and before the model starts, as a new `redteam baseline` step whose
+  digest goes to `redteam verify --baseline-digest`. A checkout of 515 MB `node_modules` (19,775 files) took 1 to
+  2 seconds. Test runs read no cache from the checkout: `PYTHONPYCACHEPREFIX` and `CARGO_TARGET_DIR` point to
+  empty folders, jest gets an empty `--cacheDirectory`, and `node_modules/.cache`, `.vite`, `.vitest` and
+  `.vitest-cache` are deleted before a JS run. Processes the model left running are stopped before the harness
+  checks the tree, as well as after it (R2-02).
+- **Stricter:** these runs are now refused (each is `not_reproduced`):
+  - a file git ignores that changed, appeared or was deleted after lane setup, outside the allowed caches
+    (`__pycache__/`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.hypothesis/`, the node caches above,
+    `target/` beside a tracked `Cargo.toml`, `.coverage*`, and a `Cargo.lock` that did not exist before). This
+    covers a model that runs `npm install`, `pip install -e .` (an `.egg-info` folder) or installs into a
+    virtualenv inside the checkout: put dependencies in the lane's setup. The validate prompt now says so;
+  - a bare `name.pyc` outside `__pycache__` (Python imports it when `name.py` is missing);
+  - a tracked file whose executable bit changed, or a tracked folder replaced by a symlink;
+  - a repo whose checkout rewrites file content through a smudge filter other than Git LFS, or a vitest config
+    that moves vite's cache into a folder of the checkout other than `node_modules/.vite`, after the model ran
+    the test itself;
+  - the baseline step failed, or its manifest no longer hashes to the step's digest.
+- "Not a finding" counts an `fp:` only on a plain-text list item (or a line inside a code fence): not inside an
+  HTML tag or an element left open on an earlier line (such as a collapsed `<details>`), a link or image (its
+  title or alt text), or a link reference definition (R2-03).
+- pytest and unittest repro tests run from the folder of the lane that lists them, as a lane's own
+  `cd web && python -m pytest` does, with the repository root after it on `PYTHONPATH`; the reported command shows
+  the folder (R2-04).
+- A cargo `assert!(cond, "message")` failure counts as an assertion failure: when the message is not
+  `assertion ...`, the panic's location must be a line of the repro test that starts an `assert!`,
+  `assert_eq!`, `assert_ne!` or `debug_assert*!` call (R2-05).
+
 ## [0.1.4] - 2026-11-10
 
 ### Added

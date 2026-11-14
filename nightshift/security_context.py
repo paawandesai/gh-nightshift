@@ -100,11 +100,58 @@ def section(text: str, heading: str) -> str:
     return "\n".join(out).strip()
 
 
+_LIST_ITEM_RE = re.compile(r"\s*(?:[-*+]|\d{1,9}[.)])\s+\S")
+_LINK_DEF_RE = re.compile(r" {0,3}\[[^\]]+\]:")
+# Markdown that can carry text a reader of the rendered file does not see as text: any HTML tag (an attribute, a
+# hidden or tiny element), a link or image (its title, alt text or reference label), and an autolink.
+_HIDING_RE = re.compile(r"<[A-Za-z/!?]|!?\[[^\]]*\]\s*[(\[]|\]\[|<https?:|\]:")
+_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9-]*)\b[^>]*?(/?)>")
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+
+
+def _shown_lines(body: str) -> list[str]:
+    """The lines of a section where an `fp:` is plainly visible in the rendered file (R2-03): a list item of plain
+    text (no HTML tag, link or image on the line, not a link reference definition), outside any HTML element left
+    open on an earlier line (a collapsed `<details>`, a hidden `<div>`), or a line inside a code fence, which is
+    shown exactly as written."""
+    out: list[str] = []
+    fence = ""
+    open_tags: list[str] = []
+    for line in body.splitlines():
+        m = _FENCE_RE.match(line)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not line[m.end():].strip():
+                fence = ""
+            elif not open_tags:
+                out.append(line)
+            continue
+        if m and not (m.group(1)[0] == "`" and "`" in line[m.end():]):
+            fence = m.group(1)
+            continue
+        hidden = bool(open_tags)
+        for close, name, selfclose in _TAG_RE.findall(line):
+            name = name.lower()
+            if name in _VOID_TAGS or selfclose:
+                continue
+            if not close:
+                open_tags.append(name)
+            elif name in open_tags:
+                del open_tags[len(open_tags) - 1 - open_tags[::-1].index(name):]
+        if hidden or not _LIST_ITEM_RE.match(line) or _LINK_DEF_RE.match(line) or _HIDING_RE.search(line):
+            continue
+        out.append(line)
+    return out
+
+
 def not_findings(text: str) -> set[str]:
-    """Fingerprints and weakness keys listed under "Not a finding", as a person reading the rendered file sees
-    them: only that section counts (an `fp:` anywhere else suppresses nothing), a heading inside a code fence is
-    not a heading, and an `fp:` inside an HTML comment, which the rendered file hides, counts for nothing."""
-    return set(_FP_RE.findall(section(visible(text), NOT_A_FINDING)))
+    """Fingerprints listed under "Not a finding", as a person reading the rendered file sees them: only that
+    section counts (an `fp:` anywhere else suppresses nothing), a heading inside a code fence is not a heading, an
+    `fp:` inside an HTML comment, which the rendered file hides, counts for nothing, and outside a code fence only a
+    plain-text list item counts (see `_shown_lines`)."""
+    found: set[str] = set()
+    for line in _shown_lines(section(visible(text), NOT_A_FINDING)):
+        found.update(_FP_RE.findall(line))
+    return found
 
 
 def for_prompt(text: str) -> list[str]:

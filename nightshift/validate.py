@@ -27,12 +27,14 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -335,10 +337,32 @@ def _go(code: int, output: str, names: tuple[str, ...]) -> tuple[str, str]:
 
 
 _CARGO_RESULT = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed", re.M)
-_CARGO_PANIC = re.compile(r"panicked at (?:'(?P<old>[^\n]*?)', [^\n]*|[^\n]*:\n(?P<new>[^\n]*))")
+_CARGO_PANIC = re.compile(r"panicked at (?:'(?P<old>[^\n]*?)', (?P<ofile>[^\n]*?):(?P<oline>\d+):(?P<ocol>\d+)[^\n]*"
+                          r"|(?P<file>[^\n]*?):(?P<line>\d+):(?P<col>\d+):\n(?P<new>[^\n]*))")
+_RUST_ASSERT = re.compile(r"\s*(?:(?:std|core)::)?(?:debug_)?assert(?:_eq|_ne)?!\s*[(\[{]")
 
 
-def _cargo(code: int, output: str) -> tuple[str, str]:
+def _rust_assert_at(test_file: Path | None, crate: Path | None, file: str, line: int, col: int) -> bool:
+    """True when the panic location is a line of the repro test that starts an `assert!`, `assert_eq!`, `assert_ne!`
+    or `debug_assert*!` call (R2-05: `assert!(cond, "message")` panics with the message alone). rustc prints the
+    path relative to the workspace root, so it is matched on the test's path within its crate."""
+    if test_file is None or crate is None or line < 1:
+        return False
+    own = test_file.relative_to(crate).as_posix()
+    where = file.replace("\\", "/")
+    if not (where == own or where.endswith("/" + own) or where == str(test_file)):
+        return False
+    try:
+        lines = test_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    if line > len(lines):
+        return False
+    text = lines[line - 1]
+    return bool(_RUST_ASSERT.match(text[max(col - 1, 0):]) or _RUST_ASSERT.match(text))
+
+
+def _cargo(code: int, output: str, test_file: Path | None = None, crate: Path | None = None) -> tuple[str, str]:
     m = _CARGO_RESULT.search(output)
     if not m:
         return BROKEN, "cargo test reported no result: the build failed or no test ran"
@@ -347,8 +371,13 @@ def _cargo(code: int, output: str) -> tuple[str, str]:
         for block in re.split(r"^---- \S+ stdout ----$", output, flags=re.M)[1:]:
             p = _CARGO_PANIC.search(block)
             msg = (p.group("old") or p.group("new") or "") if p else ""
-            if not msg.startswith("assertion"):
-                return BROKEN, "a panic, not an assertion failure (assert!, assert_eq!, assert_ne!)"
+            if msg.startswith("assertion"):
+                continue
+            at = (p.group("ofile"), p.group("oline"), p.group("ocol")) if p and p.group("ofile") is not None \
+                else ((p.group("file"), p.group("line"), p.group("col")) if p else None)
+            if at and at[0] is not None and _rust_assert_at(test_file, crate, at[0].strip(), int(at[1]), int(at[2])):
+                continue
+            return BROKEN, "a panic, not an assertion failure (assert!, assert_eq!, assert_ne!)"
         return (FAIL, "") if code == 101 else (BROKEN, f"the report shows a failure but cargo exited {code}")
     return (PASS, "") if passed else (BROKEN, "no test ran")
 
@@ -413,7 +442,7 @@ def outcome(plan: Plan, code: int, output: str, report: str, test_file: Path) ->
     if plan.runner == "go":
         return _go(code, output, tuple(plan.argv[plan.argv.index("-run") + 1].strip("^$()").split("|")))
     if plan.runner == "cargo":
-        return _cargo(code, output)
+        return _cargo(code, output, test_file, plan.cwd)
     if plan.runner in ("jest", "vitest"):
         return _jest(code, report, test_file)
     return _mocha(code, report, test_file)
@@ -489,23 +518,297 @@ def _is_cache(rel: str) -> bool:
         or parts[-1] == "Cargo.lock"
 
 
-def tree_problem(root: Path, rel: str, base: str = "HEAD") -> str | None:
+# --- the scanned commit as it is (R2-01) ---
+# The tracked files are compared with the commit's own tree, read object by object with every object's hash checked
+# here, and each working file is hashed in Python. Nothing git keeps beside the objects is trusted: not the index
+# (`--skip-worktree`, `--assume-unchanged`, a staged change), not filters or attributes in `.git/config`, not
+# replace refs, and not an object file rewritten in place (its hash would no longer match its name).
+
+class _Objects:
+    """Reads objects through one `git cat-file --batch` and checks that each one hashes to the id asked for."""
+
+    def __init__(self, root: Path):
+        self.proc = subprocess.Popen([*_GIT, "-C", str(root), "cat-file", "--batch"], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     env={**scrubbed_env(), "GIT_NO_REPLACE_OBJECTS": "1"})
+
+    def get(self, oid: str) -> tuple[str, bytes]:
+        assert self.proc.stdin is not None and self.proc.stdout is not None
+        self.proc.stdin.write(oid.encode() + b"\n")
+        self.proc.stdin.flush()
+        head = self.proc.stdout.readline().split()
+        if len(head) != 3 or head[0].decode() != oid:
+            raise ValueError("object not found")
+        kind, size = head[1].decode(), int(head[2])
+        data = self.proc.stdout.read(size)
+        self.proc.stdout.read(1)
+        if len(data) != size or _object_id(kind, data, len(oid)) != oid:
+            raise ValueError("object does not match its id")
+        return kind, data
+
+    def close(self) -> None:
+        try:
+            if self.proc.stdin:
+                self.proc.stdin.close()
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if self.proc.stdout:
+            self.proc.stdout.close()
+
+
+def _object_id(kind: str, data: bytes, width: int = 40) -> str:
+    algo = hashlib.sha1 if width == 40 else hashlib.sha256
+    return algo(f"{kind} {len(data)}\0".encode() + data).hexdigest()
+
+
+def commit_tree(root: Path, base: str = "HEAD") -> dict[str, tuple[str, str]] | None:
+    """Every path in the commit's tree: {path: (mode, object id)}, read with each object's hash checked. Gitlinks
+    (submodules) are left out. None when the commit cannot be read."""
+    sha = base if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base) else None
+    if sha is None:
+        got = _git(root, "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}")
+        sha = got[0].strip() if got else None
+    if not sha or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        return None
+    width = len(sha) // 2
+    objects = _Objects(root)
+    out: dict[str, tuple[str, str]] = {}
+    try:
+        kind, data = objects.get(sha)
+        if kind != "commit" or not data.startswith(b"tree "):
+            return None
+        todo = [("", data[5:5 + len(sha)].decode())]
+        while todo:
+            prefix, oid = todo.pop()
+            kind, data = objects.get(oid)
+            if kind != "tree":
+                return None
+            i = 0
+            while i < len(data):
+                sp, nul = data.index(b" ", i), data.index(b"\0", i)
+                mode, name = data[i:sp].decode(), data[sp + 1:nul].decode("utf-8", errors="surrogateescape")
+                child, i = data[nul + 1:nul + 1 + width].hex(), nul + 1 + width
+                if name in ("", ".", "..", ".git") or "/" in name:
+                    return None
+                path = f"{prefix}{name}"
+                if mode == "40000":
+                    out[path] = ("40000", child)
+                    todo.append((path + "/", child))
+                elif mode != "160000":
+                    out[path] = (mode, child)
+        return out
+    except (ValueError, OSError, IndexError):
+        return None
+    finally:
+        objects.close()
+
+
+_LFS_POINTER = re.compile(rb"version https://git-lfs\.github\.com/spec/v1\noid sha256:([0-9a-f]{64})\nsize (\d+)\n")
+
+
+_SMALL = 50 * 1024 * 1024    # files up to this size are also checked for CRLF line endings and Git LFS pointers
+
+
+def _blob_id_of_file(path: Path, size: int, width: int) -> str:
+    h = (hashlib.sha1 if width == 40 else hashlib.sha256)(f"blob {size}\0".encode())
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def tracked_problem(root: Path, tree: dict[str, tuple[str, str]]) -> str | None:
+    """The first tracked path whose working copy is not the commit's (changed, deleted, a different kind or
+    executable bit, or a folder swapped for a symlink), or None. A file checked out with CRLF line endings and a Git
+    LFS file checked out in full (its content hashes to the pointer's oid) count as unchanged."""
+    width = len(next(iter(tree.values()))[1]) if tree else 40
+    objects: _Objects | None = None
+    try:
+        for rel, (mode, oid) in sorted(tree.items()):
+            path = root / rel
+            try:
+                st = os.lstat(path)
+            except OSError:
+                return rel
+            if mode == "40000":
+                if not stat.S_ISDIR(st.st_mode):
+                    return rel
+                continue
+            if mode == "120000":
+                if not stat.S_ISLNK(st.st_mode) or _object_id("blob", os.fsencode(os.readlink(path)), width) != oid:
+                    return rel
+                continue
+            if not stat.S_ISREG(st.st_mode) or bool(st.st_mode & 0o100) != (mode == "100755"):
+                return rel
+            if _blob_id_of_file(path, st.st_size, width) == oid:
+                continue
+            if st.st_size > _SMALL:
+                return rel
+            data = path.read_bytes()
+            if b"\r\n" in data and _object_id("blob", data.replace(b"\r\n", b"\n"), width) == oid:
+                continue
+            if len(data) > 200:
+                objects = objects or _Objects(root)
+                try:
+                    _, blob = objects.get(oid)
+                except ValueError:
+                    return rel
+                lfs = _LFS_POINTER.fullmatch(blob)
+                if lfs and int(lfs.group(2)) == len(data) and hashlib.sha256(data).hexdigest() == lfs.group(1).decode():
+                    continue
+            return rel
+        return None
+    finally:
+        if objects:
+            objects.close()
+
+
+# --- files git does not track (R2-02) ---
+# The validate job takes a baseline after lane setup and before the model starts: every file in the checkout that the
+# commit does not track (git-ignored or not, hidden through .git/info/exclude or not, node_modules included), each with
+# a hash of its content. Its digest goes to a step output, which no later step can change; the manifest itself sits in
+# $RUNNER_TEMP and is used only when it hashes to that digest. The harness refuses a run in which any of those files
+# changed, went away or appeared, except the test, its one helper and these, which a test run writes and which the
+# harness keeps from being read:
+# - `__pycache__/`: the runs set PYTHONPYCACHEPREFIX to an empty folder, so Python neither reads nor writes these.
+#   (A bare `name.pyc` outside `__pycache__` can be imported, so it is not exempt.)
+# - `.pytest_cache/`: the runs pass `-p no:cacheprovider`. `.mypy_cache/` and `.ruff_cache/`: no runner reads them.
+# - `.hypothesis/`: replays inputs that failed before; a failure on one is a real failure of the code.
+# - `node_modules/.cache/`, `.vite/`, `.vitest/`, `.vitest-cache/`: the harness deletes them before it runs
+#   (babel, vite and vitest caches can hold transformed code). jest gets an empty `--cacheDirectory`.
+# - `target/` beside a tracked Cargo.toml: the runs build into an empty CARGO_TARGET_DIR instead.
+# - `.coverage` and `.coverage.*`: written by pytest-cov when a repo's addopts turn it on; no test reads them.
+# - a Cargo.lock that did not exist at the baseline: cargo writes it on the first build. One that existed must not
+#   change.
+
+_EXEMPT_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis"}
+NODE_CACHES = (".cache", ".vite", ".vitest", ".vitest-cache")
+_OUTPUT_FILE = re.compile(r"\.coverage(\.[^/]+)?")
+
+
+def _entry(path: Path) -> str:
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        return "l:" + hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest()
+    if stat.S_ISREG(st.st_mode):
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return ("x:" if st.st_mode & 0o100 else "f:") + h.hexdigest()
+    return "o:" + oct(stat.S_IFMT(st.st_mode))
+
+
+def untracked_files(root: Path, tree: dict[str, tuple[str, str]]) -> dict[str, str]:
+    """{path: kind and content hash} for every file and symlink in the checkout the commit does not track, the
+    exempt caches above left out. Symlinks are recorded, never followed."""
+    out: dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        rel_dir = here.relative_to(root).as_posix()
+        rel_dir = "" if rel_dir == "." else rel_dir + "/"
+        keep = []
+        for name in dirnames:
+            rel = rel_dir + name
+            if (rel_dir == "" and name == ".git") or name in _EXEMPT_DIRS \
+                    or (name in NODE_CACHES and rel_dir.endswith("node_modules/")) \
+                    or (name == "target" and f"{rel_dir}Cargo.toml" in tree):
+                continue
+            if (here / name).is_symlink():
+                if tree.get(rel, ("",))[0] != "120000":
+                    out[rel] = _entry(here / name)
+                continue
+            keep.append(name)
+        dirnames[:] = sorted(keep)
+        for name in filenames:
+            rel = rel_dir + name
+            if (rel_dir == "" and name == ".git") or rel in tree or _OUTPUT_FILE.fullmatch(name):
+                continue
+            try:
+                out[rel] = _entry(here / name)
+            except OSError:
+                out[rel] = "o:unreadable"
+    return out
+
+
+def baseline(root: Path, base: str = "HEAD") -> tuple[bytes, str] | None:
+    """(manifest, digest) of the files the commit does not track, for the job's baseline step; None when the commit
+    cannot be read."""
+    tree = commit_tree(root, base)
+    if tree is None:
+        return None
+    manifest = json.dumps(untracked_files(root, tree), sort_keys=True, separators=(",", ":")).encode()
+    return manifest, hashlib.sha256(manifest).hexdigest()
+
+
+def load_baseline(path: Path, digest: str) -> dict[str, str] | str:
+    """The baseline manifest when it hashes to the digest the baseline step put in its output, else why not."""
+    if not re.fullmatch(r"[0-9a-f]{64}", digest or ""):
+        return "no baseline of the files git does not track was taken before the model started"
+    try:
+        raw = path.read_bytes() if not path.is_symlink() else b""
+    except OSError:
+        raw = b""
+    if hashlib.sha256(raw).hexdigest() != digest:
+        return "the baseline of the files git does not track was changed after it was taken"
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return "the baseline of the files git does not track cannot be read"
+    if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+        return "the baseline of the files git does not track cannot be read"
+    return data
+
+
+def clear_node_caches(root: Path, test: Path) -> None:
+    """Delete the babel, vite and vitest caches in each node_modules from the test's folder up to the root."""
+    d = test.parent
+    while True:
+        for name in NODE_CACHES if not (d / "node_modules").is_symlink() else ():   # never delete outside the checkout
+            p = d / "node_modules" / name
+            if p.is_symlink() or p.is_file():
+                p.unlink(missing_ok=True)
+            elif p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+        if d == root or root not in d.parents:
+            return
+        d = d.parent
+
+
+def tree_problem(root: Path, rel: str, base: str = "HEAD", untracked_baseline: dict[str, str] | None = None) -> str | None:
     """Why the checkout is not main plus one new test, or None when it is. The test must fail against the code as
-    it is: a changed application file, an edited existing test or an added conftest.py can make any test fail."""
-    status = _git(root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-status", "-z", base, "--")
-    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
-    ignored = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
-    if status is None or untracked is None or ignored is None:
+    it is: a changed application file, an edited existing test or an added conftest.py can make any test fail.
+
+    Tracked files are compared with the commit's verified tree (R2-01). With `untracked_baseline` (the validate job
+    always passes one), every file git does not track is compared with its state before the model started (R2-02);
+    without it, only files git neither tracks nor ignores count, and ignored runner configuration on the test's path."""
+    tree = commit_tree(root, base)
+    if tree is None:
         return "the checkout could not be compared with main (git failed)"
-    added: set[str] = set()
-    for kind, path in zip(status[::2], status[1::2]):
-        if kind != "A":
-            return f"a file in main was changed or deleted ({ns.one_line(path, 80)}); the test must run against main as it is"
-        added.add(path)
-    new = {p for p in added | set(untracked) if not _is_cache(p)}
+    changed = tracked_problem(root, tree)
+    if changed:
+        return f"a file in main was changed or deleted ({ns.one_line(changed, 80)}); the test must run against main as it is"
+    folder = rel.rpartition("/")[0]
+    ignored: list[str] = []
+    if untracked_baseline is not None:
+        now = untracked_files(root, tree)
+        for p in sorted(set(untracked_baseline) | set(now)):
+            if p in untracked_baseline and untracked_baseline[p] != now.get(p):
+                return (f"a file git does not track was changed or deleted after setup ({ns.one_line(p, 80)}); "
+                        "the test must run against main as it was set up")
+        new = {p for p in now if p not in untracked_baseline and p.rpartition("/")[2] != "Cargo.lock"}
+    else:
+        untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
+        staged = _git(root, "ls-files", "--cached", "-z")
+        listed = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+        if untracked is None or staged is None or listed is None:
+            return "the checkout could not be compared with main (git failed)"
+        ignored = listed
+        new = {p for p in set(untracked) | (set(staged) - set(tree)) if not _is_cache(p)}
     if rel not in new:
         return "the repro test is not a new file (an existing test was edited, or the test was committed elsewhere)"
-    folder = rel.rpartition("/")[0]
     extra = sorted(new - {rel})
     if len(extra) > 1:
         return f"{len(extra)} files were added besides the test; at most one helper next to it is allowed"
@@ -556,18 +859,46 @@ def _up(root: Path, start: Path, name: str) -> Path | None:
         d = d.parent
 
 
-def plan_run(runner: str, root: Path, test: Path, report: Path) -> Plan | str:
-    """The argv for one run, built by the harness; a string says why it cannot run."""
-    rel = test.relative_to(root).as_posix()
-    python, quiet = shutil.which("python3") or "python3", {"PYTHONDONTWRITEBYTECODE": "1"}
-    if runner == "pytest":
-        return Plan(runner, [python, "-m", "pytest", rel, "-q", "-p", "no:cacheprovider", f"--junitxml={report}",
-                             "-o", "junit_family=xunit2"], root, report, quiet)
-    if runner == "unittest":
-        return Plan(runner, [python, "-c", _UNITTEST, rel, str(report)], root, report, quiet)
+def lane_folder(cfg: Config, root: Path, rel: str) -> Path:
+    """The folder of the lane that lists the test (the longest lane path that covers it), where Python tests run
+    from, as a lane's own `cd web && python -m pytest` does (R2-04). The root when no lane path covers it, or the
+    path is not a real folder inside the checkout."""
+    best = ""
+    for lane in cfg.lanes:
+        for prefix in lane.paths:
+            clean = (normalize_path(prefix) or "").rstrip("/")
+            if clean and rel.startswith(clean + "/") and len(clean) > len(best):
+                best = clean
+    folder = root / best if best else root
+    try:
+        if folder != root and (any(p.is_symlink() for p in (folder, *folder.parents) if root in p.parents)
+                               or not folder.is_dir()):
+            return root
+    except OSError:
+        return root
+    return folder
+
+
+def plan_run(runner: str, root: Path, test: Path, report: Path, folder: Path | None = None) -> Plan | str:
+    """The argv for one run, built by the harness; a string says why it cannot run. `folder`: where pytest and
+    unittest run from (`lane_folder`; the root when None). Caches the run could read go to empty folders beside the
+    report, so nothing left in the checkout is read as a cache (R2-02)."""
+    caches = report.parent
+    python = shutil.which("python3") or "python3"
+    if runner in ("pytest", "unittest"):
+        cwd = folder if folder is not None and folder != root and root in folder.parents else root
+        env = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(caches / "pycache")}
+        if cwd != root:
+            env["PYTHONPATH"] = str(root)   # after the lane folder, so `from web.app import x` still imports too
+        rel = test.relative_to(cwd).as_posix()
+        if runner == "pytest":
+            return Plan(runner, [python, "-m", "pytest", rel, "-q", "-p", "no:cacheprovider", f"--junitxml={report}",
+                                 "-o", "junit_family=xunit2"], cwd, report, env)
+        return Plan(runner, [python, "-c", _UNITTEST, rel, str(report)], cwd, report, env)
     if runner == "node":
         return Plan(runner, ["node", "--test", "--test-reporter=junit", f"--test-reporter-destination={report}",
-                             "--test-reporter=spec", "--test-reporter-destination=stdout", rel], root, report)
+                             "--test-reporter=spec", "--test-reporter-destination=stdout",
+                             test.relative_to(root).as_posix()], root, report)
     if runner == "go":
         mod = _up(root, test.parent, "go.mod")
         names = re.findall(r"^func (Test\w*)\(\s*\w+ \*testing\.T\s*\)", test.read_text(encoding="utf-8", errors="replace"),
@@ -584,13 +915,14 @@ def plan_run(runner: str, root: Path, test: Path, report: Path) -> Plan | str:
         if test.parent.name != "tests" or not (crate / "Cargo.toml").is_file():
             return "a cargo repro test must be an integration test, <crate>/tests/<name>.rs"
         return Plan(runner, ["cargo", "test", "--test", test.stem, "--no-fail-fast", "--color", "never"], crate, None,
-                    {"RUST_BACKTRACE": "0"})
+                    {"RUST_BACKTRACE": "0", "CARGO_TARGET_DIR": str(caches / "cargo-target")})
     pkg = _up(root, test.parent, f"node_modules/.bin/{runner}")
     if pkg is None:
         return f"{runner} is not installed in this checkout (no node_modules/.bin/{runner}): no test can run"
     bin_, rel_pkg = str(pkg / "node_modules/.bin" / runner), test.relative_to(pkg).as_posix()
     if runner == "jest":
-        argv = [bin_, "--ci", "--json", f"--outputFile={report}", "--runTestsByPath", rel_pkg]
+        argv = [bin_, "--ci", "--json", f"--outputFile={report}", f"--cacheDirectory={caches / 'jest-cache'}",
+                "--runTestsByPath", rel_pkg]
     elif runner == "vitest":
         argv = [bin_, "run", "--reporter=json", f"--outputFile={report}", rel_pkg]
     else:
@@ -601,12 +933,15 @@ def plan_run(runner: str, root: Path, test: Path, report: Path) -> Plan | str:
 def shown_command(plan: Plan, root: Path) -> str:
     """The harness's command as a person would type it from the repository root (the report goes to a temp file)."""
     argv = [a.replace(str(plan.report), "report") if plan.report else a for a in plan.argv]
+    argv = [a for a in argv if not a.startswith("--cacheDirectory=")]
     if plan.runner == "unittest":
         argv = [argv[0], "-m", "unittest", "-v", argv[3]]
     if plan.runner in ("pytest", "unittest"):
         argv[0] = Path(argv[0]).name
     elif Path(argv[0]).is_absolute() and plan.cwd in Path(argv[0]).parents:
         argv[0] = Path(argv[0]).relative_to(plan.cwd).as_posix()
+    if "PYTHONPATH" in plan.env:
+        argv.insert(0, "PYTHONPATH=" + os.path.relpath(plan.env["PYTHONPATH"], plan.cwd))
     cmd = shlex.join(argv)
     where = plan.cwd.relative_to(root).as_posix() if plan.cwd != root else ""
     return f"cd {shlex.quote(where)} && {cmd}" if where else cmd
@@ -636,8 +971,11 @@ def _read_report(plan: Plan, output: str) -> str:
         return ""
 
 
-def verify(cfg: Config, root: Path, f: dict, answer: dict | None, run: Runner = shell_runner, base: str = "HEAD") -> dict:
-    """Run the harness for one finding and return its result document. `base` is the commit the job checked out."""
+def verify(cfg: Config, root: Path, f: dict, answer: dict | None, run: Runner = shell_runner, base: str = "HEAD",
+           untracked_baseline: dict[str, str] | str | None = None) -> dict:
+    """Run the harness for one finding and return its result document. `base` is the commit the job checked out;
+    `untracked_baseline` the files git does not track as they were before the model started (`load_baseline`; a
+    string there is why no usable baseline exists, and refuses the run)."""
     result = {"fp": redteam.fingerprint(f), "verdict": "not_reproduced", "reason": "", "test_path": "", "test": "",
               "run_command": "", "output": "", "notes": ""}
     if answer is None:
@@ -659,14 +997,18 @@ def verify(cfg: Config, root: Path, f: dict, answer: dict | None, run: Runner = 
         return result
     rel = path.relative_to(root).as_posix()
     result.update(test_path=rel, test=path.read_text(encoding="utf-8", errors="replace")[:MAX_TEST])
-    problem = tree_problem(root, rel, base)
+    problem = untracked_baseline if isinstance(untracked_baseline, str) else tree_problem(root, rel, base,
+                                                                                          untracked_baseline)
     if problem:
         result["reason"] = problem
         return result
+    if runner in ("jest", "vitest", "mocha"):
+        clear_node_caches(root, path)
+    folder = lane_folder(cfg, root, rel)
     outcomes, output = [], ""
     with tempfile.TemporaryDirectory(prefix="ns-validate-") as tmp:
         for i in range(RUNS):
-            plan = plan_run(runner, root, path, Path(tmp) / f"report-{i}")
+            plan = plan_run(runner, root, path, Path(tmp) / f"report-{i}", folder)
             if isinstance(plan, str):
                 result["reason"] = plan
                 return result

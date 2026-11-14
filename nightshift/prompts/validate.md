@@ -12,6 +12,7 @@ Rules:
 - Attack only this checkout and services running on this machine (localhost). Never send requests to any other host, and never use real credentials, accounts or data.
 - Do not change any existing file: no edits to application code, existing tests, configuration or CI. Add your one test file (and, only if the test framework needs it, one small fixture or helper file next to it).
 - Do not mock, stub or reimplement the code under test. A test that fails against a copy of the code proves nothing.
+- Do not install packages (`npm install`, `pip install`, `cargo add`) and do not create, change or delete files git ignores (`node_modules`, a virtualenv, local settings files): every file in the checkout that git does not track is compared with its state before you started, and any change refuses the run. The caches a test run writes (Python bytecode, `.pytest_cache`, `node_modules/.cache`, cargo's `target/`) are fine.
 - Do not install system packages or change the machine. If the test needs a dependency the repository does not already have, or a service that is not running here (a third-party API, production data, a cloud account), stop: return `testable: false` and say in `notes` exactly what is missing.
 
 Return:
