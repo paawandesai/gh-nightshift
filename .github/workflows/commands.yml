@@ -23,6 +23,11 @@ on:
         type: string
         required: false
         default: ""
+      environment:
+        description: GitHub environment for the jobs that hold the PAT or the App key (H2); empty means none
+        type: string
+        required: false
+        default: ""
     secrets:
       agent_pat:
         required: false   # one of agent_pat or app_id + app_private_key
@@ -41,27 +46,33 @@ env:
 jobs:
   command:
     runs-on: ${{ fromJSON(inputs.runs_on) }}
+    # Environment secrets of the same name replace the caller's: keep the PAT or App key there, limited to
+    # the default branch, so a workflow pushed on another branch cannot read it.
+    environment: ${{ inputs.environment }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           sparse-checkout: .night-shift
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
           path: .nightshift-tool
           persist-credentials: false
       - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        id: app
         if: inputs.app_id != ''
         env:
           APP_ID: ${{ inputs.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
+        run: python3 -m nightshift app-token --github-output "$GITHUB_OUTPUT"
       - name: Handle the command
         env:
-          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.agent_pat }}
+          NIGHT_SHIFT_APP_TOKEN: ${{ steps.app.outputs.token }}
+          NIGHT_SHIFT_LOGIN: ${{ steps.app.outputs.login }}
           # Through the environment, never `${{ }}` in the script: the comment is untrusted text.
           COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
           COMMENT_BODY: ${{ github.event.comment.body }}

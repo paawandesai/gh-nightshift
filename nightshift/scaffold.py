@@ -63,6 +63,11 @@ def _github_auth(cfg: Config, pat: str = "secrets.AGENT_PAT") -> tuple[str, str]
     return "", f"agent_pat: ${{{{ {pat} }}}}"
 
 
+def _environment(cfg: Config) -> str:
+    """H2: the GitHub environment whose secrets (AGENT_PAT or APP_PRIVATE_KEY) the credential jobs use."""
+    return f"\n      environment: {_q(cfg.environment)}" if cfg.environment else ""
+
+
 def _runners(cfg: Config, agent: bool = False, github: bool = True) -> str:
     """Extra `with:` lines choosing runners; nothing when they are the default GitHub-hosted ones."""
     out = ""
@@ -94,7 +99,7 @@ def lane_workflow(cfg: Config, ci_name: str = "CI", tool_repo: str = TOOL_REPO) 
       main_branch: {cfg.main_branch}
       only_lane: ${{{{ inputs.lane || '' }}}}
       tool_repo: {tool_repo}
-      tool_ref: {ref}{app_with}{_runners(cfg, agent=True)}
+      tool_ref: {ref}{app_with}{_environment(cfg)}{_runners(cfg, agent=True)}
     secrets:
       claude_token: ${{{{ secrets.{lane.token_secret} }}}}{fallback}
       {github}
@@ -223,7 +228,7 @@ jobs:
       lane: ${{{{ inputs.lane || '' }}}}
       model: {cfg.planner_model}
       tool_repo: {tool_repo}
-      tool_ref: {cfg.tool_ref}{app_with}{_runners(cfg, agent=True)}
+      tool_ref: {cfg.tool_ref}{app_with}{_environment(cfg)}{_runners(cfg, agent=True)}
     secrets:
       claude_token: ${{{{ secrets.{token} }}}}
       {github}
@@ -255,7 +260,7 @@ jobs:
     uses: {tool_repo}/.github/workflows/commands.yml@{cfg.tool_ref}
     with:
       tool_repo: {tool_repo}
-      tool_ref: {cfg.tool_ref}{app_with}{_runners(cfg)}
+      tool_ref: {cfg.tool_ref}{app_with}{_environment(cfg)}{_runners(cfg)}
     secrets:
       {github}
 """
@@ -286,7 +291,7 @@ jobs:
     uses: {tool_repo}/.github/workflows/digest.yml@{cfg.tool_ref}
     with:{hours}
       tool_repo: {tool_repo}
-      tool_ref: {cfg.tool_ref}{app_with}{_runners(cfg)}
+      tool_ref: {cfg.tool_ref}{app_with}{_environment(cfg)}{_runners(cfg)}
     secrets:
       {github}{hook}
 """
@@ -325,7 +330,7 @@ jobs:
       full: ${{{{ inputs.full || false }}}}
       model: {model}
       tool_repo: {tool_repo}
-      tool_ref: {cfg.tool_ref}{app_with}{_runners(cfg, agent=True)}
+      tool_ref: {cfg.tool_ref}{app_with}{_environment(cfg)}{_runners(cfg, agent=True)}
     secrets:
       claude_token: ${{{{ secrets.{cfg.redteam_token} }}}}
       {github}
@@ -448,7 +453,8 @@ def ci_template(cfg: Config) -> str:
     return ("# Starter CI written by `gh nightshift init` because none existed. The night shift requires the `test`\n"
             "# job to pass on every PR and on main. Edit freely; keep the job id `test`.\n"
             f"name: CI\non:\n{triggers}permissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
-            "    steps:\n      - uses: actions/checkout@v4\n" + "\n".join(steps) + "\n")
+            "    steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n"
+            + "\n".join(steps) + "\n")
 
 
 # --- stack detection -------------------------------------------------------------------

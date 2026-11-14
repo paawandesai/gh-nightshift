@@ -93,7 +93,7 @@ class ReduceTests(CliTestCase):
         prompt = Path(out_dir, "prompt.md").read_text()
         self.assertIn("night-shift reducer", prompt)
         self.assertIn(str(Path(out_dir, "context.md")), prompt)
-        self.assertNotIn("__", prompt)
+        self.assertNotIn("__", prompt.replace(str(out_dir), ""))  # every placeholder filled (a temp dir may hold __)
         self.assertEqual(json.loads(Path(out_dir, "schema.json").read_text()), prompts.SCHEMAS["planner"])
         self.assertEqual(self.fake.writes(), [])
 

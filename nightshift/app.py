@@ -172,10 +172,10 @@ def installations(app_id: str, key_pem: str, request: Callable[..., Any] | None 
     return {"slug": app.get("slug", ""), "installations": out}
 
 
-def write_github_env(path: str, result: dict) -> None:
-    """Mask the token in the log, then expose it to later steps of this job only."""
+def write_github_output(path: str, result: dict) -> None:
+    """Mask the token in the log, then expose it as this step's outputs (`token`, `login`). Only the later steps that
+    name `steps.app.outputs.token` receive it; a GITHUB_ENV export would reach every later step and action."""
     print(f"::add-mask::{result['token']}")
     with open(path, "a", encoding="utf-8") as f:
-        f.write(f"NIGHT_SHIFT_APP_TOKEN={result['token']}\n")
-        if result.get("login"):
-            f.write(f"NIGHT_SHIFT_LOGIN={result['login']}\n")
+        f.write(f"token={result['token']}\n")
+        f.write(f"login={result.get('login') or ''}\n")

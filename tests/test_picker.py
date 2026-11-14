@@ -247,6 +247,28 @@ class Ported(unittest.TestCase):
         self.assertIn("merged PR #10", result["reason"])
         self.assertTrue(self.f.pulls[10]["merged_at"])
 
+    def test_green_pr_waits_when_main_does_not_enforce_the_checks(self):
+        ready(self.f, 1)
+        self.f.add_pull(10, sha="s1")
+        self.f.check_runs["s1"] = list(GREEN)
+        self.f.enforced_checks = None  # e.g. a free private repo: no branch protection at all
+        result = decide(self.f)
+        self.assertFalse(self.f.pulls[10].get("merged_at"))
+        self.assertIn("does not enforce the required checks", result["reason"])
+        # A ruleset that requires the checks counts as enforcement.
+        self.f.branch_rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": [
+            {"context": c} for c in cfg().required_checks]}}]
+        self.assertIn("merged PR #10", decide(self.f)["reason"])
+
+    def test_allow_unenforced_merges_without_protection(self):
+        ready(self.f, 1)
+        self.f.add_pull(10, sha="s1")
+        self.f.check_runs["s1"] = list(GREEN)
+        self.f.enforced_checks = ["test"]  # review / verdict is not required on main
+        config = cfg()
+        config.merge_allow_unenforced = True
+        self.assertIn("merged PR #10", decide(self.f, config=config)["reason"])
+
     def pat_without_checks(self, jobs_by_run: dict[int, tuple[str, list[dict]]]):
         # Seen live: fine-grained PATs have no Checks permission, so check-runs answers 403.
         self.f.forbidden.add(r"commits/[^/]+/check-runs")

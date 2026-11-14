@@ -51,8 +51,9 @@ Python 3.10 or newer, and a CI workflow whose test job is called `test`. If it h
    Then it sets up the repo: labels, squash merge and delete-branch-on-merge, the `AGENTS_ENABLED`
    (`false`) and `FIX_LANE` variables, and a `night-log` issue. Last, it asks for any missing secrets, without
    echoing them. Branch protection waits until step 4, so it does not refuse the push of these files.
-   The workflows are pinned to the release of the extension you installed (`tool_ref: v0.1.3`); `--tool-ref`
-   picks another tag or SHA.
+   The workflows are pinned to the commit of the extension's release you installed (`tool_ref: <40-character SHA>
+   # v0.2.0`), because a tag can be moved and this code runs with your PAT; `--tool-ref` picks another tag or SHA,
+   which `init` also resolves to its commit.
 
 3. Create the secrets (`init` asks for them; `gh nightshift join --lane <name>` lets a teammate add their own).
 
@@ -153,36 +154,40 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 
 | Key | Default | What it does |
 |---|---|---|
-| `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `fallback_token_secret` (a second Claude token used only when the first cannot start a run), `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image` |
+| `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `fallback_token_secret` (a second Claude token used only when the first cannot start a run), `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image`, `sudo` (`false`: the agent runs without sudo or, on lanes without `postgres_image`, Docker; setup still has them. GitHub-hosted runners only) |
 | `main_branch` | `main` | Branch the lanes build on and protect |
 | `ci_workflow` | `ci.yml` | CI file whose runs on main gate every lane |
 | `required_checks` | `[test, "review / verdict"]` | Required status checks; a PR counts as green only when all have reported |
 | `fix_lane` | first lane | The only lane that works while main is red |
 | `merge.mode` | `strict` | `strict` or `queue` (see below) |
-| `protected_paths` | `[]` | Added to the built-in list; never replaces it |
+| `merge.allow_unenforced` | `false` | The picker merges a green PR only when main's branch protection or a ruleset enforces every required check. `true` merges anyway (a free private repo cannot have branch protection) |
+| `protected_paths` | `[]` | Added to the built-in list (`.github/`, `.claude/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENT_RULES.md`, `.mcp.json`, `.night-shift/`, plus `planner.docs` when `planner.refill_below` is on); never replaces it. `dir/` covers a folder, a glob such as `**/package.json` matches at any depth |
 | `models` | `sonnet` / `opus` / `opus` / `opus` | `default`, `escalate`, `review`, `planner` |
 | `limits` | 3, 6, 45, 80, 2, 2, `true` | `max_attempts`, `infra_cap`, `stale_minutes`, `max_turns`, `max_needs_per_issue`, `max_notes_per_issue`, `auto_ready_needs` (`false`: an agent's request to another lane waits as `proposed` until a person promotes it) |
 | `planner` | | `docs`, `max_tickets_per_run` (8), `refill_below` (0 = off), `id_prefixes`, `human_paths` (`[contracts/]`), `claude_token_secret`, `schedule`, `enabled` |
 | `labels` | | Rename any of the standard labels (`ready` is `night-safe` by default) |
 | `review_token_secret` | `CLAUDE_TOKEN_REVIEW` | Claude token secret for the review gate |
 | `timezone` | `UTC` | Time zone for night-log lines |
-| `tool_ref` | `main` (`init` writes the installed release) | Ref of gh-nightshift the workflows use. Pin a tag or SHA; `doctor` warns about a moving branch. |
+| `tool_ref` | `main` (`init` writes the installed release's commit) | Ref of gh-nightshift the workflows use. Pin a 40-character commit SHA; `doctor` warns about a tag (which can be moved) or a branch. |
 | `bot_login` | you | The PAT's login, for read-only commands run as someone else (`stats`, `audit`, `digest`) |
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
+| `cross_repos` | `[]` | Repos (`owner/name`) whose issues a ticket may depend on with `Blocked by: owner/repo#N` (see Cross-repo dependencies) |
+| `environment` | none | A GitHub environment for the jobs that hold the PAT or App key (see Credentials in an environment) |
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
 | `review` | `reuse_on_update: true` | Keep a passed verdict when update-branch only merged main (see Merge modes) |
-| `redteam` | `enabled: false` | `enabled`, `schedule` (`0 5 * * *`), `min_severity` (`high`), `claude_token_secret` (default the security token), `model`. See Review rules and the security gate |
+| `redteam` | `enabled: false` | `enabled`, `schedule` (`0 5 * * *`), `min_severity` (`high`), `claude_token_secret` (default the security token; a dedicated token is recommended, see SECURITY.md), `model`. See Review rules and the security gate |
 | `reduce` | `enabled: false` | `enabled`, `schedule` (`30 6 * * *`, no minute in common with `planner.schedule`), `window_hours` (48). Needs `planner.enabled`. See Reduce |
 | `security` | `enabled: false` | `enabled` (adds the required check `review / security`), `claude_token_secret` (default `review_token_secret`), `model`, `paths` (always reviewed, as are `risk.approve_paths`), `always` (review every PR). See Review rules |
-| `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths`, `auto_labels`, `codeowners` (see Risk tiers) |
+| `risk` | `default: auto` | `default` (`auto` or `approve`), `approve_labels`, `approve_paths` (`init` writes a default list of dependency manifests, lockfiles, package-manager, editor, hook and container config), `auto_labels`, `codeowners` (see Risk tiers) |
 | `extends` | | `owner/repo` with an org-wide `.night-shift/config.yml` (see Org-wide config) |
 | `runners` | `ubuntu-latest` | `github` (jobs holding the PAT or App key: pick, publish, planner context and create, commands, digest) and `agent` (jobs that run Claude: the lane agent, planner draft and reviewer): a runner label or a list. Each needs a label the other lacks, and self-hosted runners for the two must be separate machines (see SECURITY.md); `init --regenerate` writes them into the callers |
 | `digest` | | `weekly_schedule` (`0 8 * * 1`, `""` = off), `enabled` (true), `schedule` (`0 7 * * *`, UTC), `webhook_secret` (optional secret holding a Slack or Discord webhook URL) |
 
 Repo variables override some settings at run time without a commit: `AGENTS_ENABLED`, `FIX_LANE`,
 `ESCALATE_MODEL`, `REVIEW_MODEL` (fallback), `PLANNER_MODEL`, `CLAUDE_CODE_VERSION`,
-`CLAUDE_PERMISSION_FLAGS` and `NIGHT_SHIFT_TOKEN_IN_ENV` (see SECURITY.md, known gap 2). A project can replace a prompt by committing `.night-shift/prompts/worker.md`,
+`CLAUDE_PERMISSION_FLAGS` and `NIGHT_SHIFT_TOKEN_IN_ENV` (see SECURITY.md, known gap 2). `CLAUDE_CODE_VERSION`
+defaults to a version this release was tested with (2.1.319), never `latest`. A project can replace a prompt by committing `.night-shift/prompts/worker.md`,
 `review.md` or `planner.md` on the default branch.
 
 ## The comment protocol
@@ -209,14 +214,21 @@ outsider cannot forge attempt counts, unblock an issue or steer work.
 | `handoff-data` | PR body | The agent's hand-off, read when the PR merges |
 | `handoff-done` | merged PR | Hand-offs went out (makes the step idempotent) |
 | `plan` | night-log issue | A planner run: lane, `complete`, `docs_sha`; a reduce run has `lane: reduce` and `prs` |
-| `redteam` | night-log issue | A red-team scan: `sha` (the commit it reached), `base`, `filed` |
-| `redteam-finding` | draft security advisory | The finding's fingerprint `fp` and `sha`, so it is filed once |
+| `redteam` | night-log issue | A red-team scan: `sha` (the commit it reached) and `base` |
+| `redteam-finding` | draft security advisory or `security` issue | The finding's fingerprint `fp` (title + file), `wk` (CWE + file) and `sha`, so it is filed once |
 
 **Hand-off.** When a PR merges, the picker posts a hand-off comment on every open issue whose `Blocked by`
 line lists the merged issue (for PRs merged in the last 72 hours). The comment gives the interface as built
 (functions, endpoints), files, env vars, decisions and assumptions from the agent's `handoff` output. It also
 quotes the ticket's `## Interface` section and flags any difference the agent reported. The next agent sees
 these comments in its task file, in a section marked trusted.
+
+**Needs a decision.** When a review fails because the ticket itself keeps the code from passing (it fixes a
+signature that a repo rule or the security review forbids), the next attempt reports `decision` instead of
+trying the same contract again: the issue gets `needs-human` and is not retried, the attempt is not counted,
+and the agent files a `proposed` follow-up saying how the ticket should change (even if an earlier attempt
+already filed follow-ups). The planner also sees the repo review rules, so it
+should not write such tickets in the first place.
 
 **Waiting on another lane (needs).** An agent that hits something another lane owns and that does not exist
 yet reports `waiting`, with up to 2 `needs`. For each need, the publish job does three things:
@@ -361,9 +373,10 @@ permission) decrypts them inside a pipe and files each new finding at `redteam.m
 - on a **private** repo (GitHub has no advisories there), as an issue labelled `security` and `human`, which only
   repo members can see and agents never pick up. The night log gets counts and issue links.
 
-Findings never appear in a log or an artifact, a fingerprint (title and file) keeps a finding from being filed
-twice, and a scan that fails or is cut short records nothing, so the next one covers the same range again. The
-scan needs `bot_login` in the config. Dispatches from another branch are skipped.
+Findings never appear in a log or an artifact, a fingerprint (title and file, or CWE and file, since the model
+rewords titles) keeps a finding from being filed twice, and a scan that fails or is cut short records nothing, so the next one covers the same range again. The
+scan needs `bot_login` in the config. Dispatches from another branch are skipped. Give the scan its own
+Claude token (`redteam.claude_token_secret`): the encrypted findings in public logs are only as safe as that token.
 
 ## Merge modes
 
@@ -419,7 +432,9 @@ the terminal. They run in the generated `night-shift-commands.yml` with the PAT 
 ## Cross-repo dependencies
 
 `Blocked by: org/other-repo#12` (or the issue's URL) makes a ticket wait for an issue in another repository.
-The PAT (or App) must be able to read that issue; if it cannot, the dependency counts as unmet. When it
+The repository must be listed in `cross_repos` (default: none), so a ticket cannot make the PAT read and copy
+text from any repo its owner can see; an unlisted one is never read and the ticket waits. The PAT (or App)
+must be able to read that issue; if it cannot, the dependency counts as unmet. When it
 closes, the waiting side posts the hand-off itself (this repo's token cannot write to the other one): the
 other issue's title and `## Interface` section, quoted as data from another repository.
 
@@ -449,8 +464,31 @@ A GitHub App gives the night shift its own `<app>[bot]` identity and tokens that
 
 The callers then pass `app_private_key` instead of `agent_pat`, so each lane still receives exactly two
 secrets. Each PAT job (pick, publish, planner create, commands, digest) mints an installation token for this
-repository only, down-scoped to exactly those permissions; the agent job never sees the key or the token.
-Per-lane PATs (`agent_pat_secret`) are not used in App mode.
+repository only, down-scoped to exactly those permissions; the agent job never sees the key or the token,
+and it reaches only the steps that name it (a step output, never `GITHUB_ENV`). Per-lane PATs
+(`agent_pat_secret`) are not used in App mode.
+
+That down-scoping is chosen by the caller. The key itself can mint a token for every repository the App is
+installed on, with every permission the App has, so one App shared by several repos links them: write access
+to one is a path to the others. Prefer one App per repository, and keep the key in an environment (below).
+
+## Credentials in an environment
+
+A repository secret is readable by any workflow on any branch, so anyone with write access can push a branch
+whose workflow prints `AGENT_PAT` or the App key. Agents cannot (they never change `.github/`), but people
+can. To close that:
+
+1. Create an environment (Settings > Environments, for example `night-shift`) and limit its deployment
+   branches to the default branch.
+2. Store the credential there under the reusable workflows' name: `AGENT_PAT`, or `APP_PRIVATE_KEY` in App
+   mode (`gh secret set AGENT_PAT --env night-shift`). Delete the repository secret.
+3. Add `environment: night-shift` to the config and run `gh nightshift init --regenerate`.
+
+The credential jobs (pick, publish, planner create, commands, digest, red-team file) then run in that
+environment, and an environment secret of the same name replaces what the caller passes. Each run shows up as
+a deployment of the environment. One environment secret serves every lane, so per-lane PATs do not combine
+with it. `doctor` warns while the credential is a repository secret, and checks the environment, its branch
+limit and its secret.
 
 ## Costs
 
@@ -509,8 +547,8 @@ Intervals are Wilson score intervals (`nightshift/stats_math.py`).
 ## Security
 
 The agent never holds the GitHub PAT. Each lane receives exactly two secrets, named explicitly (three if it names a
-fallback Claude token). Changes to
-protected paths are rejected before push. Only comments from the PAT's own login are trusted. The full threat
+fallback Claude token, which only the step that needs it ever holds). Changes to
+protected paths are rejected before push. Every action is pinned to a commit SHA. Only comments from the PAT's own login are trusted. The full threat
 model and its known gaps are in [SECURITY.md](SECURITY.md).
 
 ## Development

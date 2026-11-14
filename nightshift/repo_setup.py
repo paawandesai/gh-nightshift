@@ -63,11 +63,17 @@ def ensure_variables(gh: GH, cfg: Config) -> list[str]:
     return out
 
 
+# M7: night shift's required checks are bound to the GitHub Actions app, so no other app and no commit status
+# (which any token with statuses write can post) can satisfy them.
+ACTIONS_APP_ID = 15368
+
+
 def protection_body(cfg: Config) -> dict:
     """Strict mode: branches must be up to date before merging, so CI tests the merged result (add-on A).
     Queue mode: the merge queue tests the merged result, so up-to-date is not required."""
     return {
-        "required_status_checks": {"strict": cfg.merge_mode == "strict", "contexts": list(cfg.required_checks)},
+        "required_status_checks": {"strict": cfg.merge_mode == "strict",
+                                   "checks": [{"context": c, "app_id": ACTIONS_APP_ID} for c in cfg.required_checks]},
         "enforce_admins": True,
         "required_pull_request_reviews": None,
         "restrictions": None,
@@ -106,13 +112,14 @@ def merged_protection(cfg: Config, current: dict | None) -> tuple[dict, list[str
     added = [c for c in cfg.required_checks if c not in old_names]
     extra = [c for c in old_names if c not in cfg.required_checks]
     status = {"strict": bool(rsc.get("strict")) or cfg.merge_mode == "strict"}
-    if old_checks:
-        # Keep each check's app binding (null from GET means any app, which PUT spells -1).
-        by_name = {c["context"]: c for c in old_checks}
-        status["checks"] = [{"context": n, "app_id": by_name[n]["app_id"] if by_name.get(n, {}).get("app_id") else -1}
-                            for n in [*old_names, *added]]
-    else:
-        status["contexts"] = [*old_names, *added]
+    # Keep each other check's app binding (null from GET means any app, which PUT spells -1); night shift's own
+    # checks are bound to GitHub Actions.
+    by_name = {c["context"]: c for c in old_checks}
+    status["checks"] = [{"context": n, "app_id": ACTIONS_APP_ID if n in cfg.required_checks
+                         else (by_name.get(n, {}).get("app_id") or -1)} for n in [*old_names, *added]]
+    unbound = [n for n in cfg.required_checks if n in old_names and by_name.get(n, {}).get("app_id") != ACTIONS_APP_ID]
+    if unbound:
+        notes.append(f"bound {', '.join(unbound)} to GitHub Actions (no other app or commit status can pass them)")
     body["required_status_checks"] = status
     if extra:
         notes.append(f"kept the required checks already there: {', '.join(extra)}")

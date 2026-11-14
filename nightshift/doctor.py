@@ -9,9 +9,10 @@ from pathlib import Path
 from collections.abc import Callable
 
 from . import review_rules, scaffold
+from .rules import path_is_protected
 from .config import CONFIG_PATH, Config, ConfigError, load
 from .gh import GH, GHError
-from .repo_setup import existing_secrets, get_variable
+from .repo_setup import ACTIONS_APP_ID, existing_secrets, get_variable
 
 OK, WARN, FAIL = "ok", "warn", "FAIL"
 LANE_WORKFLOW = ".github/workflows/night-shift.yml"
@@ -58,8 +59,8 @@ def pat_checks(token: str, run: Callable = subprocess.run,
         out.append(Check(FAIL, "PAT has the `workflow` scope: agents could change CI and the review gate",
                          "use a fine-grained PAT without the Workflows permission"))
     elif scope_list:
-        out.append(Check(WARN, f"classic PAT with scopes {scopes}: it reaches every repo you can",
-                         "prefer a fine-grained PAT limited to this repo"))
+        out.append(Check(FAIL, f"classic PAT with scopes {scopes}: it reaches every repo you can (M10)",
+                         "use a fine-grained PAT limited to this repo"))
     else:
         out.append(Check(WARN, "fine-grained PAT: GitHub does not expose its permissions, so Workflows cannot be "
                                "checked from here", "confirm in Settings > Developer settings that Workflows is "
@@ -159,15 +160,24 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
         if f"@{cfg.tool_ref}" not in text:
             out.append(Check(WARN, f"caller workflow is not pinned to tool_ref {cfg.tool_ref}",
                              "run `gh nightshift init --regenerate`"))
-        elif not re.fullmatch(r"v\d+(\.\d+)*|[0-9a-f]{40}", cfg.tool_ref):
-            out.append(Check(WARN, f"workflows follow gh-nightshift@{cfg.tool_ref}, a moving branch",
-                             "pin tool_ref to a release tag or commit SHA in .night-shift/config.yml"))
+        elif not re.fullmatch(r"[0-9a-f]{40}", cfg.tool_ref):
+            moving = "a tag, which can be moved" if re.fullmatch(r"v\d+(\.\d+)*", cfg.tool_ref) else "a moving branch"
+            out.append(Check(WARN, f"workflows follow gh-nightshift@{cfg.tool_ref}, {moving}",
+                             "pin tool_ref to the release's 40-character commit SHA in .night-shift/config.yml "
+                             "(`gh nightshift init` writes it), then `gh nightshift init --regenerate`"))
         elif sum(c.level == FAIL for c in out) == fails_before:
             out.append(Check(OK, f"caller workflow has one job per lane with explicit secrets, pinned @{cfg.tool_ref}"))
     for name in ("night-shift-review.yml",):
         if not (root / ".github/workflows" / name).is_file():
             out.append(Check(FAIL, f".github/workflows/{name} is missing", "run `gh nightshift init --regenerate`"))
     out += rules_checks(root, cfg)
+    out += workflow_checks(root, cfg)
+    if not cfg.environment:
+        cred = "App private key" if cfg.auth_mode == "app" else "PAT"
+        out.append(Check(WARN, f"the {cred} is a repository secret: a workflow anyone with write access pushes on any "
+                               "branch can read it (H2)", f"set `environment:` in {CONFIG_PATH}, store the secret in "
+                                                          "that environment limited to the default branch "
+                                                          "(see README, Credentials in an environment)"))
     ci = root / ".github/workflows" / cfg.ci_workflow
     if not ci.is_file():
         out.append(Check(FAIL, f"CI workflow .github/workflows/{cfg.ci_workflow} not found: every lane would wait",
@@ -187,6 +197,46 @@ def local_checks(root: Path) -> tuple[Config | None, list[Check]]:
                                "ignores hand-offs, needs and notes posted by the others",
                          f"list every PAT's login under trusted_logins in {CONFIG_PATH}"))
     return cfg, out
+
+
+SCRIPT_RE = re.compile(r"(?:^|[\s;&|(])(?:(?:bash|sh|zsh|python3?|node|ruby|perl|pwsh)\s+(?:-\S+\s+)*)?"
+                       r"(\.{0,2}/?[\w.-]+(?:/[\w.-]+)*\.(?:sh|py|js|mjs|ts|rb|pl|ps1)|\./[\w./-]+)")
+
+
+def workflow_checks(root: Path, cfg: Config) -> list[Check]:
+    """The repo's own workflows that hold secrets: Actions caches they restore (H5), local scripts they run that an
+    agent PR could change (M6), and pull_request_target in CI (M7). Night shift's own workflows are skipped."""
+    out: list[Check] = []
+    folder = root / ".github/workflows"
+    if not folder.is_dir():
+        return out
+    scripts: dict[str, set[str]] = {}
+    for wf in sorted([*folder.glob("*.yml"), *folder.glob("*.yaml")]):
+        if wf.name.startswith("night-shift"):
+            continue
+        try:
+            text = wf.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        if wf.name == cfg.ci_workflow and re.search(r"^\s*pull_request_target\s*:", code, re.M):
+            out.append(Check(WARN, f"{cfg.ci_workflow} runs on pull_request_target: agent-written code would run with "
+                                   "this repo's write token and secrets", "use `pull_request` for CI"))
+        if not re.search(r"\bsecrets\.(?!GITHUB_TOKEN\b)\w+", code):
+            continue
+        if re.search(r"uses:\s*actions/cache[@/]|^\s*cache:\s*\S", code, re.M):
+            out.append(Check(WARN, f".github/workflows/{wf.name} holds secrets and restores an Actions cache: an agent "
+                                   "job can write cache entries in the default branch's scope (H5)",
+                             "drop the cache from workflows that hold secrets, or key it so agent jobs cannot write it"))
+        for line in code.splitlines():
+            for m in SCRIPT_RE.finditer(line):
+                path = m.group(1).removeprefix("./")
+                if (root / path).is_file() and not path_is_protected(path, cfg.protected_paths):
+                    scripts.setdefault(path, set()).add(wf.name)
+    for path, names in sorted(scripts.items()):
+        out.append(Check(WARN, f"{path} runs in {', '.join(sorted(names))}, which holds secrets, and agents may change it",
+                         f"add {path} to protected_paths (or risk.approve_paths) in {CONFIG_PATH}"))
+    return out
 
 
 def rules_checks(root: Path, cfg: Config) -> list[Check]:
@@ -237,11 +287,17 @@ def remote_checks(gh: GH, cfg: Config) -> list[Check]:
     have = existing_secrets(gh)
     if not have:
         out.append(Check(WARN, "cannot list Actions secrets (needs repo admin)", "run doctor as a repo admin"))
+    in_env: set[str] = set()
+    if cfg.environment:
+        env_checks, in_env = environment_checks(gh, cfg, have)
+        out += env_checks
     for name in cfg.secret_names():
+        if name in in_env:
+            continue
         if have and name not in have:
             out.append(Check(FAIL, f"secret {name} is missing",
                              f"`gh nightshift join --lane <lane>` or `gh secret set {name} -R {gh.repo}`"))
-    if have and all(n in have for n in cfg.secret_names()):
+    if have and all(n in have or n in in_env for n in cfg.secret_names()):
         out.append(Check(OK, f"all {len(cfg.secret_names())} secrets exist"))
     labels = {lbl["name"] for lbl in gh.paginate(gh.r("labels"))}
     missing = [n for n, _, _ in scaffold.labels(cfg) if n not in labels]
@@ -258,6 +314,11 @@ def remote_checks(gh: GH, cfg: Config) -> list[Check]:
         lacking = [c for c in cfg.required_checks if c not in contexts]
         if lacking:
             out.append(Check(FAIL, f"required checks missing: {', '.join(lacking)}", "run `gh nightshift setup`"))
+        bound = {c.get("context") for c in rsc.get("checks") or [] if c.get("app_id") == ACTIONS_APP_ID}
+        loose = [c for c in cfg.required_checks if c in contexts and c not in bound]
+        if loose:
+            out.append(Check(WARN, f"required checks {', '.join(loose)} can be passed by any app or commit status",
+                             "run `gh nightshift setup` (binds them to GitHub Actions)"))
         if cfg.merge_mode == "strict" and not rsc.get("strict"):
             out.append(Check(FAIL, "branch protection has strict=false: PRs can merge without being tested against "
                                    "current main (one hackathon PR merged with a test failing at its own merge commit)",
@@ -285,9 +346,71 @@ def remote_checks(gh: GH, cfg: Config) -> list[Check]:
     if cfg.effective_fix_lane and fix_lane != cfg.effective_fix_lane:
         out.append(Check(WARN, f"variable FIX_LANE is {fix_lane!r}, config says {cfg.effective_fix_lane!r}",
                          "run `gh nightshift setup`"))
+    out += actions_settings_checks(gh)
     if not gh.night_log(cfg.label("night_log")):
         out.append(Check(FAIL, "no open night-log issue", "run `gh nightshift setup`"))
     out += tool_checks(gh, cfg)
+    return out
+
+
+def environment_checks(gh: GH, cfg: Config, repo_secrets: set[str]) -> tuple[list[Check], set[str]]:
+    """H2: the environment named in the config exists, only the default branch may use it, and it holds the GitHub
+    credential under the reusable workflows' secret name. Returns the checks and the config secret names it covers."""
+    env, want = cfg.environment, ("APP_PRIVATE_KEY" if cfg.auth_mode == "app" else "AGENT_PAT")
+    try:
+        data = gh.get_or_none(gh.r(f"environments/{env}"))
+    except GHError as err:
+        return [Check(WARN, f"cannot read environment {env} ({err.status or err})", "run doctor as a repo admin")], set()
+    if not data:
+        return [Check(FAIL, f"environment {env} does not exist: the credential jobs would fail",
+                       f"create it in Settings > Environments, or remove `environment` from {CONFIG_PATH}")], set()
+    out: list[Check] = []
+    if not data.get("deployment_branch_policy"):
+        out.append(Check(WARN, f"environment {env} accepts every branch: a workflow pushed on any branch can read "
+                               "its secrets", f"Settings > Environments > {env} > Deployment branches: "
+                                              f"{cfg.main_branch} only"))
+    try:
+        names = {x["name"].upper() for x in gh.paginate(gh.r(f"environments/{env}/secrets"), key="secrets")}
+    except GHError:
+        names = set()
+    if names and want not in names:
+        out.append(Check(FAIL, f"environment {env} has no {want} secret: the credential jobs run without it",
+                         f"gh secret set {want} --env {env} -R {gh.repo}"))
+    elif names:
+        out.append(Check(OK, f"the GitHub credential is environment {env}'s secret {want}"))
+    covered = {cfg.github_secret} if want in names else set()
+    if cfg.github_secret in repo_secrets and covered:
+        out.append(Check(WARN, f"repository secret {cfg.github_secret} still exists next to environment {env}'s copy: "
+                               "any branch's workflow can still read it", f"gh secret delete {cfg.github_secret} "
+                                                                          f"-R {gh.repo}"))
+    own = [lane.name for lane in cfg.lanes if lane.pat_secret]
+    if own and cfg.auth_mode != "app":
+        out.append(Check(WARN, f"lane(s) {', '.join(own)} name their own PAT, but environment {env}'s AGENT_PAT "
+                               "replaces every lane's PAT in the credential jobs", "use one PAT with the environment, "
+                                                                                  "or no environment"))
+    return out, covered
+
+
+def actions_settings_checks(gh: GH) -> list[Check]:
+    """M7: the `test` check runs agent-written code in CI. With a read/write default GITHUB_TOKEN, or with Actions
+    allowed to approve PRs, that code can post statuses, label or approve its own PR."""
+    try:
+        perms = gh.get_or_none(gh.r("actions/permissions/workflow"))
+    except GHError as err:
+        return [Check(WARN, f"cannot read the Actions token settings ({err.status or err})", "run doctor as a repo admin")]
+    if not perms:
+        return []
+    out = []
+    if perms.get("default_workflow_permissions") == "write":
+        out.append(Check(WARN, "the default GITHUB_TOKEN is read/write: agent-written code in CI can post statuses, "
+                               "labels and comments", f"Settings > Actions > Workflow permissions: read, or: gh api -X PUT "
+                               f"repos/{gh.repo}/actions/permissions/workflow -f default_workflow_permissions=read"))
+    if perms.get("can_approve_pull_request_reviews"):
+        out.append(Check(WARN, "GitHub Actions may approve pull requests: agent-written code in CI could approve its "
+                               "own PR", "Settings > Actions > untick 'Allow GitHub Actions to create and approve "
+                               "pull requests'"))
+    if not out:
+        out.append(Check(OK, "the default GITHUB_TOKEN is read-only and cannot approve PRs"))
     return out
 
 

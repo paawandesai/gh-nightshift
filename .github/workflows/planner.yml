@@ -48,6 +48,11 @@ on:
         type: string
         required: false
         default: ""
+      environment:
+        description: GitHub environment for the jobs that hold the PAT or the App key (H2); empty means none
+        type: string
+        required: false
+        default: ""
     secrets:
       claude_token:
         required: false
@@ -78,10 +83,10 @@ jobs:
       issue: ${{ steps.ctx.outputs.issue }}
       prs: ${{ steps.ctx.outputs.prs }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
@@ -102,7 +107,7 @@ jobs:
         run: |
           python3 -m nightshift plan context --mode "$MODE" --docs "$DOCS" --lane "$LANE" \
             --out-dir "$RUNNER_TEMP/plan" --github-output "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.ctx.outputs.run == 'true'
         with:
           name: plan-context
@@ -115,37 +120,48 @@ jobs:
     runs-on: ${{ fromJSON(inputs.agent_runs_on) }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: plan-context
           path: ${{ runner.temp }}/plan
       # Node for Claude Code, in case a self-hosted runner has none.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       # Claude Code goes into this job's temp directory, which the runner empties before every job, so
       # nothing a run leaves behind on a self-hosted machine is what the next job executes as `claude`.
       - name: Install Claude Code
         run: |
-          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || 'latest' }}"
+          npm install -g --prefix "$RUNNER_TEMP/claude-code" "@anthropic-ai/claude-code@${{ vars.CLAUDE_CODE_VERSION || '2.1.319' }}"
           echo "$RUNNER_TEMP/claude-code/bin" >> "$GITHUB_PATH"
       - name: Draft tickets (read-only)
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_token }}
+          TOKEN: ${{ secrets.claude_token }}
+          TOKEN_IN_ENV: ${{ vars.NIGHT_SHIFT_TOKEN_IN_ENV || 'false' }}
           MODEL: ${{ vars.PLANNER_MODEL || inputs.model }}
         run: |
           set -uo pipefail
-          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then echo "::error::planner Claude token is empty"; exit 1; fi
+          if [ -z "$TOKEN" ]; then echo "::error::planner Claude token is empty"; exit 1; fi
           P="$RUNNER_TEMP/plan"
-          claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
+          # M4: the token reaches Claude on a pipe (fd 3), never in its environment, and Read is denied under /proc and
+          # /sys, where this step's own environment block (which holds the token) can be read.
+          token_fd() { if [ "$TOKEN_IN_ENV" = "true" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN"; exec 3< /dev/null; else export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3; exec 3< <(printf '%s' "$TOKEN"); fi; }
+          # The token guard: a file that holds the token (or its base64 form) is never posted.
+          leaks() { local t; t="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"; [ "${#t}" -ge 20 ] || return 1
+            grep -qaF -f <(printf '%s\n' "$t"; printf '%s' "$t" | base64 | tr -d '\n'; echo) "$1"; }
+          token_fd
+          env -u TOKEN claude -p "$(cat "$P/prompt.md")" --output-format json --json-schema "$(cat "$P/schema.json")" \
             --model "$MODEL" --max-turns 60 --add-dir "$P" --allowedTools "Read,Grep,Glob" \
-            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch" > "$P/plan.json" 2> "$P/claude.stderr"
-          rc=$?; echo "claude exit code: $rc"; tail -n 20 "$P/claude.stderr" || true
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Read(//proc/**),Read(//sys/**)" > "$P/plan.json" 2> "$P/claude.stderr"
+          rc=$?; exec 3<&-; echo "claude exit code: $rc"; tail -n 20 "$P/claude.stderr" || true
+          if leaks "$P/plan.json"; then
+            rm -f "$P/plan.json"; echo "::error::The planner's output held its Claude token; nothing is filed. Rotate the token."; exit 1
+          fi
           exit "$rc"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: plan-draft
           path: ${{ runner.temp }}/plan/plan.json
@@ -154,30 +170,36 @@ jobs:
   create:
     needs: [context, draft]
     runs-on: ${{ fromJSON(inputs.runs_on) }}
+    # Environment secrets of the same name replace the caller's: keep the PAT or App key there, limited to
+    # the default branch, so a workflow pushed on another branch cannot read it.
+    environment: ${{ inputs.environment }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ inputs.tool_repo }}
           ref: ${{ inputs.tool_ref }}
           path: .nightshift-tool
           persist-credentials: false
       - name: Mint a GitHub App token (this repo only, never the Workflows permission)
+        id: app
         if: inputs.app_id != ''
         env:
           APP_ID: ${{ inputs.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-        run: python3 -m nightshift app-token --github-env "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
+        run: python3 -m nightshift app-token --github-output "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: plan-draft
           path: ${{ runner.temp }}/plan
       - name: Validate and create issues
         env:
-          GH_TOKEN: ${{ env.NIGHT_SHIFT_APP_TOKEN || secrets.agent_pat }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.agent_pat }}
+          NIGHT_SHIFT_APP_TOKEN: ${{ steps.app.outputs.token }}
+          NIGHT_SHIFT_LOGIN: ${{ steps.app.outputs.login }}
           LANE: ${{ needs.context.outputs.lane }}
           ISSUE: ${{ needs.context.outputs.issue }}
           MODE: ${{ needs.context.outputs.mode }}

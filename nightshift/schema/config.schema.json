@@ -57,6 +57,10 @@
             "strict",
             "queue"
           ]
+        },
+        "allow_unenforced": {
+          "type": "boolean",
+          "description": "true: the picker merges green PRs even when main's branch protection or rulesets do not enforce the required checks (for example a free private repo, which cannot have branch protection). Default false: it refuses and says why."
         }
       }
     },
@@ -245,6 +249,10 @@
             "type": "string",
             "description": "Start this Postgres image as a service in the lane's agent job (DATABASE_URL is set)."
           },
+          "sudo": {
+            "type": "boolean",
+            "description": "false: remove the runner's sudo rights (and, without postgres_image, its Docker access) after the lane's setup and before the agent runs, so the agent cannot become root and read the runner's own tokens. Default true."
+          },
           "setup": {
             "type": "object",
             "additionalProperties": false,
@@ -280,6 +288,20 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9-]+(\\[bot\\])?$",
       "description": "Login of the account that owns the PAT. stats and audit trust only its markers; default: whoever runs them."
+    },
+    "environment": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9 _.-]{1,255}$",
+      "description": "A GitHub environment for the jobs that hold the PAT or the App key (pick, publish, planner create, commands, digest, red-team file). Store AGENT_PAT (or APP_PRIVATE_KEY) as that environment's secret, limit its deployment branches to the default branch, and delete the repository secret: then no workflow pushed on another branch can read it."
+    },
+    "cross_repos": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+      },
+      "uniqueItems": true,
+      "description": "Repos (owner/name) whose issues a ticket may depend on with `Blocked by: owner/repo#N`. The picker reads those issues with the PAT and copies their Interface section, so only listed repos are read. Default: none."
     },
     "trusted_logins": {
       "type": "array",

@@ -13,6 +13,7 @@ Every ticket must be:
 - concrete: `do` names real files and the decisions already made in the docs; `files` lists them;
 - machine-checkable: `acceptance` lists tests or commands, including edge cases;
 - not a duplicate of an existing issue (open or closed);
+- compatible with the repo review rules in the context: the code the ticket asks for must be able to pass them;
 - free of open product questions, secrets, accounts, deploys and protected paths. Tickets that must touch human-only paths (contracts) are allowed but become human tickets.
 
 Interfaces: any ticket with `blocked_by`, or that another ticket lists in its `blocked_by`, must fill `interface` with exactly what crosses the boundary: function signatures, endpoints with request and response shapes, env vars, file paths, data formats. The dependent ticket restates the same contract it consumes. Tickets with dependencies and no interface are rejected.

@@ -14,7 +14,7 @@ _STRS = {"type": "array", "items": {"type": "string"}}
 WORKER_SCHEMA = {
     "type": "object",
     "properties": {
-        "status": {"type": "string", "enum": ["done", "stuck", "waiting"]},
+        "status": {"type": "string", "enum": ["done", "stuck", "waiting", "decision"]},
         "summary": {"type": "string"},
         "assumptions": _STRS,
         "tests_passed": {"type": "boolean"},
