@@ -77,6 +77,18 @@ Fixes for every open item of the November security review (H1, H2, H5, M4 to M10
   token no longer loads; give the reviewers their own token.
 - Cross-repo dependencies are read only for repos in the new `cross_repos` list (default: none), and
   `check-pat` fails on a classic PAT (M10).
+- The picker counts the review gates (`review / verdict`, `review / security`) only as check runs (or Actions
+  jobs) with exactly that name that concluded `success`. A commit status of that name, a job called plain
+  `verdict`, and a required gate concluded `skipped` or `neutral` no longer pass; such a gate closes the PR
+  as `verdict_failed` (or `security_failed`). Ordinary checks such as `test` keep GitHub's rule (skipped and neutral pass) (W-01, W-05).
+- `doctor` warns when CI, or any workflow that runs on `pull_request`, grants `statuses`, `checks` or
+  `pull-requests` write (or `write-all`) in a `permissions:` block, since agent-written code runs there (W-01).
+- **Stricter:** `doctor` fails when `required_checks` leaves out `review / verdict`, or `review / security` while
+  `security.enabled` is on. A config with `required_checks: [test]` still loads and runs, but `doctor` now exits
+  1; add `"review / verdict"` back and run `gh nightshift setup` (W-02).
+- **Stricter:** if your own CI has a job named `verdict` or `review / verdict`, or posts a commit status with a
+  gate's name, it no longer satisfies the gate; the review workflow's own `review / verdict` check run must
+  pass (W-01, W-05).
 
 ## [0.1.4] - 2026-11-10
 

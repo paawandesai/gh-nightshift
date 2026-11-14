@@ -157,7 +157,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `lanes[]` | required | `name`, `paths`, `claude_token_secret`, optional `agent_pat_secret`, `fallback_token_secret` (a second Claude token used only when the first cannot start a run), `model`, `escalate_model`, `description`, `test_command`, `setup.commands`, `setup.action`, `postgres_image`, `sudo` (`false`: the agent runs without sudo or, on lanes without `postgres_image`, Docker; setup still has them. GitHub-hosted runners only) |
 | `main_branch` | `main` | Branch the lanes build on and protect |
 | `ci_workflow` | `ci.yml` | CI file whose runs on main gate every lane |
-| `required_checks` | `[test, "review / verdict"]` | Required status checks; a PR counts as green only when all have reported |
+| `required_checks` | `[test, "review / verdict"]` | Required status checks; a PR counts as green only when all have reported (see [How the picker reads checks](#how-the-picker-reads-checks)). `doctor` fails when `review / verdict` (or, with `security.enabled`, `review / security`) is missing |
 | `fix_lane` | first lane | The only lane that works while main is red |
 | `merge.mode` | `strict` | `strict` or `queue` (see below) |
 | `merge.allow_unenforced` | `false` | The picker merges a green PR only when main's branch protection or a ruleset enforces every required check. `true` merges anyway (a free private repo cannot have branch protection) |
@@ -377,6 +377,23 @@ Findings never appear in a log or an artifact, a fingerprint (title and file, or
 rewords titles) keeps a finding from being filed twice, and a scan that fails or is cut short records nothing, so the next one covers the same range again. The
 scan needs `bot_login` in the config. Dispatches from another branch are skipped. Give the scan its own
 Claude token (`redteam.claude_token_secret`): the encrypted findings in public logs are only as safe as that token.
+
+## How the picker reads checks
+
+The picker merges an agent PR only when every check on its head commit has finished without failing and every
+name in `required_checks` has reported.
+
+- **Ordinary checks** (`test`, anything from your CI) count as a check run or a commit status, under their own
+  name or as `<caller job> / <name>` from a reusable workflow. Like GitHub's branch protection, a check concluded
+  `skipped` or `neutral` counts as passed.
+- **Night Shift's gates** (`review / verdict`, `review / security`) count only as a check run (or, with a
+  fine-grained PAT, an Actions job) with exactly that name, and only when it concluded `success`. A commit
+  status of that name, a job called plain `verdict`, or a required gate that was `skipped` or `neutral` never
+  passes; such a gate closes the PR as `verdict_failed` (or `security_failed`). A gate you do not require (the
+  `review / security` job while the security gate is off) is skipped on every PR and is ignored.
+- `doctor` warns when CI, or any workflow that runs on `pull_request`, grants `statuses: write`,
+  `checks: write`, `pull-requests: write` or `write-all`: agent-written code runs there and could post a passing
+  gate or approve its own PR. CI needs only `contents: read`.
 
 ## Merge modes
 
