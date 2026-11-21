@@ -417,7 +417,7 @@ These are not enforced. They are listed so you can judge the risk yourself.
     machine the harness runs on, so it could tamper with what lies outside the checkout: the Python, node, go or
     cargo install and their global caches, system packages, the tool's own copy in `$RUNNER_TEMP`, or the
     machine's files. It could also write a test that fakes its runner's report, or a helper beside the test that
-    the app imports when present. Inside the checkout the harness closes the cheap and the accidental paths:
+    the app imports when present; the filed finding shows that helper in full under the test. Inside the checkout the harness closes the cheap and the accidental paths:
     the model never writes the command (it names a runner; the harness builds the argv and runs it without a
     shell), a missing runner or a run with no report is never `validated`, only assertion failures count (not
     fixture errors, uncaught exceptions, panics or build errors), tracked files are compared with the scanned

@@ -778,18 +778,26 @@ def clear_node_caches(root: Path, test: Path) -> None:
 
 
 def tree_problem(root: Path, rel: str, base: str = "HEAD", untracked_baseline: dict[str, str] | None = None) -> str | None:
-    """Why the checkout is not main plus one new test, or None when it is. The test must fail against the code as
-    it is: a changed application file, an edited existing test or an added conftest.py can make any test fail.
+    """Why the checkout is not main plus one new test, or None when it is (see `tree_check`)."""
+    return tree_check(root, rel, base, untracked_baseline)[0]
+
+
+def tree_check(root: Path, rel: str, base: str = "HEAD",
+               untracked_baseline: dict[str, str] | None = None) -> tuple[str | None, str | None]:
+    """(why the checkout is not main plus one new test or None, the one helper beside the test or None).
+    The test must fail against the code as it is: a changed application file, an edited existing test or an added
+    conftest.py can make any test fail.
 
     Tracked files are compared with the commit's verified tree (R2-01). With `untracked_baseline` (the validate job
     always passes one), every file git does not track is compared with its state before the model started (R2-02);
     without it, only files git neither tracks nor ignores count, and ignored runner configuration on the test's path."""
     tree = commit_tree(root, base)
     if tree is None:
-        return "the checkout could not be compared with main (git failed)"
+        return "the checkout could not be compared with main (git failed)", None
     changed = tracked_problem(root, tree)
     if changed:
-        return f"a file in main was changed or deleted ({ns.one_line(changed, 80)}); the test must run against main as it is"
+        return (f"a file in main was changed or deleted ({ns.one_line(changed, 80)}); the test must run against main "
+                "as it is"), None
     folder = rel.rpartition("/")[0]
     ignored: list[str] = []
     if untracked_baseline is not None:
@@ -797,32 +805,32 @@ def tree_problem(root: Path, rel: str, base: str = "HEAD", untracked_baseline: d
         for p in sorted(set(untracked_baseline) | set(now)):
             if p in untracked_baseline and untracked_baseline[p] != now.get(p):
                 return (f"a file git does not track was changed or deleted after setup ({ns.one_line(p, 80)}); "
-                        "the test must run against main as it was set up")
+                        "the test must run against main as it was set up"), None
         new = {p for p in now if p not in untracked_baseline and p.rpartition("/")[2] != "Cargo.lock"}
     else:
         untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
         staged = _git(root, "ls-files", "--cached", "-z")
         listed = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
         if untracked is None or staged is None or listed is None:
-            return "the checkout could not be compared with main (git failed)"
+            return "the checkout could not be compared with main (git failed)", None
         ignored = listed
         new = {p for p in set(untracked) | (set(staged) - set(tree)) if not _is_cache(p)}
     if rel not in new:
-        return "the repro test is not a new file (an existing test was edited, or the test was committed elsewhere)"
+        return "the repro test is not a new file (an existing test was edited, or the test was committed elsewhere)", None
     extra = sorted(new - {rel})
     if len(extra) > 1:
-        return f"{len(extra)} files were added besides the test; at most one helper next to it is allowed"
+        return f"{len(extra)} files were added besides the test; at most one helper next to it is allowed", None
     for p in extra:
         if p.rpartition("/")[0] != folder:
-            return f"a file was added away from the test ({ns.one_line(p, 80)}); a helper must sit next to it"
+            return f"a file was added away from the test ({ns.one_line(p, 80)}); a helper must sit next to it", None
         if _RUNNER_FILE.fullmatch(p.rpartition("/")[2]):
-            return f"a runner configuration file was added ({ns.one_line(p, 80)})"
+            return f"a runner configuration file was added ({ns.one_line(p, 80)})", None
     ancestors = {"/".join(folder.split("/")[:i]) for i in range(len(folder.split("/")) + 1)} if folder else {""}
     for p in ignored:
         parent, _, name = p.rstrip("/").rpartition("/")
         if parent in ancestors and _RUNNER_FILE.fullmatch(name) and not _is_cache(p):
-            return f"a runner configuration file git ignores sits on the test's path ({ns.one_line(p, 80)})"
-    return None
+            return f"a runner configuration file git ignores sits on the test's path ({ns.one_line(p, 80)})", None
+    return None, (extra[0] if extra else None)
 
 
 _UNITTEST = r"""
@@ -977,7 +985,7 @@ def verify(cfg: Config, root: Path, f: dict, answer: dict | None, run: Runner = 
     `untracked_baseline` the files git does not track as they were before the model started (`load_baseline`; a
     string there is why no usable baseline exists, and refuses the run)."""
     result = {"fp": redteam.fingerprint(f), "verdict": "not_reproduced", "reason": "", "test_path": "", "test": "",
-              "run_command": "", "output": "", "notes": ""}
+              "run_command": "", "output": "", "notes": "", "helper_path": "", "helper": "", "helper_size": ""}
     if answer is None:
         result["reason"] = "the validation run did not finish"
         return result
@@ -997,8 +1005,14 @@ def verify(cfg: Config, root: Path, f: dict, answer: dict | None, run: Runner = 
         return result
     rel = path.relative_to(root).as_posix()
     result.update(test_path=rel, test=path.read_text(encoding="utf-8", errors="replace")[:MAX_TEST])
-    problem = untracked_baseline if isinstance(untracked_baseline, str) else tree_problem(root, rel, base,
-                                                                                          untracked_baseline)
+    if isinstance(untracked_baseline, str):
+        problem, helper = untracked_baseline, None
+    else:
+        problem, helper = tree_check(root, rel, base, untracked_baseline)
+    if helper:
+        # The one helper beside the test is allowed, and shown in full in the filed issue next to the test, so a
+        # person sees everything the model added (it could be a module the app imports when it exists).
+        result.update(helper_path=helper, **_helper_text(root / helper))
     if problem:
         result["reason"] = problem
         return result
@@ -1020,6 +1034,23 @@ def verify(cfg: Config, root: Path, f: dict, answer: dict | None, run: Runner = 
         output = "".join(str(e.get("Output") or "") for e in map(_json_line, output.splitlines()) if e)
     result["output"] = output[-MAX_OUTPUT:]
     return result
+
+
+def _helper_text(path: Path) -> dict[str, str]:
+    """The helper's text for the issue (`helper`, cut at MAX_TEST characters) and its full size in characters
+    (`helper_size`). A symlink is shown by its target and never followed; anything else that is not a regular file
+    is named, not read."""
+    try:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode):
+            text = f"(a symlink to {os.readlink(path)})"
+        elif stat.S_ISREG(st.st_mode):
+            text = path.read_bytes().decode("utf-8", errors="replace")
+        else:
+            text = "(not a regular file)"
+    except OSError:
+        text = "(could not be read)"
+    return {"helper": text[:MAX_TEST], "helper_size": str(len(text))}
 
 
 def _json_line(line: str) -> dict | None:
@@ -1056,8 +1087,9 @@ def seal(result: dict, key: str, crypt: Callable[[list[str], bytes, str], bytes]
     if holds_key(plain, key):
         raise ValueError("the validation result holds the Claude token; nothing is passed on. Rotate the token.")
     packed = gzip.compress(plain, 9)
-    while len(packed) > SEALED_BYTES and (result.get("output") or result.get("test")):
-        field = "output" if result.get("output") else "test"   # trim the run output first, then the test text
+    while len(packed) > SEALED_BYTES and (result.get("output") or result.get("helper") or result.get("test")):
+        # trim the run output first, then the helper, then the test text
+        field = next(k for k in ("output", "helper", "test") if result.get(k))
         result = {**result, field: result[field][:len(result[field]) // 2]}
         packed = gzip.compress(json.dumps(result, separators=(",", ":")).encode(), 9)
     if len(packed) > SEALED_BYTES:
@@ -1076,8 +1108,11 @@ def unseal(sealed: str, key: str, crypt: Callable[[list[str], bytes, str], bytes
         raise ValueError("a validation result is not a result document")
     if holds_key(json.dumps(data).encode(), key):
         raise ValueError("a validation result holds the Claude token; it is not filed. Rotate the token.")
-    return {k: (str(data.get(k) or "") if k != "verdict" else data[k])
-            for k in ("fp", "verdict", "reason", "test_path", "test", "run_command", "output", "notes")}
+    out = {k: (str(data.get(k) or "") if k != "verdict" else data[k])
+           for k in ("fp", "verdict", "reason", "test_path", "test", "run_command", "output", "notes")}
+    if data.get("helper_path"):   # the one helper beside the test, shown in the issue with it
+        out.update({k: str(data.get(k) or "") for k in ("helper_path", "helper", "helper_size")})
+    return out
 
 
 def unseal_all(sealed: list[str], key: str, crypt: Callable[[list[str], bytes, str], bytes] = _openssl, *,

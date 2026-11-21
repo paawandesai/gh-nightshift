@@ -167,6 +167,9 @@ Fixes from the second gap test of the validation harness (R2-01 to R2-05):
 - A cargo `assert!(cond, "message")` failure counts as an assertion failure: when the message is not
   `assertion ...`, the panic's location must be a line of the repro test that starts an `assert!`,
   `assert_eq!`, `assert_ne!` or `debug_assert*!` call (R2-05).
+- The one helper file a repro test may have beside it stays allowed, and a filed finding now shows its full
+  contents under the test (cut at 12,000 characters, with a note saying so; a symlink is named by its target and
+  not followed). A helper could be a module the app imports when it exists, so a person reads it with the test.
 
 ## [0.1.4] - 2026-11-10
 

@@ -689,6 +689,56 @@ class R202UntrackedFilesTests(Round2Case):
         self.assertLess(time.monotonic() - start, 30)
 
 
+class HelperShownTests(Round2Case):
+    """The one helper beside the test stays allowed, and its full contents go into the filed issue (Paawan's call)."""
+
+    def test_the_helper_travels_with_the_result_and_is_shown_in_the_issue(self):
+        base = self.take_baseline()
+        (self.root / "tests/test_repro.py").write_text("from tests.local_settings import X\ndef test_x():\n    assert X\n")
+        (self.root / "tests/local_settings.py").write_text("X = False   # imported by the app when present\n")
+        r = self.verify(base)
+        self.assertEqual(r["verdict"], "validated", r["reason"])
+        self.assertEqual((r["helper_path"], r["helper_size"]), ("tests/local_settings.py", "47"))
+        self.assertIn("imported by the app when present", r["helper"])
+        back = validate.unseal(validate.seal(r, KEY, plain), KEY, plain)
+        self.assertEqual(back["helper"], r["helper"])
+        text = "\n".join(redteam._repro(back))
+        self.assertIn("Helper file the model added next to the test, `tests/local_settings.py`", text)
+        self.assertIn("X = False   # imported by the app when present", text)
+        self.assertLess(text.index("Repro test"), text.index("Helper file"))
+
+    def test_no_helper_means_no_helper_section(self):
+        (self.root / "tests/test_repro.py").write_text("def test_x():\n    assert False\n")
+        r = self.verify(self.take_baseline())
+        self.assertEqual(r["helper_path"], "")
+        back = validate.unseal(validate.seal(r, KEY, plain), KEY, plain)
+        self.assertNotIn("helper_path", back)
+        self.assertNotIn("Helper file", "\n".join(redteam._repro(back)))
+
+    def test_a_symlinked_helper_is_named_not_followed_and_a_long_one_says_it_was_cut(self):
+        (self.root / "tests/test_repro.py").write_text("def test_x():\n    assert False\n")
+        (self.root / "tests/data.py").symlink_to("/etc/hostname")
+        r = self.verify(None)
+        self.assertEqual(r["helper"], "(a symlink to /etc/hostname)")
+        (self.root / "tests/data.py").unlink()
+        (self.root / "tests/data.py").write_text("x" * (validate.MAX_TEST + 500))
+        r = self.verify(None)
+        self.assertEqual((len(r["helper"]), r["helper_size"]), (validate.MAX_TEST, str(validate.MAX_TEST + 500)))
+        self.assertIn(f"(first {validate.MAX_TEST} of {validate.MAX_TEST + 500} characters)", "\n".join(redteam._repro(r)))
+
+    def test_sealing_trims_the_helper_before_the_test(self):
+        import random
+
+        rnd = random.Random(1)
+        noise = "".join(rnd.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(30_000))
+        r = {"fp": "0123456789abcdef", "verdict": "validated", "reason": "", "test_path": "tests/t.py",
+             "test": "def test(): assert False", "run_command": "", "output": "", "notes": "",
+             "helper_path": "tests/h.py", "helper": noise, "helper_size": str(len(noise))}
+        back = validate.unseal(validate.seal(r, KEY, plain), KEY, plain)
+        self.assertEqual(back["test"], r["test"])
+        self.assertLess(len(back["helper"]), len(noise))
+        self.assertIn("characters)", "\n".join(redteam._repro(back)))
+
 class R204LaneFolderTests(Round2Case):
     """R2-04: pytest and unittest run from the folder of the lane that lists the test, as `cd web && pytest` does."""
 
