@@ -6,12 +6,19 @@ app, but any workflow whose token has `checks: write` (for example a repo's CI r
 check runs as that same app, so a check run's name and app prove nothing. This module accepts a gate only when it is
 a real Actions job of a workflow run of the review caller on the same commit:
 
-    check run id -> GET actions/jobs/{id}  (a check run made through the Checks API has no job: 404)
+    check run id -> GET actions/jobs/{id}  (same name and sha; for a pass, it ran on a runner)
     job.run_id   -> GET actions/runs/{id}  (path is the review caller, event pull_request/merge_group, same sha)
 
 and only once that workflow run has completed successfully, so a check run patched to `success` while the review
-was still running (or after it failed) does not count either. With a fine-grained PAT, `GH.check_runs` already
-lists Actions jobs with their workflow run attached, so nothing more is fetched.
+was still running (or after it failed) does not count either.
+
+Seen live on ns-sandbox (2026-11-21): a check run that a workflow's GITHUB_TOKEN creates through the Checks API is
+filed under an existing Actions run on that commit (there, the CI run), and GET actions/jobs/{id} returns it as a
+job of that run, with no runner and no steps. The workflow path test rejects it when it lands in another workflow;
+the runner test and the run's own conclusion reject it if it ever lands in the review run.
+
+With a fine-grained PAT, `GH.check_runs` already lists Actions jobs with their workflow run attached, so nothing more
+is fetched.
 
 A gate that fails these tests is dropped from the list, as if it had not reported: the commit stays pending until
 the real review reports. Gate check runs only, never statuses: `rules.checks_state` already ignores those.
@@ -61,7 +68,7 @@ class GateVerifier:
             except GHError as err:
                 return f"its Actions job could not be read (HTTP {err.status}; the token needs Actions: read)"
             if not job:
-                return "it is not a GitHub Actions job (a check run created through the Checks API)"
+                return "it is not a GitHub Actions job"
             url = job.get("check_run_url") or ""
             if url and not url.endswith(f"/check-runs/{check.get('id')}"):
                 return "its Actions job belongs to another check run"
@@ -80,6 +87,8 @@ class GateVerifier:
         if run.get("head_sha") != sha:
             return f"its workflow run tested {str(run.get('head_sha'))[:12]}, not {sha[:12]}"
         if (check.get("conclusion") or "").lower() == "success":
+            if not job.get("runner_id") and not job.get("runner_name"):
+                return "it never ran on a runner (a check run created through the Checks API)"
             if (run.get("status") or "").lower() != "completed":
                 return "the review workflow run behind it has not finished yet"
             if (run.get("conclusion") or "").lower() != "success":

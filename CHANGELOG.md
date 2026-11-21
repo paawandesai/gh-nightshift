@@ -111,7 +111,7 @@ Fixes for every open item of the November security review (H1, H2, H5, M4 to M10
 - The picker, `status` and the verdict reuse after `update-branch` count a review gate only when the review
   workflow produced it: the check run must be a GitHub Actions job (`GET actions/jobs/{id}`) of a
   `night-shift-review.yml` run on the same commit, started by `pull_request` or `merge_group`, and a passing
-  gate counts only once that run has completed with `success`. A `review / verdict` check run that CI code with
+  gate counts only if its job ran on a runner and once that run has completed with `success`. A `review / verdict` check run that CI code with
   `checks: write` created through the Checks API is ignored with a warning instead of merging the PR. This costs
   two extra REST calls per open agent PR (none with a fine-grained PAT, whose jobs fallback already has the run).
 

@@ -442,10 +442,11 @@ name in `required_checks` has reported.
 - A gate also has to come from the review workflow itself. For each required gate check run the picker reads the
   Actions job behind it and that job's workflow run (two extra REST calls per PR, one more per extra gate) and
   counts the gate only when it is a job of a `.github/workflows/night-shift-review.yml` run, started by
-  `pull_request` or `merge_group`, on the same commit, and, for a passing gate, only once that run has completed
-  with `success`. A check run created through the Checks API (anything with `checks: write` can make one, as the
-  same GitHub Actions app branch protection is bound to) has no job and is ignored with a `::warning::`, so the
-  PR waits for the real review. With a fine-grained PAT the Actions jobs list already carries the workflow run, so
+  `pull_request` or `merge_group`, on the same commit, and, for a passing gate, only once the job ran on a runner
+  and that run has completed with `success`. A check run created through the Checks API (anything with
+  `checks: write` can make one, as the same GitHub Actions app branch protection is bound to) is filed by GitHub
+  as a runner-less job of some Actions run on the commit (seen live: the CI run), so it is ignored with a
+  `::warning::` and the PR waits for the real review. With a fine-grained PAT the Actions jobs list already carries the workflow run, so
   this costs nothing extra. The same test guards the verdict reuse after `update-branch`, and `status` uses it.
   It covers the picker's merges only: a person's merge button and the merge queue go by branch protection, which
   cannot tell the two apart, so keep `checks: write` out of CI.

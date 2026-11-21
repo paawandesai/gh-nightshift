@@ -31,7 +31,9 @@ class FakeGitHub:
         self.pulls: dict[int, dict] = {}
         # Check runs per commit. A gate (`review / ...`) here is served as a real job of a night-shift-review.yml run
         # on that commit (see _check_runs) unless it says "forged": True, which models a check run created through
-        # the Checks API by other code with checks: write. review_run_overrides[sha] patches that workflow run.
+        # the Checks API by other code with checks: write (no job at all). A gate with "runner_id": None models what
+        # GitHub really does with such a check run: it files it as a job, with no runner, under an Actions run.
+        # review_run_overrides[sha] patches that workflow run.
         self.check_runs: dict[str, list[dict]] = {}
         self.review_run_overrides: dict[str, dict] = {}
         self.actions_jobs: dict[int, dict] = {}   # GET actions/jobs/{id}
@@ -265,6 +267,8 @@ class FakeGitHub:
                                          **self.review_run_overrides.get(sha, {})}
             for g in gates:
                 self.actions_jobs[g["id"]] = {"id": g["id"], "run_id": run_id, "name": g["name"], "head_sha": sha,
+                                              "runner_id": g.get("runner_id", 7),
+                                              "runner_name": "GitHub Actions 7" if g.get("runner_id", 7) else None,
                                               "status": g.get("status"), "conclusion": g.get("conclusion"),
                                               "check_run_url": f"https://api.github.com/repos/{self.repo}/check-runs/{g['id']}"}
         return out

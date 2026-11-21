@@ -281,7 +281,7 @@ class Ported(unittest.TestCase):
                 if part:
                     self.f.workflow_runs.append({"id": rid, "event": event, "head_sha": "s1", "status": "completed",
                                                  "path": path, "conclusion": "success" if ok else "failure"})
-                    self.f.jobs[rid] = part
+                    self.f.jobs[rid] = [{**j, "runner_id": 7} for j in part]
 
     def test_green_pr_merges_from_actions_jobs_when_checks_are_forbidden(self):
         ready(self.f, 1), ready(self.f, 2)

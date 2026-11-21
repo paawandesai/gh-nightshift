@@ -50,7 +50,7 @@ class PickerIgnoresForgedGates(unittest.TestCase):
         self.assertFalse(self.merged())
         self.assertEqual(self.f.pulls[10]["state"], "open")
         self.assertIn("::warning::ignored a forged or unverifiable review gate `review / verdict`", out)
-        self.assertIn("not a GitHub Actions job", out)
+        self.assertIn("is not a GitHub Actions job", out)
 
     def test_forged_success_does_not_hide_a_running_review(self):
         self.f.check_runs["s1"] = [TEST_OK, FORGED_OK, {**VERDICT_OK, "status": "in_progress", "conclusion": None}]
@@ -75,6 +75,20 @@ class PickerIgnoresForgedGates(unittest.TestCase):
         result, out = self.decide()
         self.assertFalse(self.merged())
         self.assertIn("concluded `failure`", out)
+
+    def test_forged_check_filed_under_the_review_run_does_not_count(self):
+        """Seen live: GitHub files a Checks API check run as a runner-less job of an Actions run on the commit. On
+        ns-sandbox it landed in the CI run; if it lands in a finished, passing review run, the runner test stops it."""
+        self.f.check_runs["s1"] = [TEST_OK, {**VERDICT_OK, "runner_id": None}]
+        result, out = self.decide()
+        self.assertFalse(self.merged())
+        self.assertIn("never ran on a runner", out)
+
+    def test_skipped_required_gate_still_closes_without_a_runner(self):
+        """A skipped job has no runner either; the runner test is for passes only, so a skipped gate still fails."""
+        self.f.check_runs["s1"] = [TEST_OK, {**VERDICT_OK, "conclusion": "skipped", "runner_id": None}]
+        self.decide()
+        self.assertEqual(self.f.pulls[10]["state"], "closed")
 
     def test_gate_from_another_workflow_does_not_count(self):
         """A CI job `review` calling a reusable workflow with a job `verdict` is also named `review / verdict`."""
@@ -140,12 +154,12 @@ class Verifier(unittest.TestCase):
 class JobsFallback(unittest.TestCase):
     """Fine-grained PATs read Actions jobs instead of check runs; each job carries its workflow run already."""
 
-    def runs(self, path):
+    def runs(self, path, runner_id=7):
         f = FakeGitHub()
         f.forbidden.add(r"commits/[^/]+/check-runs")
         f.workflow_runs.append({"id": 501, "event": "pull_request", "head_sha": "s1", "status": "completed",
                                 "conclusion": "success", "path": path})
-        f.jobs[501] = [dict(TEST_OK), dict(VERDICT_OK)]
+        f.jobs[501] = [dict(TEST_OK), {**VERDICT_OK, "runner_id": runner_id}]
         gh = f.gh(out=io.StringIO())
         kept, dropped = GateVerifier(gh).filter(gh.check_runs("s1"), "s1", REQ)
         self.assertFalse([p for m, p, _ in f.calls if "/actions/jobs/" in p or p.endswith("/actions/runs/501")])
@@ -153,6 +167,11 @@ class JobsFallback(unittest.TestCase):
 
     def test_review_caller_job_counts(self):
         self.assertEqual(self.runs(".github/workflows/night-shift-review.yml"), (REQ, []))
+
+    def test_runner_less_job_in_the_review_run_does_not(self):
+        names, dropped = self.runs(".github/workflows/night-shift-review.yml", runner_id=None)
+        self.assertEqual(names, ["test"])
+        self.assertIn("never ran on a runner", dropped[0])
 
     def test_same_name_job_in_ci_does_not(self):
         names, dropped = self.runs(".github/workflows/ci.yml")
