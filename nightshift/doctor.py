@@ -403,6 +403,32 @@ def remote_checks(gh: GH, cfg: Config) -> list[Check]:
     if not gh.night_log(cfg.label("night_log")):
         out.append(Check(FAIL, "no open night-log issue", "run `gh nightshift setup`"))
     out += tool_checks(gh, cfg)
+    out += cross_repo_checks(gh, cfg)
+    return out
+
+
+def cross_repo_checks(gh: GH, cfg: Config) -> list[Check]:
+    """Which cross_repos can trade hand-off tickets with this one (Night Shift, same bot, listing each other)."""
+    from . import xhandoff
+
+    out = []
+    for repo in [r for r in cfg.cross_repos if r.lower() != gh.repo.lower()][:xhandoff.MAX_REPOS]:
+        try:
+            other = xhandoff.other_config(gh, repo)
+        except GHError as err:
+            out.append(Check(WARN, f"cannot read {repo}: {err}", "the PAT (or App) needs read access to cross_repos"))
+            continue
+        if other is None:
+            out.append(Check(OK, f"{repo}: not a Night Shift repo (or unreadable); dependencies only, no hand-offs"))
+        elif not cfg.bot_login or str(other.get("bot_login") or "").lower() != cfg.bot_login.lower():
+            out.append(Check(WARN, f"{repo} runs as {other.get('bot_login') or '(no bot_login)'}, this repo as "
+                                   f"{cfg.bot_login or '(no bot_login)'}: hand-off tickets are not traded",
+                             "use the same bot login (PAT or App) in both repos to trade hand-offs"))
+        elif not any(str(r).lower() == gh.repo.lower() for r in other.get("cross_repos") or []):
+            out.append(Check(WARN, f"{repo} does not list {gh.repo} in its cross_repos: hand-off tickets are not traded",
+                             f"add {gh.repo} to cross_repos in {repo} if it should send or receive hand-offs"))
+        else:
+            out.append(Check(OK, f"{repo}: trades hand-off tickets with this repo (same bot, listed both ways)"))
     return out
 
 

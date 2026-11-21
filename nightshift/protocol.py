@@ -21,6 +21,9 @@ Types
   plan          on the night-log issue after a planner run: {"mode","lane","complete","docs_sha"}; a reduce
                 run has lane "reduce" and "prs" (the merged PRs it covered, "12,15")
   decision      on an issue, replacing the attempt marker when the agent asked for a person's decision (not an attempt)
+  xhandoff      on the night-log issue after a reduce run: a ticket handed off to another repo
+                {"to": "owner/repo", "prs", "ticket": {...}} (see xhandoff.py)
+  xhandoff-in   in the body of a ticket filed from another repo's hand-off: {"src": "owner/repo#c<comment id>", "prs"}
   redteam       on the night-log issue after a red-team scan: {"sha" (the commit it reached), "base"}
   redteam-finding  in a draft security advisory's description (public repo) or a `security` issue's body (private
                 repo): {"fp" (title + file), "wk" (CWE + file, when given), "sha"}
@@ -36,7 +39,7 @@ MARKER_RE = re.compile(r"<!--\s*ns:(\{.*?\})\s*-->", re.S)
 TYPES = {"attempt", "infra", "blocked", "waiting", "need", "handoff", "note", "pr", "handoff-done",
          "handoff-data", "note-sent", "fix-attempt", "fix-infra", "plan", "budget", "digest", "roadmap",
          "take", "retry", "approval", "redteam", "redteam-finding", "redteam-skip", "redteam-shadow",
-         "decision"}
+         "decision", "xhandoff", "xhandoff-in"}
 PR_REASONS = ("verdict_passed", "verdict_failed", "security_failed", "checks_failed", "conflict", "stale", "superseded", "manual")
 
 # Markers written by the original hackathon kit; still counted so a repo can migrate mid-flight.

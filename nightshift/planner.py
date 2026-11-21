@@ -48,6 +48,9 @@ TICKET_PROPS = {
     "interface": {"type": "string"},
     "blocked_by": {"type": "array", "items": {"type": ["string", "integer"]}},
     "requirements": {"type": "array", "items": {"type": "string"}},
+    # reduce mode only: another Night Shift repo (from cross_repos) whose code should change; the ticket is
+    # handed off to it and filed there as ready (see xhandoff.py)
+    "repo": {"type": "string"},
 }
 PLAN_SCHEMA = {
     "type": "object",
@@ -97,6 +100,7 @@ class Ticket:
     interface: str = ""
     blocked_by: list = field(default_factory=list)  # draft keys (str) or existing issue numbers (int)
     requirements: list[str] = field(default_factory=list)
+    repo: str = ""  # reduce mode: hand off to this other repository instead of filing here
 
     @property
     def plain_title(self) -> str:
@@ -118,7 +122,8 @@ class Ticket:
                    lane=str(raw.get("lane") or "").strip(), wave=wave, goal=str(raw.get("goal") or "").strip(),
                    do=_items(raw.get("do")), acceptance=_items(raw.get("acceptance")),
                    files=_items(raw.get("files")), interface=str(raw.get("interface") or "").strip(),
-                   blocked_by=deps, requirements=_items(raw.get("requirements")))
+                   blocked_by=deps, requirements=_items(raw.get("requirements")),
+                   repo=str(raw.get("repo") or "").strip())
 
     @classmethod
     def from_need(cls, need: dict, lane: str, wave: int) -> Ticket:
@@ -244,9 +249,10 @@ class PlanResult:
     uncovered: list[str] = field(default_factory=list)
     notes: str = ""
     issues: list[dict] = field(default_factory=list)  # the issues just created (the list API can lag behind)
+    sent: list[str] = field(default_factory=list)  # reduce: tickets handed off to other repositories
 
     def lines(self) -> list[str]:
-        out = self.created + self.human + self.rejected
+        out = self.created + self.human + self.sent + self.rejected
         out.append("coverage: complete (every requirement is done, ticketed or deferred with a reason)"
                    if self.coverage_complete else f"coverage: incomplete ({', '.join(self.uncovered) or 'no coverage given'})")
         if self.notes:
@@ -375,10 +381,12 @@ def validate_plan(tickets: list[Ticket], cfg: Config, all_issues: list[dict],
 
 
 def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tickets: int | None = None,
-                 proposed: bool = False) -> PlanResult:
+                 proposed: bool = False, reduce_prs: str = "") -> PlanResult:
     """Validate and create a draft's tickets. `proposed` (reduce mode) files valid tickets as `proposed`, which
     no lane picks up until a person swaps the label for the ready one."""
     tickets, coverage, plan_notes = parse_plan(data)
+    cross = [t for t in tickets if t.repo]
+    tickets = [t for t in tickets if not t.repo]
     all_issues = gh.issues(state="all")
     ok, notes = validate_plan(tickets, cfg, all_issues, lane)
     cap = cfg.planner_max_tickets if max_tickets is None else max_tickets
@@ -388,6 +396,17 @@ def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tick
         notes.append(f"capped at {cap} tickets per run; {len(order) - cap} not created")
         order = order[:cap]  # a topological prefix, so every kept dependency is created first
     result = PlanResult(rejected=notes, notes=plan_notes)
+    sent_keys: set[str] = set()
+    if cross:
+        from . import xhandoff
+
+        if not reduce_prs:
+            notes += [f"rejected {t.key or t.title!r}: `repo` (a hand-off to another repository) is for reduce mode only"
+                      for t in cross]
+        else:
+            sent, why = xhandoff.send(gh, cfg, cross, cap - min(len(order), cap), reduce_prs)
+            result.sent, sent_keys = [line for line, _ in sent], {key for _, key in sent}
+            notes += why
     numbers: dict[str, int] = {}
     taken = {m.group(1) + m.group(2) for t, _ in order if (m := ANY_ID_RE.match(t.title))}
     for t, human in order:
@@ -404,7 +423,7 @@ def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tick
         line = f"created #{numbers[t.key]} [{t.lane}] w{t.wave} {t.title}"
         (result.human if human else result.created).append(line + (" (human: touches protected/contract paths)" if human else ""))
     existing_numbers = {i["number"] for i in all_issues} | set(numbers.values())
-    result.coverage_complete, result.uncovered = coverage_status(coverage, set(numbers), existing_numbers)
+    result.coverage_complete, result.uncovered = coverage_status(coverage, set(numbers) | sent_keys, existing_numbers)
     return result
 
 

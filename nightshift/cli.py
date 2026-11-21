@@ -875,7 +875,7 @@ def publish_plan_file(ctx: Ctx, path: str, lane: str, reply_to: str, reduce_prs:
         raise ConfigError(f"--prs must be comma-separated PR numbers, not {reduce_prs!r}")
     raw = Path(path).read_text(encoding="utf-8")
     result = planner.publish_plan(gh, cfg, raw, "" if reduce_prs is not None else lane,
-                                  proposed=reduce_prs is not None or outsider)
+                                  proposed=reduce_prs is not None or outsider, reduce_prs=reduce_prs or "")
     lines = [ns.defang(line) for line in result.lines()]  # titles, notes, keys come from the model
     ctx.say(*lines)
     title = "Night shift reduce" if reduce_prs is not None else "Night shift planner"

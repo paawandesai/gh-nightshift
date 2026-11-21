@@ -404,6 +404,14 @@ These are not enforced. They are listed so you can judge the risk yourself.
     writer wrote is planned from directly.
 19. **Cross-repo `Blocked by`** copies the title and `## Interface` section of an issue from another
     repository, but only from repositories listed in `cross_repos`. That text is quoted as data.
+    **Cross-repo hand-offs file ready tickets.** A reduce run in another repository can hand a ticket to this
+    one, and the picker files it as ready, not `proposed`. It is accepted only from a repo both sides list in
+    `cross_repos`, that runs with the same `bot_login`, from that login's own comment on its night log, unedited
+    (writers of the other repo can edit bot comments; an edited one is ignored). Its text was drafted by the other
+    repo's reducer from agent-written hand-offs, so a writer of the other repo, or an agent whose hand-off steered
+    that reducer, can shape a ready ticket here. The ticket still goes through this repo's planner checks
+    (protected and human-only paths make it a human ticket) and its PR through this repo's review gates. List a
+    repo in `cross_repos` only if you trust its writers that far.
 
 20. **A model that sets out to fake a validation can.** In the validate job the model has a shell on the same
     machine the harness runs on, so it could tamper with the test runner, an ignored dependency, git's own data or
