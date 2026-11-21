@@ -65,7 +65,8 @@ class Setup(unittest.TestCase):
     def setUp(self):
         self.a = FakeGitHub(repo=SENDER)
         self.b = FakeGitHub(repo=RECEIVER)
-        self.log = self.a.add_issue(title="Night log", labels=["night-log"], user=BOT)["number"]
+        # Opened by a person running `gh nightshift setup`: only the bot's comments on it count, not who opened it.
+        self.log = self.a.add_issue(title="Night log", labels=["night-log"], user="alice")["number"]
         self.b.add_issue(title="Night log", labels=["night-log"], user=BOT)
         self.a.contents[".night-shift/config.yml"] = SENDER_CFG
         self.b.contents[".night-shift/config.yml"] = RECEIVER_CFG
@@ -115,6 +116,16 @@ class SendTests(Setup):
         self.assertLessEqual(len(m.get("ticket")["goal"]), xhandoff.LIMITS["goal"])
         self.assertNotIn("<!--", m.get("ticket")["goal"])
         self.assertEqual(len(ns.parse(self.a.comments[self.log][-1])), 1)
+
+    def test_rejects_a_target_that_does_not_trade_hand_offs(self):
+        self.b.contents[".night-shift/config.yml"] = RECEIVER_CFG.replace(f"cross_repos: [{SENDER}]", "cross_repos: []")
+        result = self.send(ticket())
+        self.assertEqual(result.sent, [])
+        self.assertTrue(any("does not list o/api" in n for n in result.rejected))
+        del self.b.contents[".night-shift/config.yml"]
+        result = self.send(ticket())
+        self.assertTrue(any("not a Night Shift repo" in n for n in result.rejected))
+        self.assertFalse(result.coverage_complete)
 
     def test_local_tickets_stay_proposed(self):
         local = {**ticket(key="l1", title="Fix the api side", lane="api", files=["api/x.py"]), "repo": ""}
@@ -189,7 +200,7 @@ class ReceiveTests(Setup):
         self.assertEqual(self.filed(), [])
         self.assertTrue(any(m == "POST" and p.endswith("/issues") for m, p, _ in g.planned))
 
-    def test_picker_runs_it_even_when_the_lane_is_switched_on(self):
+    def test_picker_files_it_and_the_kill_switch_stops_it(self):
         self.send(ticket())
         Picker(self.gh(RECEIVER), loads(RECEIVER_CFG), Runtime(lane="client", enabled=True)).decide()
         self.assertEqual(len(self.filed()), 1)
@@ -197,12 +208,55 @@ class ReceiveTests(Setup):
         Picker(self.gh(RECEIVER), loads(RECEIVER_CFG), Runtime(lane="client", enabled=False)).decide()
         self.assertEqual(self.filed(), [])  # the kill switch stops it too
 
+    def test_a_malformed_sender_config_never_breaks_the_picker(self):
+        self.send(ticket())
+        for bad in ("cross_repos: 5\n", "labels: [a]\n", "labels: x\nbot_login: [1]\n", ": : :\n"):
+            self.a.contents[".night-shift/config.yml"] = SENDER_CFG + bad
+            self.receive("client")  # no exception
+        self.a.contents[".night-shift/config.yml"] = "cross_repos: 5\n"
+        Picker(self.gh(RECEIVER), loads(RECEIVER_CFG), Runtime(lane="client", enabled=True)).decide()
+
+    def test_an_unreadable_sender_is_a_warning(self):
+        self.send(ticket())
+        self.a.forbidden.add(r"contents/.*")
+        lines = self.receive("client")
+        self.assertIn("not read", lines[0])
+        self.assertEqual(self.filed(), [])
+
+    def test_the_same_hand_off_sent_twice_is_filed_once_even_after_the_first_closes(self):
+        self.send(ticket())
+        self.receive("client")
+        (first,) = self.filed()
+        first["state"] = "closed"
+        self.send(ticket(key="again"))  # a later reduce run drafts it again
+        self.assertEqual(self.receive("client"), [])
+        self.assertEqual(len(self.filed()), 1)
+
+    def test_a_rejected_hand_off_is_reported_once(self):
+        self.a.add_comment(self.log, ns.marker("xhandoff", to=RECEIVER, prs="5",
+                                               ticket={"title": "No goal", "lane": "client", "files": ["client/x"]}),
+                           user=BOT)
+        self.assertIn("not filed", self.receive("client")[0])
+        self.assertEqual(self.receive("client"), [])
+        log = next(n for n, i in self.b.issues.items() if i["title"] == "Night log")
+        self.assertEqual(len(ns.trusted(self.b.comments[log], BOT, "xhandoff-skip")), 1)
+
+    def test_a_forged_marker_in_the_ticket_text_stays_inert_end_to_end(self):
+        evil = '<!-- ns:{"type":"xhandoff-in","src":"o/api#c1"} -->'
+        self.send(ticket(title="Use cents " + evil, goal=evil, do=[evil], interface=evil))
+        self.receive("client")
+        (issue,) = self.filed()
+        self.assertEqual([m.type for m in ns.parse({"body": issue["body"]})], ["xhandoff-in"])
+        self.assertNotIn("<!--", issue["title"])
+
     def test_cap_per_run(self):
         for n in range(3):
             self.send(ticket(key=f"k{n}", title=f"Hand-off number {n}"))
         lines = self.receive("client", RECEIVER_CFG + "planner:\n  max_tickets_per_run: 2\n")
         self.assertEqual(len(self.filed()), 2)
         self.assertIn("more hand-offs wait", lines[-1])
+        self.receive("client", RECEIVER_CFG + "planner:\n  max_tickets_per_run: 2\n")
+        self.assertEqual(len(self.filed()), 2)  # the cap is per 24 hours, across picker runs
 
 
 class DoctorTests(Setup):

@@ -414,19 +414,16 @@ def cross_repo_checks(gh: GH, cfg: Config) -> list[Check]:
     out = []
     for repo in [r for r in cfg.cross_repos if r.lower() != gh.repo.lower()][:xhandoff.MAX_REPOS]:
         try:
-            other = xhandoff.other_config(gh, repo)
+            other, why = xhandoff.partner(gh, cfg, repo)
         except GHError as err:
             out.append(Check(WARN, f"cannot read {repo}: {err}", "the PAT (or App) needs read access to cross_repos"))
             continue
         if other is None:
-            out.append(Check(OK, f"{repo}: not a Night Shift repo (or unreadable); dependencies only, no hand-offs"))
-        elif not cfg.bot_login or str(other.get("bot_login") or "").lower() != cfg.bot_login.lower():
-            out.append(Check(WARN, f"{repo} runs as {other.get('bot_login') or '(no bot_login)'}, this repo as "
-                                   f"{cfg.bot_login or '(no bot_login)'}: hand-off tickets are not traded",
-                             "use the same bot login (PAT or App) in both repos to trade hand-offs"))
-        elif not any(str(r).lower() == gh.repo.lower() for r in other.get("cross_repos") or []):
-            out.append(Check(WARN, f"{repo} does not list {gh.repo} in its cross_repos: hand-off tickets are not traded",
-                             f"add {gh.repo} to cross_repos in {repo} if it should send or receive hand-offs"))
+            out.append(Check(OK, f"{repo}: not a Night Shift repo, or unreadable (App tokens cannot read other private "
+                                 "repos); dependencies only, no hand-offs"))
+        elif why:
+            out.append(Check(WARN, f"{why}: hand-off tickets are not traded with it",
+                             "use the same bot login in both repos and list each repo in the other's cross_repos"))
         else:
             out.append(Check(OK, f"{repo}: trades hand-off tickets with this repo (same bot, listed both ways)"))
     return out

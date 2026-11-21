@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import hashlib
 
 from . import protocol as ns
 from . import yamlish
@@ -66,6 +67,11 @@ def send(gh: GH, cfg: Config, tickets: list, cap: int, prs: str) -> tuple[list[t
             why.append("a hand-off cannot depend on tickets (the other repository cannot see them)")
         if not log:
             why.append("there is no open night-log issue to post the hand-off on; run `gh nightshift setup`")
+        if not why:
+            try:
+                why += [w for w in [partner(gh, cfg, allowed[t.repo.lower()])[1]] if w]
+            except GHError as err:
+                why.append(f"cannot read {t.repo}: {err}")
         if not why and len(sent) >= cap:
             why.append(f"over the cap of {cap} tickets this run")
         if why:
@@ -80,13 +86,16 @@ def send(gh: GH, cfg: Config, tickets: list, cap: int, prs: str) -> tuple[list[t
             f"{repo}'s night shift files it as a ready ticket if it lists this repository in its `cross_repos` and "
             "runs with the same bot login. Do not edit this comment: an edited hand-off is ignored."])
         gh.comment(log, body)
-        sent.append((f"handed off to {repo}: {data['title']}", t.key))
+        sent.append((f"handed off to {repo}: {data['title']}", t.key or ""))
     return sent, notes
 
 
-# --- receiving side (picker) ---------------------------------------------------------------------------
+# --- partners ------------------------------------------------------------------------------------------
 
 def other_config(gh: GH, repo: str) -> dict | None:
+    """The other repo's Night Shift config, reduced to what hand-offs need and type-checked (the other repo's
+    writers control it, so a malformed file must never break this repo's picker). None: not a Night Shift repo
+    (or unreadable)."""
     data = gh.get_or_none(f"repos/{repo}/contents/{CONFIG_PATH}")
     if not isinstance(data, dict) or not data.get("content"):
         return None
@@ -94,8 +103,28 @@ def other_config(gh: GH, repo: str) -> dict | None:
         parsed = yamlish.loads(base64.b64decode(data["content"]).decode("utf-8"))
     except (ValueError, UnicodeDecodeError, yamlish.YAMLError):
         return None
-    return parsed if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        return None
+    labels = parsed.get("labels") if isinstance(parsed.get("labels"), dict) else {}
+    repos = parsed.get("cross_repos") if isinstance(parsed.get("cross_repos"), list) else []
+    return {"bot_login": str(parsed.get("bot_login") or "") if isinstance(parsed.get("bot_login"), str) else "",
+            "cross_repos": [r for r in repos if isinstance(r, str)],
+            "night_log": str(labels.get("night_log") or DEFAULT_LABELS["night_log"])}
 
+
+def partner(gh: GH, cfg: Config, repo: str) -> tuple[dict | None, str]:
+    """(its config, '') when `repo` trades hand-offs with this one, else (None or its config, why not)."""
+    other = other_config(gh, repo)
+    if other is None:
+        return None, f"{repo} is not a Night Shift repo, or this token cannot read it"
+    if not cfg.bot_login or not _same(other["bot_login"], cfg.bot_login):
+        return other, f"{repo} runs as {other['bot_login'] or '(no bot_login)'}, not {cfg.bot_login or '(unset)'}"
+    if not any(_same(r, gh.repo) for r in other["cross_repos"]):
+        return other, f"{repo} does not list {gh.repo} in its cross_repos"
+    return other, ""
+
+
+# --- receiving side (picker) ---------------------------------------------------------------------------
 
 def resolve_lane(cfg: Config, hint: str, files: list[str]) -> str:
     """The lane that should build it here: the sender's lane name if it exists here, else the one lane owning
@@ -109,33 +138,60 @@ def resolve_lane(cfg: Config, hint: str, files: list[str]) -> str:
     return cfg.effective_fix_lane
 
 
-def received(gh: GH, issues: list[dict]) -> set[str]:
-    """Sources (`owner/repo#c<comment id>`) already filed here, from trusted `xhandoff-in` markers."""
-    found = set()
+def content_key(title: str) -> str:
+    """Same hand-off, sent twice (two reduce runs): the same key, so it is filed once even after the first closes."""
+    from .planner import norm_title
+
+    return hashlib.sha256(norm_title(title).encode()).hexdigest()[:16]
+
+
+def _issue_markers(gh: GH, issue: dict, type_: str) -> list[ns.Marker]:
+    return ns.trusted([{"id": 0, "user": issue.get("user"), "body": issue.get("body") or ""}], gh.trusted, type_)
+
+
+def received(gh: GH, issues: list[dict], skipped: list[dict] = ()) -> tuple[set[str], set[str]]:
+    """(sources, content keys) already filed here (trusted `xhandoff-in` in ticket bodies) or turned down
+    (trusted `xhandoff-skip` on this repo's night log)."""
+    srcs: set[str] = set()
+    keys: set[str] = set()
     for i in issues:
-        for m in ns.trusted([{"id": 0, "user": i.get("user"), "body": i.get("body") or ""}], gh.trusted, "xhandoff-in"):
-            found.add(str(m.get("src") or ""))
-    return found
+        for m in _issue_markers(gh, i, "xhandoff-in"):
+            srcs.add(str(m.get("src") or ""))
+            keys.add(str(m.get("key") or ""))
+    for m in ns.trusted(list(skipped), gh.trusted, "xhandoff-skip"):
+        srcs.add(str(m.get("src") or ""))
+    return srcs, keys - {""}
+
+
+def filed_since(gh: GH, issues: list[dict], since: dt.datetime) -> int:
+    """Hand-off tickets filed here since `since` (any lane): the cap is per night, not per picker run."""
+    n = 0
+    for i in issues:
+        stamp = i.get("created_at")
+        when = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else since
+        if when >= since and _issue_markers(gh, i, "xhandoff-in"):
+            n += 1
+    return n
 
 
 def incoming(gh: GH, cfg: Config, repo: str, now: dt.datetime) -> tuple[list[ns.Marker], str]:
     """(xhandoff markers addressed to this repo on `repo`'s night log, '' or why none were read)."""
-    other = other_config(gh, repo)
+    other, why = partner(gh, cfg, repo)
     if other is None:
-        return [], ""  # not a Night Shift repo (or unreadable): a plain cross-repo dependency, nothing to say
-    if not cfg.bot_login or not _same(str(other.get("bot_login") or ""), cfg.bot_login):
-        return [], f"{repo} runs as {other.get('bot_login') or '(no bot_login)'}, not {cfg.bot_login or '(unset)'}"
-    if not any(_same(str(r), gh.repo) for r in other.get("cross_repos") or []):
-        return [], f"{repo} does not list {gh.repo} in its cross_repos"
-    label = str(((other.get("labels") or {}).get("night_log")) or DEFAULT_LABELS["night_log"])
-    logs = gh.get(f"repos/{repo}/issues", {"labels": label, "state": "open", "per_page": 5}) or []
-    logs = [i for i in logs if "pull_request" not in i and ns.author(i) == cfg.bot_login]
+        return [], ""  # a plain cross-repo dependency: nothing to say
+    if why:
+        return [], why
+    # The same issue the sender posts on (gh.night_log: the first open one with the label); whoever opened it,
+    # only the bot's own comments count.
+    logs = gh.get(f"repos/{repo}/issues", {"labels": other["night_log"], "state": "open", "per_page": 1}) or []
+    logs = [i for i in logs if isinstance(i, dict) and "pull_request" not in i]
     if not logs:
-        return [], ""
+        return [], f"{repo} has no open {other['night_log']!r} issue"
     since = (now - dt.timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     comments = gh.paginate(f"repos/{repo}/issues/{logs[0]['number']}/comments", {"since": since})
     # Repo writers can edit a bot comment, and the bot never edits a hand-off: an edited one is not trusted.
-    comments = [c for c in comments if not c.get("updated_at") or c.get("updated_at") == c.get("created_at")]
+    comments = [c for c in comments if isinstance(c, dict)
+                and (not c.get("updated_at") or c.get("updated_at") == c.get("created_at"))]
     return [m for m in ns.trusted(comments, cfg.bot_login, "xhandoff") if _same(str(m.get("to") or ""), gh.repo)], ""
 
 
@@ -148,8 +204,9 @@ def receive(gh: GH, cfg: Config, lane: str, now: dt.datetime | None = None) -> l
     now = now or dt.datetime.now(dt.timezone.utc)
     lines: list[str] = []
     issues: list[dict] | None = None
-    done: set[str] = set()
-    filed = 0
+    log: int | None = None
+    srcs: set[str] = set()
+    keys: set[str] = set()
     for repo in [r for r in cfg.cross_repos if not _same(r, gh.repo)][:MAX_REPOS]:
         try:
             markers, why = incoming(gh, cfg, repo, now)
@@ -162,40 +219,48 @@ def receive(gh: GH, cfg: Config, lane: str, now: dt.datetime | None = None) -> l
             continue
         for m in markers:
             raw = m.get("ticket") if isinstance(m.get("ticket"), dict) else {}
+            files = [str(f) for f in raw.get("files") or [] if isinstance(f, str)][:20] \
+                if isinstance(raw.get("files"), list) else []
             src = f"{repo}#c{m.comment_id}"
-            target = resolve_lane(cfg, str(raw.get("lane") or ""), [str(f) for f in raw.get("files") or []][:20])
-            if target != lane:
+            if resolve_lane(cfg, str(raw.get("lane") or ""), files) != lane:
                 continue
             if issues is None:
                 issues = gh.issues(state="all")
-                done = received(gh, issues)
-            if src in done:
+                log = gh.night_log(cfg.label("night_log"))
+                srcs, keys = received(gh, issues, gh.comments(log) if log else [])
+            t = planner.Ticket.from_dict({**raw, "files": files, "key": "xhandoff", "lane": lane, "blocked_by": [],
+                                          "repo": ""})
+            key = content_key(t.title)
+            if src in srcs or key in keys:
                 continue
-            if filed >= cfg.planner_max_tickets:
-                lines.append(f"more hand-offs wait: at most {cfg.planner_max_tickets} filed per run")
+            if filed_since(gh, issues, now - dt.timedelta(hours=24)) >= cfg.planner_max_tickets:
+                lines.append(f"more hand-offs wait: at most {cfg.planner_max_tickets} filed per 24 hours")
                 return lines
-            t = planner.Ticket.from_dict({**raw, "key": "xhandoff", "lane": lane, "blocked_by": [], "repo": ""})
             ok, notes = planner.validate_plan([t], cfg, issues)
             if not ok:
-                lines.append(f"::warning::hand-off {src} not filed: {'; '.join(notes)}")
-                done.add(src)  # warn once per run; it stays unfiled until the sender sends a fixed one
+                why = "; ".join(notes)
+                lines.append(f"::warning::hand-off {src} not filed: {why}")
+                srcs.add(src)
+                if log:  # recorded, so it is reported once, not on every run until it ages out
+                    gh.comment(log, f"{ns.marker('xhandoff-skip', src=src)}\nNight shift: hand-off {src} was not "
+                                    f"filed: {ns.defang(ns.one_line(why, 600))}")
                 continue
             t, human = ok[0]
             if not planner.ANY_ID_RE.match(t.title):
                 t.title = f"{planner.next_id(issues, cfg.id_prefix(lane))} {t.title}"
-            prs = str(m.get("prs") or "")
+            prs = ",".join(p for p in str(m.get("prs") or "").split(",") if p.strip().isdigit())
             body = planner.render(t, {}) + "\n" + "\n".join([
                 f"Handed off from {repo} by its reduce pass over PR(s) "
-                f"{', '.join(repo + '#' + p for p in prs.split(',') if p.strip().isdigit()) or '(not given)'}: "
+                f"{', '.join(repo + '#' + p for p in prs.split(',') if p) or '(not given)'}: "
                 "its code changed in a way this repository has to follow.",
-                ns.marker("xhandoff-in", src=src, prs=prs)])
+                ns.marker("xhandoff-in", src=src, prs=prs, key=key)])
             labels = [f"lane:{lane}", f"wave:{t.wave}", cfg.label("human") if human else cfg.ready_label]
             created = gh.create_issue(t.title, body, labels)
             issues.append({**(created if isinstance(created, dict) else {}), "title": t.title, "body": body,
-                           "state": "open", "user": {"login": gh.login}, "labels": [{"name": x} for x in labels]})
-            done.add(src)
-            filed += 1
+                           "state": "open", "user": {"login": gh.login}, "labels": [{"name": x} for x in labels],
+                           "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")})
+            srcs.add(src)
+            keys.add(key)
             lines.append(f"filed hand-off from {repo} as #{(created or {}).get('number', 0)} [{lane}] {t.title}"
                          + (" (human: touches protected/contract paths)" if human else ""))
     return lines
-

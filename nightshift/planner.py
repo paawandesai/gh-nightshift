@@ -405,7 +405,7 @@ def publish_plan(gh: GH, cfg: Config, data: dict | str, lane: str = "", max_tick
                       for t in cross]
         else:
             sent, why = xhandoff.send(gh, cfg, cross, cap - min(len(order), cap), reduce_prs)
-            result.sent, sent_keys = [line for line, _ in sent], {key for _, key in sent}
+            result.sent, sent_keys = [line for line, _ in sent], {key for _, key in sent if key}
             notes += why
     numbers: dict[str, int] = {}
     taken = {m.group(1) + m.group(2) for t, _ in order if (m := ANY_ID_RE.match(t.title))}

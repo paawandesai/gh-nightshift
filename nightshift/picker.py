@@ -224,8 +224,8 @@ class Picker:
 
         try:
             return xhandoff.receive(self.gh, self.cfg, self.lane.name, self.now)
-        except GHError as err:
-            return [f"::warning::cross-repo hand-offs not read: {err}"]
+        except Exception as err:  # another repo's data must never stop this lane from picking  # noqa: BLE001
+            return [f"::warning::cross-repo hand-offs not read: {type(err).__name__}: {err}"]
 
     # --- 3. lane busy ------------------------------------------------------------------
     def agent_prs(self) -> list[dict]:

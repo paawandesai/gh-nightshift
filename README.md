@@ -518,7 +518,10 @@ only when:
 - the ticket passes the receiving repo's own checks (lanes, protected and human-only paths), like any planner
   ticket. The receiving repo's review gates then judge the PR that builds it.
 
-`gh nightshift doctor` lists which `cross_repos` trade hand-offs and why the others do not. The receiving side
+The sending side checks the target trades hand-offs before it posts one. The receiving side files at most
+`planner.max_tickets_per_run` hand-offs per 24 hours, files the same hand-off (same title) once even if it is sent
+again, reports a hand-off that fails its checks once on its own night log, and reads hand-offs posted in the last
+14 days. `gh nightshift doctor` lists which `cross_repos` trade hand-offs and why the others do not. The receiving side
 needs read access to the sending repo (a PAT that covers both; App tokens are minted for one repo, so App mode
 cannot read other private repos yet).
 
