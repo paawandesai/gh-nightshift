@@ -493,7 +493,8 @@ def cmd_rules(ctx: Ctx) -> int:
         ctx.say(str(err))
         return 2
     hits = review_rules.scan(rules, ctx.root, changed)
-    ctx.say(f"{len(rules)} rule(s) in {review_rules.RULES_PATH}, {len(hits)} hit(s) in {ctx.args.base}...HEAD", "")
+    org = sum(r.org for r in rules)
+    ctx.say(f"{len(rules)} rule(s) ({org} from the org), {len(hits)} hit(s) in {ctx.args.base}...HEAD", "")
     ctx.out.write(review_rules.render(hits, review_rules.MAX_HITS))
     return 0
 
@@ -534,11 +535,9 @@ def cmd_redteam(ctx: Ctx) -> int:
             ctx.say(f"skip: {sc.skip}")
             write_outputs(a.github_output, {"run": "false"})
             return 0
-        try:
-            rules = review_rules.load(ctx.root)
-        except review_rules.RulesError as err:
-            ctx.say(f"::warning::{review_rules.RULES_PATH} is invalid, scanning without it: {err}")
-            rules = []
+        rules, err = review_rules.load_lenient(ctx.root)
+        if err:
+            ctx.say(f"::warning::review rules are invalid: {err}")
         text, listed = redteam.context(gh, cfg, git, Path(ctx.root), sc, rules)
         out = Path(a.out_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -733,11 +732,9 @@ def plan_context(ctx: Ctx, mode: str, docs: list[str] | None, lane: str, out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     from . import review_rules
 
-    try:
-        rules = review_rules.load(ctx.root)
-    except (review_rules.RulesError, OSError, UnicodeDecodeError) as err:
-        ctx.say(f"::warning::{review_rules.RULES_PATH} is invalid, planning without it: {err}")
-        rules = []
+    rules, err = review_rules.load_lenient(ctx.root)
+    if err:
+        ctx.say(f"::warning::review rules are invalid: {err}")
     (out_dir / "context.md").write_text(planner.context(ctx.gh, cfg, mode, docs, lane, request, rules),
                                         encoding="utf-8")
     (out_dir / "prompt.md").write_text(prompts.render("planner", {
@@ -1028,15 +1025,52 @@ def cmd_config(ctx: Ctx) -> int:
     text = base64.b64decode(data["content"]).decode("utf-8")
     header = (f"# Copied from {cfg.extends}:{CONFIG_PATH} by `gh nightshift config pull`; do not edit here.\n"
               f"# Only shared settings are used (models, limits, protected_paths, required_checks, timezone, risk,\n"
-              f"# digest, planner), and only to add checks; lanes, labels, merge mode, tool_ref, logins, auth and\n"
-              f"# secret names stay in config.yml.\n")
+              f"# digest, planner, security, reduce), and only to add checks; lanes, labels, merge mode, tool_ref,\n"
+              f"# logins, auth and secret names stay in config.yml.\n")
     loads((ctx.root / CONFIG_PATH).read_text(encoding="utf-8"), text)  # the merged result must be valid
+    from . import review_rules, yamlish
+
+    where = f"{cfg.extends}:{review_rules.RULES_PATH}"
+    rules = ctx.gh.get_or_none(f"repos/{cfg.extends}/contents/{review_rules.RULES_PATH}")
+    rules_text = None
+    if rules is not None:
+        # Only a 404 means "the org has no rules". An empty file, a file over 1 MB (the contents API leaves
+        # `content` empty) or a folder is an error, so a pull never silently drops the org's rules.
+        if not isinstance(rules, dict) or not rules.get("content"):
+            raise ConfigError(f"{where} is empty, too large or not a file; fix it in {cfg.extends}")
+        rules_text = base64.b64decode(rules["content"]).decode("utf-8")
+    notes: list[str] = []
+    if rules_text is not None:
+        try:
+            org = review_rules.parse(yamlish.loads(rules_text), where)
+            # Only the repo's own file: the existing org copy is what this pull replaces.
+            notes = review_rules.merge(org, review_rules.load_file(ctx.root, review_rules.RULES_PATH))[1]
+        except yamlish.YAMLError as err:
+            raise ConfigError(f"{where}: {err}") from err
+        except review_rules.RulesError as err:
+            raise ConfigError(str(err)) from err
     target = ctx.root / BASE_PATH
+    rules_target = ctx.root / review_rules.BASE_RULES_PATH
     if ctx.gh.dry_run:
         ctx.say(f"[dry-run] would write {BASE_PATH} from {cfg.extends}")
+        if rules_text is not None:
+            ctx.say(f"[dry-run] would write {review_rules.BASE_RULES_PATH} from {cfg.extends}")
+        elif rules_target.is_file():
+            ctx.say(f"[dry-run] would remove {review_rules.BASE_RULES_PATH} ({cfg.extends} has no review rules)")
         return 0
     target.write_text(header + text, encoding="utf-8")
     ctx.say(f"wrote {BASE_PATH} from {cfg.extends}; commit it so the workflows use it")
+    if rules_text is not None:
+        rules_target.write_text(
+            f"# Copied from {cfg.extends}:{review_rules.RULES_PATH} by `gh nightshift config pull`; do not edit here.\n"
+            f"# The repo's {review_rules.RULES_PATH} adds to these rules; it cannot drop or change a security rule.\n"
+            + rules_text, encoding="utf-8")
+        ctx.say(f"wrote {review_rules.BASE_RULES_PATH} from {cfg.extends}; commit it too")
+    elif rules_target.is_file():
+        rules_target.unlink()
+        ctx.say(f"removed {review_rules.BASE_RULES_PATH}: {cfg.extends} has no review rules")
+    for note in notes:
+        ctx.say(f"warning: {note}")
     return 0
 
 

@@ -522,7 +522,7 @@ BASE_PATH = ".night-shift/base.yml"  # written by `gh nightshift config pull` fr
 # Labels, merge mode and tool_ref are left out: each could switch a safety check off (a renamed `human` label
 # makes taken tickets pickable, queue mode skips risk tiers, tool_ref picks the code that runs with the PAT).
 INHERITABLE = {"models", "limits", "protected_paths", "required_checks", "timezone", "risk", "digest", "planner",
-               "security"}
+               "security", "reduce"}
 NOT_FROM_BASE = {"planner": {"claude_token_secret"}, "digest": {"webhook_secret"}, "security": {"claude_token_secret"}}
 
 
@@ -573,6 +573,11 @@ def merge_base(base: dict, local: dict) -> dict:
             out[key] = {**value, **local[key]}
         elif key not in local:
             out[key] = value
+    reduce = out.get("reduce")
+    if isinstance(reduce, dict) and (local.get("reduce") or {}).get("enabled") is not True \
+            and (out.get("planner") or {}).get("enabled") is not True:
+        # The org may turn the reduce pass on, but only where the planner it runs in is on too.
+        out["reduce"] = {k: v for k, v in reduce.items() if k != "enabled"}
     return out
 
 

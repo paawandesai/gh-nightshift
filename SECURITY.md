@@ -203,7 +203,12 @@ itself lives under `.github/`, which agents cannot change.
 
 **Review rules.** `.night-shift/review-rules.yml` is read from the base checkout, never from the PR, and sits
 under `.night-shift/`, a built-in protected path, so an agent cannot add, weaken or delete the rules that judge
-its own PR. The runner is deterministic and stdlib only and never executes PR code. It lists changed files with
+its own PR. Org rules copied by `gh nightshift config pull` live in `.night-shift/base-review-rules.yml`, under
+the same protection; every review runs them with the repo's own rules, and a local rule can never drop or change an
+org `security: true` rule (a local rule with its id is ignored). The copy is only as current as the last pull, and
+a person with write access who deletes or edits it can drop org rules; that is a repo-admin decision, not an agent
+path. The red-team and planner scans, which carry on when the rules are invalid, keep the org rules when only the
+repo's file is broken; the review gate fails closed on either. The runner is deterministic and stdlib only and never executes PR code. It lists changed files with
 `git diff --name-only -z` and reads added lines from each file's own `-U0` hunk headers, so no line of file
 content is parsed as diff syntax. Every diff runs with `--text --no-ext-diff --no-textconv
 --ignore-submodules=none --no-renames`, so a PR's `.gitattributes` or `.gitmodules` cannot mark code as binary,

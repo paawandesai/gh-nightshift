@@ -33,6 +33,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   them deterministically over the PR's added and changed lines and hands every hit to the reviewer, which must
   answer each one; an unanswered hit or a `no` fails the review. `gh nightshift rules` shows the hits for the
   current branch, and `doctor` validates the file.
+- Org review rules: `gh nightshift config pull` also copies the `extends:` repo's `.night-shift/review-rules.yml`
+  to `.night-shift/base-review-rules.yml`. Reviews run the org rules plus the repo's own. A repo can add rules
+  and replace an org rule that is not a security rule, but a local rule can never drop or change an org
+  `security: true` rule (it is ignored, with a warning from `config pull` and `doctor`).
+- `reduce` is now inherited from the org base config (`reduce.enabled` only where the planner is on).
 - The review and security gates keep a passed verdict after `update-branch` when the update only merged main
   and main touched none of the PR's files or the review inputs, so strict mode no longer pays for a second
   review on every update. `review.reuse_on_update: false` turns it off. The generated review caller now grants

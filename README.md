@@ -328,7 +328,7 @@ calls instead of making them. All commands accept `--repo OWNER/NAME` and `--roo
 | `lint` | Check ready issues against the ticket guide |
 | `rules` | Run `.night-shift/review-rules.yml` over this branch's diff and print the hits the reviewer would get (`--base origin/main`) |
 | `audit-log` | Export every agent PR: lane, issue, outcome, reason code, model, prompt version, cost (`--since`, `--format csv\|jsonl`, `--out`) |
-| `config pull` | Copy the org-wide base config from the `extends:` repo into `.night-shift/base.yml` |
+| `config pull` | Copy the org-wide base config (and review rules, if any) from the `extends:` repo into `.night-shift/base.yml` and `.night-shift/base-review-rules.yml` |
 | `audit` | Sample merged agent PRs (`--sample 25 --seed 1`), collect evidence, optionally rerun tests (`--test-cmd`), and report rates (`--report CSV`; `--label-llm CSV` pre-fills LLM labels, which are not ground truth) |
 
 ## Review rules and the security gate
@@ -509,10 +509,22 @@ Put shared settings in `your-org/.github/.night-shift/config.yml`, add `extends:
 repo's config, and run `gh nightshift config pull`. It writes `.night-shift/base.yml`; commit it. The repo's
 own config wins key by key, `protected_paths` are added together, and only shared settings are taken from the
 base: `models`, `limits`, `protected_paths`, `required_checks`, `timezone`, `risk` (only stricter: approval
-rules add up, `default: approve` and `codeowners: true` win), `digest` and `planner`. `required_checks` and
-`planner.human_paths` from the base are added to the repo's own, never replacing them. Lanes, labels, merge mode,
-`tool_ref`, `bot_login`, `trusted_logins`, `auth` and every secret name stay in the repo. Workflows read only the committed file, so they need no access to the org repo. `doctor` warns when
-`extends` is set and `base.yml` is missing.
+rules add up, `default: approve` and `codeowners: true` win), `digest`, `planner`, `security` (only stricter: the
+gate and `always` stay on if either side turns them on, paths add up) and `reduce` (the org can turn the reduce pass
+on, but only in repos where the planner is on). `required_checks` and `planner.human_paths` from the base are added
+to the repo's own, never replacing them. Lanes, labels, merge mode, `tool_ref`, `bot_login`, `trusted_logins`,
+`auth` and every secret name stay in the repo. Workflows read only the committed file, so they need no access to the
+org repo. `doctor` warns when `extends` is set and `base.yml` is missing.
+
+Org review rules work the same way. If the org repo has `.night-shift/review-rules.yml`, `config pull` copies it
+to `.night-shift/base-review-rules.yml` (and removes that copy when the org drops its rules); commit it. Every
+review runs the org rules and the repo's own rules together, and the checklist tags org rules `[org, ...]`. A repo
+can add rules and can replace an org rule that is not a security rule by reusing its id, but it can never drop or
+change an org `security: true` rule: a local rule with the same id is ignored, and `config pull` and `doctor` warn
+about it. Both files sit under `.night-shift/`, which agents can never change. The copy is only as current as the
+last pull (run it again when the org changes its rules), and deleting it drops the org rules, so review changes to
+it like any other security change. If a pull turns on `reduce`, run `gh nightshift init --regenerate` so the planner
+workflow gets its schedule.
 
 ## GitHub App (instead of a PAT)
 
