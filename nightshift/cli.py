@@ -508,7 +508,7 @@ def cmd_redteam(ctx: Ctx) -> int:
     from .review_tools import git_in
 
     a, cfg = ctx.args, ctx.cfg
-    if a.redteam_action in ("plan", "candidate", "verify", "seal"):
+    if a.redteam_action in ("plan", "candidate", "baseline", "verify", "seal"):
         return _redteam_validate(ctx)   # the scan and validate jobs: no GitHub access at all
     gh = ctx.gh
     if not gh.trusted:
@@ -622,13 +622,26 @@ def cmd_redteam(ctx: Ctx) -> int:
 def _redteam_validate(ctx: Ctx) -> int:
     """The validate job's three steps, and the scan job's plan for it. `plan`: the validate matrix, one entry per
     finding to validate with its lane's Postgres image; `candidate`: pick this matrix job's finding from the decrypted
-    scan output and write its task; `verify`: run the repro test twice and write the verdict (no secret in this step's
+    scan output and write its task; `baseline`: record the files git does not track before the model starts, with
+    their digest in a step output; `verify`: run the repro test twice and write the verdict (no secret in this step's
     environment: it runs code a model wrote); `seal`: encrypt the result for the file job. Nothing about a finding
     is printed."""
     from . import redteam, security_context, validate
 
     a, cfg = ctx.args, ctx.cfg
     out = Path(getattr(a, "out_dir", None) or ".")
+    if a.redteam_action == "baseline":
+        # R2-02: taken after lane setup and before the model starts. The digest goes to this step's output, which no
+        # later step can change; the manifest is used only when it still hashes to it.
+        taken = validate.baseline(Path(ctx.root).resolve(), a.sha or "HEAD")
+        if taken is None:
+            ctx.say("::error::the checked-out commit could not be read; no baseline was taken")
+            return 1
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "baseline.json").write_bytes(taken[0])
+        write_outputs(a.github_output, {"digest": taken[1]})
+        ctx.say(f"baseline of {len(json.loads(taken[0]))} file(s) git does not track")
+        return 0
     if a.redteam_action in ("plan", "candidate"):
         if a.findings_file == "-" and sys.stdin.isatty():
             raise ConfigError(f"redteam {a.redteam_action} reads the decrypted scan output from a pipe")
@@ -674,7 +687,11 @@ def _redteam_validate(ctx: Ctx) -> int:
         answer_file = out / "claude.json"
         answer = validate.claude_result(answer_file.read_text(encoding="utf-8", errors="replace")) \
             if answer_file.is_file() else None
-        result = validate.verify(cfg, Path(ctx.root).resolve(), f, answer, base=a.sha or "HEAD")
+        # With --baseline-digest (the workflow always passes it, empty when the baseline step failed) every file git
+        # does not track is checked against the baseline; a missing or altered baseline refuses the run.
+        untracked = None if a.baseline_digest is None else validate.load_baseline(out / "baseline.json", a.baseline_digest)
+        result = validate.verify(cfg, Path(ctx.root).resolve(), f, answer, base=a.sha or "HEAD",
+                                 untracked_baseline=untracked)
         (out / "result.json").write_text(json.dumps(result), encoding="utf-8")
         ctx.say(f"verdict: {result['verdict']}")   # the verdict alone: no title, path or output
         return 0
@@ -1339,7 +1356,7 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--prs", default="", help="(reduce) the merged PR numbers the context covered, comma-separated")
 
     s = sub.add_parser("redteam", parents=[common],
-                       help="(workflow) red-team scan: context | plan | candidate | verify | seal | publish")
+                       help="(workflow) red-team scan: context | plan | candidate | baseline | verify | seal | publish")
     rsub = s.add_subparsers(dest="redteam_action", required=True)
     c = rsub.add_parser("context", parents=[sub_common], help="decide whether to scan and write the context")
     c.add_argument("--out-dir", required=True)
@@ -1367,9 +1384,16 @@ def parser() -> argparse.ArgumentParser:
     c.add_argument("--seen-file", required=True, help="seen.json from the context job")
     c.add_argument("--out-dir", required=True)
     c.add_argument("--github-output")
+    c = rsub.add_parser("baseline", parents=[sub_common],
+                        help="(validate job) record the files git does not track before the model starts")
+    c.add_argument("--out-dir", required=True)
+    c.add_argument("--sha", default="", help="the commit the job checked out")
+    c.add_argument("--github-output")
     c = rsub.add_parser("verify", parents=[sub_common], help="(validate job) run the repro test twice and write the verdict")
     c.add_argument("--out-dir", required=True)
     c.add_argument("--sha", default="", help="the commit the job checked out; the test must be the only change from it")
+    c.add_argument("--baseline-digest", default=None,
+                   help="the baseline step's digest; files git does not track must match baseline.json, which must hash to it")
     c = rsub.add_parser("seal", parents=[sub_common], help="(validate job) encrypt the result for the file job")
     c.add_argument("--index", type=int, required=True, choices=range(3))
     c.add_argument("--out-dir", required=True)
