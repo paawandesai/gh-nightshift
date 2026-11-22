@@ -9,7 +9,7 @@ required_checks: [test, "review / verdict"]
 fix_lane: api                  # the only lane that works while main is red
 tool_ref: 7097423d839d36c0d37573bd9330581798b1b460  # v0.1.4 (init writes the release's commit; a tag can be moved)
 # environment: night-shift     # optional: the PAT or App key lives in this environment, limited to main
-# cross_repos: [acme/api]      # optional: repos a `Blocked by: owner/repo#N` may read
+# cross_repos: [acme/api]      # optional: repos a `Blocked by: owner/repo#N` may read, and that trade hand-offs
 # extends: your-org/.github     # optional org-wide base; `gh nightshift config pull` writes .night-shift/base.yml
 bot_login: night-bot            # login of the account that owns AGENT_PAT (stats and audit trust its markers)
 trusted_logins: [bob]          # other PAT logins to trust (here Bob's own PAT for the web lane)

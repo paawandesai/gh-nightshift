@@ -304,7 +304,7 @@
         "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
       },
       "uniqueItems": true,
-      "description": "Repos (owner/name) whose issues a ticket may depend on with `Blocked by: owner/repo#N`. The picker reads those issues with the PAT and copies their Interface section, so only listed repos are read. Default: none."
+      "description": "Repos (owner/name) whose issues a ticket may depend on with `Blocked by: owner/repo#N`. The picker reads those issues with the PAT and copies their Interface section, so only listed repos are read. A listed Night Shift repo run by the same bot_login that lists this repo back also trades reduce hand-off tickets with it (filed as ready on the receiving side). Default: none."
     },
     "trusted_logins": {
       "type": "array",

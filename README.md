@@ -173,7 +173,7 @@ Everything lives in `.night-shift/config.yml`. The annotated example is
 | `tool_ref` | `main` (`init` writes the installed release's commit) | Ref of gh-nightshift the workflows use: a tag, branch or 40-character commit SHA (letters, digits, `. _ / + -`). Pin a SHA; `doctor` warns about a tag (which can be moved) or a branch. |
 | `bot_login` | you | The PAT's login, for read-only commands run as someone else (`stats`, `audit`, `digest`) |
 | `trusted_logins` | `[]` | Other PAT logins to trust, when lanes use their owners' own PATs (`join --lane X` stores one) |
-| `cross_repos` | `[]` | Repos (`owner/name`) whose issues a ticket may depend on with `Blocked by: owner/repo#N` (see Cross-repo dependencies) |
+| `cross_repos` | `[]` | Repos (`owner/name`) whose issues a ticket may depend on with `Blocked by: owner/repo#N`, and that may trade reduce hand-off tickets with this one (see Cross-repo dependencies) |
 | `environment` | none | A GitHub environment for the jobs that hold the PAT or App key (see Credentials in an environment) |
 | `lanes[].budget_usd_per_night` | off | Optional cap: the lane stops picking for the night (noon to noon in `timezone`) once its night-log cost lines reach it |
 | `auth` | `mode: pat` | `mode: app`, `app_id`, `private_key_secret` (`NIGHT_SHIFT_APP_KEY`): a GitHub App instead of `AGENT_PAT` |
@@ -513,6 +513,28 @@ text from any repo its owner can see; an unlisted one is never read and the tick
 must be able to read that issue; if it cannot, the dependency counts as unmet. When it
 closes, the waiting side posts the hand-off itself (this repo's token cannot write to the other one): the
 other issue's title and `## Interface` section, quoted as data from another repository.
+
+### Cross-repo hand-offs
+
+When code merged in one repo changes something another repo consumes, the reduce pass can draft the follow-up
+ticket for that repo (a ticket with `repo: owner/name`). It is handed off, not filed locally: the sending repo
+posts it as a trusted `xhandoff` comment on its own night log, and the receiving repo's picker files it there as
+a **ready** ticket in the lane that owns it (the sender's lane name if it exists there, else the one lane owning
+every listed file, else the fix lane), once. Each repo's token writes only to its own repo. A hand-off is traded
+only when:
+
+- both repos list each other in `cross_repos`;
+- both are Night Shift repos run by the same `bot_login` (the same PAT login, or the same App), and only that
+  login's unedited comments count;
+- the ticket passes the receiving repo's own checks (lanes, protected and human-only paths), like any planner
+  ticket. The receiving repo's review gates then judge the PR that builds it.
+
+The sending side checks the target trades hand-offs before it posts one. The receiving side files at most
+`planner.max_tickets_per_run` hand-offs per 24 hours, files the same hand-off (same title) once even if it is sent
+again, reports a hand-off that fails its checks once on its own night log, and reads hand-offs posted in the last
+14 days. `gh nightshift doctor` lists which `cross_repos` trade hand-offs and why the others do not. The receiving side
+needs read access to the sending repo (a PAT that covers both; App tokens are minted for one repo, so App mode
+cannot read other private repos yet).
 
 ## Org-wide config
 

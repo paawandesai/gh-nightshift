@@ -101,7 +101,8 @@ def context(gh: GH, cfg: Config, hours: int) -> tuple[str, list[int], str]:
     # Consumers: lane tickets only (a `lane:` label takes write access), so an outsider's issue cannot force a run.
     dependents = [i for i in open_issues if lanes_of(i) and set(parse_deps(i.get("body"), gh.repo)) & new_issues]
     lanes = {lane_of[p["number"]].group(1) for p in prs}
-    if len(lanes) < 2 and not dependents:
+    targets = [r for r in cfg.cross_repos if r.lower() != gh.repo.lower()]
+    if len(lanes) < 2 and not dependents and not targets:
         return "", [], (f"only lane {next(iter(lanes))} merged and no open lane ticket depends on it: "
                         "nothing crosses a lane boundary")
     out = ["# Reduce context", "",
@@ -141,6 +142,13 @@ def context(gh: GH, cfg: Config, hours: int) -> tuple[str, list[int], str]:
             interface = section(d.get("body"), "Interface")
             if interface:
                 out += ["Its `## Interface` (what it expects to consume):", *_fenced(ns.defang(interface))]
+    if targets:
+        out += ["", "## Other Night Shift repositories (cross_repos)",
+                "A ticket with `repo` set to one of these is handed off to that repository and filed there as a ready "
+                "ticket (only if it lists this repository back and runs with the same bot). Use it only when code "
+                "merged here changed something that repository consumes, and say in `do` what changed here and what "
+                "must change there. You cannot read their code: name the contract, not their files, when unsure.",
+                *[f"- `{r}`" for r in targets]]
     out += ["", f"## At most {cfg.planner_max_tickets} tickets this run",
             f"## Protected paths (never ticket changes here): {', '.join(cfg.protected_paths)}", "",
             "## Existing open issues (do not duplicate)"]

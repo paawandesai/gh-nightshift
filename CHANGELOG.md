@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Cross-repo hand-offs: a reduce run can draft a ticket for another repo (`repo: owner/name`). It is posted on
+  this repo's night log, and the other repo's picker files it there as a ready ticket. Both repos must list
+  each other in `cross_repos` and run with the same `bot_login`, and each token still writes only to its own
+  repo. `doctor` shows which `cross_repos` trade hand-offs.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

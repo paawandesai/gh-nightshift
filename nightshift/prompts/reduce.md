@@ -13,4 +13,6 @@ For each real problem, draft one ticket that fixes it in exactly one lane (the l
 
 `coverage`: one entry per PR under "New merged PRs" (earlier PRs are context only), with requirement `PR #<n>`, status `done` when you checked its boundaries and found nothing, `ticketed` with the ticket keys when you drafted a fix, or `deferred` with a reason (for example, a product decision is needed). Put open questions for a person in `notes`.
 
-Draft at most __MAX__ tickets. Every ticket you draft is filed as `proposed`: a person reads it before any lane builds it, so be specific and show your evidence. If nothing crosses a boundary badly, return no tickets.
+Cross-repo hand-offs: if the context lists other Night Shift repositories and code merged here changed something one of them consumes (an API, an event or file format, a shared library call), draft the follow-up ticket for that repository with `repo` set to its `owner/name`, `lane` set to your best guess of its lane name (it is checked there), and `blocked_by` empty. It is handed off and filed there as a ready ticket, so state the new contract exactly and say what changed here, with file paths on this side. Count it toward coverage like any other ticket.
+
+Draft at most __MAX__ tickets. Every ticket for this repository is filed as `proposed`: a person reads it before any lane builds it, so be specific and show your evidence. If nothing crosses a boundary badly, return no tickets.

@@ -5,6 +5,8 @@ Order of checks:
   2. Hand-offs     Merged PRs of this lane that have not handed off yet post a hand-off comment on every
                    open issue that lists the merged issue in "Blocked by" (step 3a), and record
                    `verdict_passed` (add-on D). Idempotent; runs even when the lane is busy.
+                   2b: tickets other Night Shift repos (cross_repos, same bot) handed off to this lane are
+                   filed here as ready tickets (xhandoff.py).
   3. Lane busy     An open agent PR in this lane still running checks -> wait. Closed with a reason code:
                    failed review (verdict_failed), failed checks (checks_failed), conflict, stale (no
                    checks after stale_minutes), superseded (its issue was closed). In strict merge mode a
@@ -217,6 +219,15 @@ class Picker:
         extra = [{**merged, "state": "closed"}] if m and merged.get("number") else []
         roadmap.safe_update(self.gh, self.cfg, extra=extra)
         return f"PR #{num} handed off to {posted or 'nobody'}"
+
+    def receive_handoffs(self) -> list[str]:
+        """Step 2b: tickets other Night Shift repos handed off to this lane become ready tickets here."""
+        from . import xhandoff
+
+        try:
+            return xhandoff.receive(self.gh, self.cfg, self.lane.name, self.now)
+        except Exception as err:  # another repo's data must never stop this lane from picking  # noqa: BLE001
+            return [f"::warning::cross-repo hand-offs not read: {type(err).__name__}: {err}"]
 
     # --- 3. lane busy ------------------------------------------------------------------
     def agent_prs(self) -> list[dict]:
@@ -549,6 +560,8 @@ class Picker:
         if self.rt.only_lane and self.rt.only_lane != self.lane.name:
             return skip(f"manual run limited to lane {self.rt.only_lane}")
         for line in self.reconcile_merged():
+            print(line)
+        for line in self.receive_handoffs():
             print(line)
         busy = self.handle_open_prs()
         if busy:
