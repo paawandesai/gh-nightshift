@@ -11,6 +11,7 @@ from collections.abc import Callable
 from . import review_rules, security_context
 from .config import BUILTIN_PROTECTED, Config, ConfigError, load as load_config
 from .gh import GH, GHError
+from .provenance import GateVerifier
 from .rules import BRANCH_RE, path_is_protected
 from .task import DATA_AUTHORS, _fence
 
@@ -143,8 +144,11 @@ def reusable_verdict(gh: GH, git: GitRunner, base_ref: str, check: str,
     try:
         name = f"review / {check}"
         runs = [r for r in gh.check_runs(prev) if r.get("name", "") == name]
+        runs, dropped = GateVerifier(gh).filter(runs, prev, [name])
     except GHError as err:
         return "", f"could not read checks on {prev[:12]} (HTTP {err.status}; the caller needs checks: read)"
+    if not runs and dropped:
+        return "", f"the `{name}` check on the previous head {prev[:12]} did not come from the review workflow: {dropped[0]}"
     if not runs:
         return "", f"no `{name}` check on the previous head {prev[:12]}"
     if any((r.get("status") or "").lower() != "completed" or (r.get("conclusion") or "").lower() != "success"

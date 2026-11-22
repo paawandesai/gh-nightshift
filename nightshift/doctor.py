@@ -241,8 +241,10 @@ def workflow_checks(root: Path, cfg: Config) -> list[Check]:
             granted = sorted({m.group(1) or m.group(2) for m in GATE_WRITE_RE.finditer(code)})
             if granted:
                 out.append(Check(WARN, f".github/workflows/{wf.name} runs agent-written code with a token that can write "
-                                       f"{', '.join(granted)}: that code could post a passing `review / verdict` status or "
-                                       "check run, or approve its own PR",
+                                       f"{', '.join(granted)}: that code could approve its own PR, or create a passing "
+                                       "`review / verdict` check run that branch protection (and so a person's merge "
+                                       "or the merge queue) accepts; the picker ignores gates the review workflow did "
+                                       "not produce",
                                  f"in {wf.name}'s permissions blocks, grant {', '.join(GATE_WRITES)} at most `read` "
                                  "(CI needs only contents: read)"))
         if not re.search(r"\bsecrets\.(?!GITHUB_TOKEN\b)\w+", code):
