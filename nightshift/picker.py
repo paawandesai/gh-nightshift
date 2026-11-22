@@ -29,6 +29,7 @@ from . import protocol as ns
 from .config import Config
 from .commands import can_command
 from .gh import GH, GHError
+from .provenance import GateVerifier
 from .rules import (
     BRANCH_RE,
     UNRESOLVED,
@@ -86,6 +87,7 @@ class Picker:
         self._cross: dict[tuple[str, int], dict] = {}
         self._files: dict[int, list[str]] = {}
         self._unenforced: list[str] | None = None
+        self._gates: GateVerifier | None = None
         self._owner_groups: dict[int, list[set[str] | None]] = {}
 
     # --- small helpers -----------------------------------------------------------------
@@ -289,7 +291,7 @@ class Picker:
                 continue
             detail = self.gh.get(self.gh.r(f"pulls/{num}")) or pr
             conflicted = detail.get("mergeable") is False and detail.get("mergeable_state") == "dirty"
-            runs = self.gh.check_runs(sha)
+            runs = self.gate_checks(sha)
             statuses = (self.gh.get(self.gh.r(f"commits/{sha}/status")) or {}).get("statuses", [])
             state = checks_state(runs, statuses, self.cfg.required_checks)
             stale = not runs and not statuses and age_minutes(pr.get("created_at"), self.now) > self.cfg.stale_minutes
@@ -342,6 +344,16 @@ class Picker:
             # GitHub closes the linked issue a moment after the merge; picking now could re-pick it.
             busy = f"merged PR #{merged[0]}; the next run continues lane {self.lane.name}"
         return busy
+
+    def gate_checks(self, sha: str) -> list[dict]:
+        """The check runs on `sha`, without any review gate the review workflow itself did not produce: CI code with
+        `checks: write` can create a check run named `review / verdict` (provenance.py)."""
+        if self._gates is None:
+            self._gates = GateVerifier(self.gh)
+        runs, dropped = self._gates.filter(self.gh.check_runs(sha), sha, self.cfg.required_checks)
+        for line in dropped:
+            print(f"::warning::ignored a forged or unverifiable review gate {line}")
+        return runs
 
     def unenforced_checks(self) -> list[str]:
         """M7: required checks that neither main's branch protection nor a ruleset enforces. Read with Contents read

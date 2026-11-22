@@ -273,9 +273,17 @@ and none of the runner's file-command variables; Claude's step drops every `GITH
 reason: what is written to those files runs in the later seal step), and every process the model or its test
 started is stopped before the step that holds the token again to seal the result. The model does not choose the
 command that runs its test: it names a runner from a fixed list, and the harness builds the argv and runs it with
-no shell, then reads the runner's report. Before running, the harness checks with git, against the commit the job
-checked out, that no file from main was changed or deleted and nothing was added besides the test and at most one
-helper beside it. A result that
+no shell, then reads the runner's report. Before running, the harness compares every tracked file with the commit
+the job checked out, read object by object with each object's hash checked and each working file hashed by the
+tool, so neither the index (`--skip-worktree`, `--assume-unchanged`) nor filters in `.git/config` can hide a
+change. Files git does not track (ignored, excluded through `.git/info/exclude`, `node_modules`) are compared with
+a baseline the job takes after lane setup and before the model starts; the baseline's digest is a step output,
+which the model cannot change. A run is refused when a file from main was changed or deleted, a file git does not
+track changed or went away, or anything was added besides the test and at most one helper beside it. Caches a
+test run writes are allowed because the runs never read them: Python's bytecode goes to an empty
+`PYTHONPYCACHEPREFIX`, cargo builds into an empty `CARGO_TARGET_DIR`, jest gets an empty cache folder, and the
+babel, vite and vitest caches under `node_modules` are deleted first. Processes the model left running are
+stopped before the harness checks the tree. A result that
 contains the token (or its base64 form) is refused when it is sealed and again when it is opened, so a test
 file cannot carry the token into an issue. The verdict comes from the harness's two runs, never from the
 model's account of them, and the filing job reads it only from results sealed with the scan's token. The
@@ -414,13 +422,16 @@ These are not enforced. They are listed so you can judge the risk yourself.
     repo in `cross_repos` only if you trust its writers that far.
 
 20. **A model that sets out to fake a validation can.** In the validate job the model has a shell on the same
-    machine the harness runs on, so it could tamper with the test runner, an ignored dependency, git's own data or
-    the tool, or write a test that fakes its runner's report. The harness closes the cheap and the accidental paths:
+    machine the harness runs on, so it could tamper with what lies outside the checkout: the Python, node, go or
+    cargo install and their global caches, system packages, the tool's own copy in `$RUNNER_TEMP`, or the
+    machine's files. It could also write a test that fakes its runner's report, or a helper beside the test that
+    the app imports when present; the filed finding shows that helper in full under the test. Inside the checkout the harness closes the cheap and the accidental paths:
     the model never writes the command (it names a runner; the harness builds the argv and runs it without a
     shell), a missing runner or a run with no report is never `validated`, only assertion failures count (not
-    fixture errors, uncaught exceptions, panics or build errors), and a checkout that differs from the scanned
-    commit by more than the new test and one helper beside it is refused. A person should still read each repro
-    test before trusting it, and a fix that turns the same test green is the independent check.
+    fixture errors, uncaught exceptions, panics or build errors), tracked files are compared with the scanned
+    commit's own objects (not through the index or git's filters), and every file git does not track, ignored or
+    not, must match the baseline taken before the model started. A person should still read each repro test
+    before trusting it, and a fix that turns the same test green is the independent check.
 21. **Unreproduced findings are skipped by later scans.** Their fingerprints are listed on the night log with
     the titles, and a full scan tries them again, but a real bug whose repro test was badly written stays
     unfiled until someone reads that list. Critical ones are filed anyway, labelled `unconfirmed`.

@@ -15,6 +15,7 @@ from nightshift.gh import GH, GHError
 
 BOT = "night-bot"
 REPO = "o/r"
+REVIEW_WORKFLOW = ".github/workflows/night-shift-review.yml"
 
 
 def label_objs(names):
@@ -28,7 +29,17 @@ class FakeGitHub:
         self.issues: dict[int, dict] = {}
         self.comments: dict[int, list[dict]] = {}
         self.pulls: dict[int, dict] = {}
+        # Check runs per commit. A gate (`review / ...`) here is served as a real job of a night-shift-review.yml run
+        # on that commit (see _check_runs) unless it says "forged": True, which models a check run created through
+        # the Checks API by other code with checks: write (no job at all). A gate with "runner_id": None models what
+        # GitHub really does with such a check run: it files it as a job, with no runner, under an Actions run.
+        # review_run_overrides[sha] patches that workflow run.
         self.check_runs: dict[str, list[dict]] = {}
+        self.review_run_overrides: dict[str, dict] = {}
+        self.actions_jobs: dict[int, dict] = {}   # GET actions/jobs/{id}
+        self.actions_runs: dict[int, dict] = {}   # GET actions/runs/{id} (also finds workflow_runs by id)
+        self._check_ids: dict[tuple[str, int], int] = {}
+        self._review_run_ids: dict[str, int] = {}
         self.statuses: dict[str, list[dict]] = {}
         self.behind: dict[str, int] = {}
         self.update_branch_error: dict[int, tuple[int, str]] = {}
@@ -185,14 +196,16 @@ class FakeGitHub:
             (r"pulls/(\d+)", ("PATCH", self._patch_pull)),
             (r"pulls/(\d+)/merge", ("PUT", self._merge)),
             (r"pulls/(\d+)/update-branch", ("PUT", self._update_branch)),
-            (r"commits/([^/]+)/check-runs", ("GET", lambda q, b, s: self._page(q, self.check_runs.get(s, []),
-                                                                                "check_runs"))),
+            (r"commits/([^/]+)/check-runs", ("GET", lambda q, b, s: self._page(q, self._check_runs(s), "check_runs"))),
             (r"commits/([^/]+)/status", ("GET", lambda q, b, s: {"statuses": self.statuses.get(s, [])})),
             (r"compare/([^.]+)\.\.\.(.+)", ("GET", lambda q, b, base, head: {"behind_by": self.behind.get(head, 0)})),
             (r"git/refs/heads/(.+)", ("DELETE", self._delete_ref)),
             (r"actions/workflows/([^/]+)/runs", ("GET", self._runs)),
             (r"actions/runs/(\d+)/cancel", ("POST", lambda q, b, r: self.cancelled.append(int(r)))),
             (r"actions/runs/(\d+)/jobs", ("GET", lambda q, b, r: {"jobs": self.jobs.get(int(r), [])})),
+            (r"actions/jobs/(\d+)", ("GET", lambda q, b, j: copy.deepcopy(self.actions_jobs[int(j)])
+                                      if int(j) in self.actions_jobs else self._missing(f"job {j}"))),
+            (r"actions/runs/(\d+)", ("GET", lambda q, b, r: self._get_run(int(r)))),
             (r"actions/jobs/(\d+)/logs", ("GET", lambda q, b, j: self.job_logs.get(int(j), ""))),
             (r"labels", ("GET", lambda q, b: self._page(q, list(self.labels.values())))),
             (r"labels", ("POST", lambda q, b: self.labels.setdefault(b["name"], dict(b)))),
@@ -230,6 +243,41 @@ class FakeGitHub:
         per, page = int(q.get("per_page", 30)), int(q.get("page", 1))
         chunk = items[(page - 1) * per: page * per]
         return {key: chunk, "total_count": len(items)} if key else chunk
+
+    def _check_runs(self, sha):
+        """The check runs on `sha`, each with an id. Gates not marked forged get a matching Actions job and a
+        night-shift-review.yml workflow run (completed, success unless a gate failed), as GitHub Actions makes them."""
+        out, gates = [], []
+        for i, run in enumerate(self.check_runs.get(sha, [])):
+            run = copy.deepcopy(run)
+            forged = run.pop("forged", False)
+            run.setdefault("id", self._check_ids.setdefault((sha, i), next(self._ids)))
+            run.setdefault("head_sha", sha)
+            run.setdefault("app", {"slug": "github-actions", "id": 15368})
+            if run.get("name", "").startswith("review / ") and not forged:
+                gates.append(run)
+            out.append(run)
+        if gates:
+            run_id = self._review_run_ids.setdefault(sha, next(self._ids))
+            done = all((g.get("status") or "") == "completed" for g in gates)
+            ok = all((g.get("conclusion") or "") in ("success", "skipped", "neutral") for g in gates)
+            self.actions_runs[run_id] = {"id": run_id, "path": REVIEW_WORKFLOW, "event": "pull_request", "head_sha": sha,
+                                         "status": "completed" if done else "in_progress",
+                                         "conclusion": ("success" if ok else "failure") if done else None,
+                                         **self.review_run_overrides.get(sha, {})}
+            for g in gates:
+                self.actions_jobs[g["id"]] = {"id": g["id"], "run_id": run_id, "name": g["name"], "head_sha": sha,
+                                              "runner_id": g.get("runner_id", 7),
+                                              "runner_name": "GitHub Actions 7" if g.get("runner_id", 7) else None,
+                                              "status": g.get("status"), "conclusion": g.get("conclusion"),
+                                              "check_run_url": f"https://api.github.com/repos/{self.repo}/check-runs/{g['id']}"}
+        return out
+
+    def _get_run(self, run_id):
+        for run in [*self.actions_runs.values(), *self.workflow_runs]:
+            if run.get("id") == run_id:
+                return copy.deepcopy(run)
+        return self._missing(f"workflow run {run_id}")
 
     def _create_advisory(self, q, b):
         n = len(self.advisories) + 1

@@ -10,6 +10,7 @@ from .config import Config
 from .gh import GH
 from .picker import Picker, Runtime
 from .planner import ready_counts
+from .provenance import GateVerifier
 from .rules import BRANCH_RE, checks_state, label_names, lanes_of
 from .stats_math import fmt_rate
 
@@ -41,9 +42,10 @@ def status(gh: GH, cfg: Config, enabled: bool = True, log_lines: int = 10) -> st
            or (p.get("head") or {}).get("ref", "").startswith("agent/")]
     out.append("")
     out.append(f"Open agent PRs: {len(prs)}")
+    gates = GateVerifier(gh)
     for p in prs:
         sha = p["head"]["sha"]
-        runs = gh.check_runs(sha)
+        runs, _ = gates.filter(gh.check_runs(sha), sha, cfg.required_checks)
         statuses = (gh.get(gh.r(f"commits/{sha}/status")) or {}).get("statuses", [])
         out.append(f"  #{p['number']} {p.get('title', '')} [{checks_state(runs, statuses, cfg.required_checks)}]")
     stuck = [i for i in gh.issues() if label_names(i) & {cfg.label("blocked"), cfg.label("needs_human"), "waiting"}]

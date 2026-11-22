@@ -285,6 +285,12 @@ def _repro(v: dict | None) -> list[str]:
     if v.get("test"):
         out += [f"Repro test `{ns.defang(v['test_path']).replace('`', '')}`, run with "
                 f"`{ns.defang(v['run_command']).replace('`', '')}`:", *_fenced(ns.defang(v["test"])), ""]
+    if v.get("helper_path"):
+        size = int(v["helper_size"]) if str(v.get("helper_size") or "").isdigit() else len(v.get("helper") or "")
+        cut = f" (first {len(v.get('helper') or '')} of {size} characters)" if size > len(v.get("helper") or "") else ""
+        out += [f"Helper file the model added next to the test, `{ns.defang(v['helper_path']).replace('`', '')}`{cut}. "
+                "It is part of what ran: read it as carefully as the test.",
+                *_fenced(ns.defang(v.get("helper") or "(empty)")), ""]
     if v.get("output") and v["verdict"] != "not_testable":
         out += ["End of the last run's output:", *_fenced(ns.defang(v["output"])), ""]
     return out
